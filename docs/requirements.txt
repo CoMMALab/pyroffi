@@ -6,3 +6,5 @@ sphinxcontrib-video==0.4.1
 git+https://github.com/brentyi/sphinxcontrib-programoutput.git
 git+https://github.com/brentyi/ansi.git
 git+https://github.com/sphinx-contrib/googleanalytics.git
+
+snowballstemmer==2.2.0  # https://github.com/snowballstem/snowball/issues/229
