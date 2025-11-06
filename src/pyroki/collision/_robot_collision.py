@@ -499,7 +499,7 @@ class RobotCollisionSpherized:
             f"using spherical collision models."
         )
 
-        return RobotCollision(
+        return RobotCollisionSpherized(
             num_links=num_links,
             link_names=link_name_list,
             active_idx_i=active_idx_i,
@@ -603,3 +603,78 @@ class RobotCollisionSpherized:
                     continue
 
         return sphere_meshes
+
+    @jdc.jit
+    def at_config(
+        self, robot: Robot, cfg: Float[Array, "*batch actuated_count"]
+    ) -> CollGeom:
+        """
+        Returns the collision geometry transformed to the given robot configuration.
+
+        Ensures that the link transforms returned by forward kinematics are applied
+        to the corresponding collision geometries stored in this object, based on link names.
+
+        Args:
+            robot: The Robot instance containing kinematics information.
+            cfg: The robot configuration (actuated joints).
+
+        Returns:
+            The collision geometry (CollGeom) transformed to the world frame
+            according to the provided configuration.
+        """
+        # Check if the link names match - this should be true if both Robot
+        # and RobotCollision were created from the same URDF parser results.
+        assert self.link_names == robot.links.names, (
+            "Link name mismatch between RobotCollision and Robot kinematics."
+        )
+
+        Ts_link_world_wxyz_xyz = robot.forward_kinematics(cfg)
+        Ts_link_world = jaxlie.SE3(Ts_link_world_wxyz_xyz)
+
+        return self.coll.transform(Ts_link_world)
+
+    def compute_self_collision_distance(
+        self,
+        robot: Robot,
+        cfg: Float[Array, "*batch actuated_count"],
+    ) -> Float[Array, "*batch num_active_pairs"]:
+        """
+        Computes the signed distances for active self-collision pairs.
+
+        Args:
+            robot_coll: The robot's collision model with precomputed active pair indices.
+            robot: The robot's kinematic model.
+            cfg: The robot configuration (actuated joints).
+
+        Returns:
+            Signed distances for each active pair.
+            Shape: (*batch, num_active_pairs).
+            Positive distance means separation, negative means penetration.
+        """
+        return None
+
+    def compute_world_collision_distance(
+        self,
+        robot: Robot,
+        cfg: Float[Array, "*batch_cfg actuated_count"],
+        world_geom: CollGeom,  # Shape: (*batch_world, M, ...)
+    ) -> Float[Array, "*batch_combined N M"]:
+        """
+        Computes the signed distances between all robot links (N) and all world obstacles (M).
+
+        Args:
+            robot_coll: The robot's collision model.
+            robot: The robot's kinematic model.
+            cfg: The robot configuration (actuated joints).
+            world_geom: Collision geometry representing world obstacles. If representing a
+                single obstacle, it should have batch shape (). If multiple, the last axis
+                is interpreted as the collection of world objects (M).
+                The batch dimensions (*batch_world) must be broadcast-compatible with cfg's
+                batch axes (*batch_cfg).
+
+        Returns:
+            Matrix of signed distances between each robot link and each world object.
+            Shape: (*batch_combined, N, M), where N=num_links, M=num_world_objects.
+            Positive distance means separation, negative means penetration.
+        """
+        return None

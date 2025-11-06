@@ -193,6 +193,9 @@ class Sphere(CollGeom):
 
         Returns:
             Sphere: A Sphere geometry fit to the mesh.
+        
+        Author: 
+        S
         """
         if mesh.is_empty:
             # Return a degenerate sphere
@@ -206,14 +209,13 @@ class Sphere(CollGeom):
             center = jnp.array(center_np, dtype=jnp.float32)
             radius = jnp.array(radius_val, dtype=jnp.float32)
         except Exception:
-            # If trimesh’s built-in fails, use bounding box approximation
             bounds = mesh.bounds  # shape (2, 3)
             center_np = (bounds[0] + bounds[1]) / 2.0
             radius_val = 0.5 * float(np.linalg.norm(bounds[1] - bounds[0]))
             center = jnp.array(center_np, dtype=jnp.float32)
             radius = jnp.array(radius_val, dtype=jnp.float32)
+            # TODO: Test failure case by throwing exception
 
-        # Construct a Sphere using the existing helper
         return Sphere.from_center_and_radius(center=center, radius=radius)
 
 
