@@ -211,7 +211,7 @@ class Sphere(CollGeom):
         except Exception:
             bounds = mesh.bounds  # shape (2, 3)
             center_np = (bounds[0] + bounds[1]) / 2.0
-            radius_val = 0.5 * float(np.linalg.norm(bounds[1] - bounds[0]))
+            radius_val = 0.5 * float(jnp.linalg.norm(bounds[1] - bounds[0]))
             center = jnp.array(center_np, dtype=jnp.float32)
             radius = jnp.array(radius_val, dtype=jnp.float32)
             # TODO: Test failure case by throwing exception
