@@ -220,8 +220,7 @@ def heightmap_halfspace(
 def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
     """Compute signed distance between an oriented box and a sphere.
 
-    Uses the standard box SDF in the box's local frame. This yields a signed
-    distance that grows (in absolute value) as penetration increases.
+    Uses the standard box SDF in the box's local frame.
     """
     # Sphere center in box local frame
     sph_pos_w = sphere.pose.translation()
@@ -240,7 +239,6 @@ def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
 def box_capsule(box: Box, capsule: Capsule) -> Float[Array, "*batch"]:
     """
     Fast signed distance between an oriented box and a capsule.
-    No sampling. No halfspaces. O(1) work.
 
     Steps:
       1. Convert capsule segment endpoints into box-local coordinates.
