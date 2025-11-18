@@ -217,37 +217,6 @@ def heightmap_halfspace(
     assert min_dist.shape == batch_axes
     return min_dist
 
-
-# --- Box Collision Implementations ---
-
-
-def _accumulate_axis_distances(face_dists: Float[Array, "*batch 6"]) -> Float[Array, "*batch"]:
-    """Reduce six face distances to a single scalar distance.
-
-    face_dists ordering: (px, nx, py, ny, pz, nz)
-    For each axis we sum the positive parts of the two opposite-face distances
-    (i.e. how far outside the box along that axis the other object is). The
-    final distance is the Euclidean norm of the three axis contributions.
-    """
-    # positive contributions per face (separations)
-    pos = jnp.maximum(face_dists, 0.0)
-    dx = pos[..., 0] + pos[..., 1]
-    dy = pos[..., 2] + pos[..., 3]
-    dz = pos[..., 4] + pos[..., 5]
-    sep = jnp.sqrt(dx * dx + dy * dy + dz * dz)
-
-    # penetration case: if sep == 0 (no positive separation) we are inside the box
-    # Compute per-axis penetration (most negative face value per axis)
-    pen_x = jnp.minimum(face_dists[..., 0], face_dists[..., 1])
-    pen_y = jnp.minimum(face_dists[..., 2], face_dists[..., 3])
-    pen_z = jnp.minimum(face_dists[..., 4], face_dists[..., 5])
-    pen_mag = -jnp.sqrt(pen_x * pen_x + pen_y * pen_y + pen_z * pen_z)
-
-    # Choose separation when positive, otherwise penetration (negative)
-    dist = jnp.where(sep > 0.0, sep, pen_mag)
-    return dist
-
-
 def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
     """Compute signed distance between an oriented box and a sphere.
 
@@ -269,34 +238,45 @@ def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
 
 
 def box_capsule(box: Box, capsule: Capsule) -> Float[Array, "*batch"]:
-    """Compute distance between box and capsule by approximating the capsule
-    as a short series of spheres along its axis and taking the minimum.
     """
-    # Approximate capsule by sampling spheres along its axis and taking the min.
-    n_segs = 8
+    Fast signed distance between an oriented box and a capsule.
+    No sampling. No halfspaces. O(1) work.
+
+    Steps:
+      1. Convert capsule segment endpoints into box-local coordinates.
+      2. Compute closest distance from segment to AABB in that frame.
+      3. Subtract capsule radius to get capsule-box SDF.
+    """
 
     cap_pos = capsule.pose.translation()
-    cap_axis = capsule.axis
-    segment_offset = cap_axis * capsule.height[..., None] / 2
-    a = cap_pos - segment_offset
-    b = cap_pos + segment_offset
+    cap_axis = capsule.axis                     
+    half_h = capsule.height[..., None] * 0.5
 
-    t = jnp.linspace(0.0, 1.0, n_segs)
-    # centers shape: (n_segs, *batch_capsule, 3)
-    centers = a[None, ...] * (1.0 - t)[:, None, None] + b[None, ...] * t[:, None, None]
+    a_w = cap_pos - cap_axis * half_h           
+    b_w = cap_pos + cap_axis * half_h           
 
-    # radii shape: (n_segs, *batch_capsule)
-    radii = jnp.broadcast_to(capsule.radius, centers.shape[:-1])
+    a = box.pose.inverse().apply(a_w)
+    b = box.pose.inverse().apply(b_w)
 
-    # Build batched spheres
-    spheres = Sphere.from_center_and_radius(center=centers, radius=radii)
+    hl = box.half_lengths                       
 
-    # Broadcast box to spheres batch axes and compute per-sphere distances
-    box_bc = box.broadcast_to(spheres.get_batch_axes())
-    dists = box_sphere(box_bc, spheres)
-    dist = jnp.min(dists, axis=0)
-    # Remove any accidental singleton dimensions introduced by sampling
-    return jnp.squeeze(dist)
+    ab = b - a
+    ab_len2 = jnp.sum(ab * ab, axis=-1, keepdims=True)
+    t = jnp.clip(
+        jnp.sum((0.0 - a) * ab, axis=-1, keepdims=True) / (ab_len2 + 1e-12),
+        0.0, 1.0,
+    )
+    p = a + t * ab
+    q = jnp.abs(p) - hl
+
+    # Standard AABB SDF
+    outside = jnp.linalg.norm(jnp.maximum(q, 0.0), axis=-1)
+    inside = jnp.minimum(jnp.max(q, axis=-1), 0.0)
+    sdist_box = outside + inside
+
+    # Capsule SDF = box SDF - capsule radius
+    return sdist_box - capsule.radius
+
 
 
 def box_halfspace(box: Box, halfspace: HalfSpace) -> Float[Array, "*batch"]:
