@@ -443,6 +443,7 @@ class RobotCollisionSpherized:
     def from_urdf(
         urdf: yourdfpy.URDF,
         user_ignore_pairs: tuple[tuple[str, str], ...] = (),
+        srdf_path: str = None,
         ignore_immediate_adjacents: bool = True,
     ):
         """
@@ -506,12 +507,18 @@ class RobotCollisionSpherized:
         # Directly compute active pair indices
         # Weihang: Have not checked this part yet!!!
         # Should be fine, generates active_indices per links - Sai
-        active_idx_i, active_idx_j = RobotCollisionSpherized._compute_active_pair_indices(
-            link_names=link_name_list,
-            urdf=urdf,
-            user_ignore_pairs=user_ignore_pairs,
-            ignore_immediate_adjacents=ignore_immediate_adjacents,
-        )
+        if srdf_path:
+            active_idx_i, active_idx_j = RobotCollisionSpherized._compute_active_pair_indices_from_srdf(
+                link_names=link_name_list,
+                srdf_path=srdf_path,
+            )
+        else:
+            active_idx_i, active_idx_j = RobotCollisionSpherized._compute_active_pair_indices(
+                link_names=link_name_list,
+                urdf=urdf,
+                user_ignore_pairs=user_ignore_pairs,
+                ignore_immediate_adjacents=ignore_immediate_adjacents,
+            )
 
         logger.info(
             f"Created RobotCollision with {link_info.num_links} links "
@@ -556,6 +563,69 @@ class RobotCollisionSpherized:
                 mesh.apply_transform(transform)
                 coll_meshes.append(mesh)
         return coll_meshes
+
+    @staticmethod
+    def _compute_active_pair_indices_from_srdf(
+        link_names: tuple[str, ...],
+        srdf_path: str,
+    ) -> Tuple[Int[Array, " P"], Int[Array, " P"]]:
+        """
+        Computes the indices (i, j) of pairs from a srdf file where i < j and the pair should
+        be actively checked for self-collision.
+
+        Args:
+            link_names: Tuple of link names in order.
+            srdf_path: Path to the srdf file.
+
+        Returns:
+            Tuple of (active_i, active_j) index arrays.
+        """
+        from .._robot_srdf_parser import read_disabled_collisions_from_srdf
+        
+        num_links = len(link_names)
+        link_name_to_idx = {name: i for i, name in enumerate(link_names)}
+        ignore_matrix = jnp.zeros((num_links, num_links), dtype=bool)
+        
+        # Ignore self-collisions (diagonal)
+        ignore_matrix = ignore_matrix.at[
+            jnp.arange(num_links), jnp.arange(num_links)
+        ].set(True)
+
+        # Read disabled collision pairs from SRDF
+        try:
+            disabled_pairs = read_disabled_collisions_from_srdf(srdf_path)
+            
+            disabled_count = 0
+            for pair in disabled_pairs:
+                link1_name = pair['link1']
+                link2_name = pair['link2']
+                
+                # Only process if both links are in our link_names
+                if link1_name in link_name_to_idx and link2_name in link_name_to_idx:
+                    idx1 = link_name_to_idx[link1_name]
+                    idx2 = link_name_to_idx[link2_name]
+                    
+                    # Set both directions as disabled (symmetric)
+                    ignore_matrix = ignore_matrix.at[idx1, idx2].set(True)
+                    ignore_matrix = ignore_matrix.at[idx2, idx1].set(True)
+                    disabled_count += 1
+            
+            logger.info(f"Loaded {disabled_count} disabled collision pairs from SRDF")
+            
+        except FileNotFoundError:
+            logger.warning(f"SRDF file not found: {srdf_path}. Using all collision pairs.")
+        except Exception as e:
+            logger.warning(f"Error parsing SRDF file: {e}. Using all collision pairs.")
+
+        # Get all lower triangular indices (i < j)
+        idx_i, idx_j = jnp.tril_indices(num_links, k=-1)
+        
+        # Filter out ignored pairs
+        should_check = ~ignore_matrix[idx_i, idx_j]
+        active_i = idx_i[should_check]
+        active_j = idx_j[should_check]
+
+        return active_i, active_j
 
     @staticmethod
     def _compute_active_pair_indices(
