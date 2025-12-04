@@ -76,8 +76,8 @@ def make_neural_collision_checker(robot, robot_coll, spheres_batch):
         robot=robot,
         world_geom=spheres_batch,
         num_samples=10000,
-        batch_size=256,  # Smaller batch = more gradient updates per epoch
-        epochs=100,      # More epochs for better convergence
+        batch_size=1000,  # Smaller batch = more gradient updates per epoch
+        epochs=50,      # More epochs for better convergence
         learning_rate=1e-3,
     )
 
@@ -140,7 +140,7 @@ def main():
 
     # Generate data (world is fixed for both exact and neural models)
     spheres_batch = generate_spheres(100)
-    q_batch = generate_configs(joints, 500000)
+    q_batch = generate_configs(joints, 50000)
 
     # Create collision checker using exact model
     exact_check_collisions = make_collision_checker(robot, robot_coll)
@@ -153,21 +153,40 @@ def main():
     exact_dists = run_benchmark("Exact (RobotCollisionSpherized)", exact_check_collisions, q_batch, spheres_batch)
     neural_dists = run_benchmark("Neural (NeuralRobotCollisionSpherized)", neural_check_collisions, q_batch, spheres_batch)
     
-    # Compare results
+    # Clear JAX caches and force garbage collection to free GPU memory
+    print("\nClearing memory before comparison...")
+    jax.clear_caches()
+    import gc
+    gc.collect()
+    
+    # Compare results - compute metrics without storing large intermediate arrays
     print("\n=== Comparison ===")
+    
+    # Compute metrics in a memory-efficient way
     diff = neural_dists - exact_dists
-    print(f"Mean absolute error: {jnp.mean(jnp.abs(diff)):.6f}")
-    print(f"Max absolute error: {jnp.max(jnp.abs(diff)):.6f}")
-    print(f"Mean error (bias): {jnp.mean(diff):.6f}")
+    mae = float(jnp.mean(jnp.abs(diff)))
+    max_ae = float(jnp.max(jnp.abs(diff)))
+    bias = float(jnp.mean(diff))
+    del diff  # Free memory
+    gc.collect()
+    
+    print(f"Mean absolute error: {mae:.6f}")
+    print(f"Max absolute error: {max_ae:.6f}")
+    print(f"Mean error (bias): {bias:.6f}")
     
     # Check accuracy at collision boundary
     exact_in_collision = exact_dists < 0
     neural_in_collision = neural_dists < 0
     
-    true_positives = jnp.sum(exact_in_collision & neural_in_collision)
-    false_positives = jnp.sum(~exact_in_collision & neural_in_collision)
-    false_negatives = jnp.sum(exact_in_collision & ~neural_in_collision)
-    true_negatives = jnp.sum(~exact_in_collision & ~neural_in_collision)
+    # Compute metrics and convert to Python ints immediately
+    true_positives = int(jnp.sum(exact_in_collision & neural_in_collision))
+    false_positives = int(jnp.sum(~exact_in_collision & neural_in_collision))
+    false_negatives = int(jnp.sum(exact_in_collision & ~neural_in_collision))
+    true_negatives = int(jnp.sum(~exact_in_collision & ~neural_in_collision))
+    
+    # Free the boolean arrays
+    del exact_in_collision, neural_in_collision, exact_dists, neural_dists
+    gc.collect()
     
     print(f"\nCollision Detection Accuracy:")
     print(f"  True Positives: {true_positives}")
