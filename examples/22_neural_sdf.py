@@ -175,8 +175,8 @@ def main():
     print(f"Mean error (bias): {bias:.6f}")
     
     # Check accuracy at collision boundary
-    exact_in_collision = exact_dists < 0
-    neural_in_collision = neural_dists < 0
+    exact_in_collision = exact_dists < 0.05
+    neural_in_collision = neural_dists < 0.05
     
     # Compute metrics and convert to Python ints immediately
     true_positives = int(jnp.sum(exact_in_collision & neural_in_collision))
