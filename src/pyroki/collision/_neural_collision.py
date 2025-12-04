@@ -13,205 +13,14 @@ if TYPE_CHECKING:
     from ._geometry import CollGeom
 from ._robot_collision import RobotCollisionSpherized, RobotCollision
 from ._geometry import CollGeom
+from pyroki.utils import (
+    positional_encoding,
+    compute_positional_encoding_dim,
+    halton_sequence,
+    rebalance_samples,
+)
 import jaxlie
 from typing import cast
-
-
-# Icosahedron vertices for positional encoding directions (from iSDF)
-# These 20 directions provide good coverage of the unit sphere
-_ICOSAHEDRON_DIRS = jnp.array([
-    [0.8506508, 0, 0.5257311],
-    [0.809017, 0.5, 0.309017],
-    [0.5257311, 0.8506508, 0],
-    [1, 0, 0],
-    [0.809017, 0.5, -0.309017],
-    [0.8506508, 0, -0.5257311],
-    [0.309017, 0.809017, -0.5],
-    [0, 0.5257311, -0.8506508],
-    [0.5, 0.309017, -0.809017],
-    [0, 1, 0],
-    [-0.5257311, 0.8506508, 0],
-    [-0.309017, 0.809017, -0.5],
-    [0, 0.5257311, 0.8506508],
-    [-0.309017, 0.809017, 0.5],
-    [0.309017, 0.809017, 0.5],
-    [0.5, 0.309017, 0.809017],
-    [0.5, -0.309017, 0.809017],
-    [0, 0, 1],
-    [-0.5, 0.309017, 0.809017],
-    [-0.809017, 0.5, 0.309017],
-]).T  # Shape: (3, 20) for efficient matmul
-
-
-def positional_encoding(
-    x: Float[Array, "... D"],
-    min_deg: int = 0,
-    max_deg: int = 6,
-    scale: float = 1.0,
-) -> Float[Array, "... embed_dim"]:
-    """
-    Positional encoding inspired by iSDF for capturing fine geometric details.
-    
-    Projects input onto icosahedron directions and applies sinusoidal encoding
-    at multiple frequency bands. This helps the network capture high-frequency
-    spatial details that are important for accurate collision distance prediction.
-    
-    Args:
-        x: Input tensor of shape (..., D) where D should be divisible by 3
-           (typically D=7 for pose: wxyz quaternion + xyz position, or D=3 for position only).
-           For pose inputs, we apply positional encoding to 3D position components.
-        min_deg: Minimum frequency degree (default 0).
-        max_deg: Maximum frequency degree (default 6).
-        scale: Scale factor applied to input before encoding (default 1.0).
-    
-    Returns:
-        Positional encoding of shape (..., embed_dim) where 
-        embed_dim = D + 2 * num_dirs * num_freqs for the full embedding.
-    """
-    n_freqs = max_deg - min_deg + 1
-    # Frequency bands: 2^min_deg, 2^(min_deg+1), ..., 2^max_deg
-    frequency_bands = 2.0 ** jnp.linspace(min_deg, max_deg, n_freqs)
-    
-    # Scale input
-    x_scaled = x * scale
-    
-    # Get original shape for reconstruction
-    original_shape = x_scaled.shape
-    D = original_shape[-1]
-    
-    # Flatten to 2D for processing: (batch, D)
-    x_flat = x_scaled.reshape(-1, D)
-    batch_size = x_flat.shape[0]
-    
-    # For pose data (D=7: wxyz quaternion + xyz position), we apply positional encoding
-    # to the xyz position components. For other data, we handle each 3D chunk.
-    # We'll encode all dimensions by grouping them into 3D chunks.
-    
-    embeddings = [x_flat]  # Start with original features
-    
-    # Process in 3D chunks (for xyz coordinates)
-    num_3d_chunks = D // 3
-    remainder = D % 3
-    
-    for chunk_idx in range(num_3d_chunks):
-        start_idx = chunk_idx * 3
-        end_idx = start_idx + 3
-        x_chunk = x_flat[:, start_idx:end_idx]  # Shape: (batch, 3)
-        
-        # Project onto icosahedron directions: (batch, 3) @ (3, 20) -> (batch, 20)
-        proj = x_chunk @ _ICOSAHEDRON_DIRS  # Shape: (batch, 20)
-        
-        # Apply frequency bands: (batch, 20, 1) * (n_freqs,) -> (batch, 20, n_freqs)
-        proj_expanded = proj[..., None] * frequency_bands  # Shape: (batch, 20, n_freqs)
-        
-        # Flatten to (batch, 20 * n_freqs)
-        proj_flat = proj_expanded.reshape(batch_size, -1)
-        
-        # Apply sin and cos
-        sin_embed = jnp.sin(proj_flat)
-        cos_embed = jnp.cos(proj_flat)
-        
-        embeddings.extend([sin_embed, cos_embed])
-    
-    # Handle remainder dimensions (if D is not divisible by 3)
-    if remainder > 0:
-        # For remaining dimensions, use simple 1D positional encoding
-        x_remainder = x_flat[:, -remainder:]  # Shape: (batch, remainder)
-        for i in range(remainder):
-            x_dim = x_remainder[:, i:i+1]  # Shape: (batch, 1)
-            freq_embed = x_dim * frequency_bands  # Shape: (batch, n_freqs)
-            embeddings.extend([jnp.sin(freq_embed), jnp.cos(freq_embed)])
-    
-    # Concatenate all embeddings
-    embedding = jnp.concatenate(embeddings, axis=-1)
-    
-    # Reshape back to original batch dimensions
-    output_dim = embedding.shape[-1]
-    output_shape = original_shape[:-1] + (output_dim,)
-    embedding = embedding.reshape(output_shape)
-    
-    return embedding
-
-
-def compute_positional_encoding_dim(input_dim: int, min_deg: int = 0, max_deg: int = 6) -> int:
-    """
-    Compute the output dimension of positional encoding.
-    
-    Args:
-        input_dim: Input dimension D.
-        min_deg: Minimum frequency degree.
-        max_deg: Maximum frequency degree.
-    
-    Returns:
-        Output dimension after positional encoding.
-    """
-    n_freqs = max_deg - min_deg + 1
-    num_dirs = 20  # Icosahedron directions
-    num_3d_chunks = input_dim // 3
-    remainder = input_dim % 3
-    
-    # Original features + sin/cos for each 3D chunk + sin/cos for remainder
-    embed_dim = input_dim  # Original features
-    embed_dim += num_3d_chunks * 2 * num_dirs * n_freqs  # 3D chunk embeddings (sin + cos)
-    embed_dim += remainder * 2 * n_freqs  # Remainder embeddings (sin + cos)
-    
-    return embed_dim
-
-# First 50 prime numbers for Halton sequence bases
-_HALTON_PRIMES = jnp.array([
-    2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
-    73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151,
-    157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229
-])
-
-
-def _halton_sequence(num_samples: int, dim: int, skip: int = 100) -> jax.Array:
-    """
-    Generate a Halton sequence for quasi-random sampling.
-    
-    The Halton sequence provides better coverage of the sample space compared to
-    uniform random sampling, which is beneficial for diverse sample collection.
-    
-    Args:
-        num_samples: Number of samples to generate.
-        dim: Dimensionality of each sample.
-        skip: Number of initial samples to skip (improves uniformity).
-    
-    Returns:
-        JAX array of shape (num_samples, dim) with values in [0, 1].
-    """
-    if dim > len(_HALTON_PRIMES):
-        raise ValueError(f"Halton sequence dimension {dim} exceeds available primes ({len(_HALTON_PRIMES)})")
-    
-    # Generate samples using vectorized operations where possible
-    indices = jnp.arange(skip, skip + num_samples)
-    bases = _HALTON_PRIMES[:dim]
-    
-    # Compute maximum number of digits needed for the largest index
-    max_index = skip + num_samples
-    max_digits = int(jnp.ceil(jnp.log(max_index + 1) / jnp.log(2))) + 1
-    
-    def halton_for_base(base: int) -> jax.Array:
-        """Vectorized Halton sequence for a single base."""
-        # Compute radical inverse for all indices at once
-        result = jnp.zeros(num_samples)
-        f = 1.0 / base
-        current = indices.astype(jnp.float32)
-        
-        for _ in range(max_digits):
-            digit = jnp.mod(current, base)
-            result = result + f * digit
-            current = jnp.floor(current / base)
-            f = f / base
-        
-        return result
-    
-    # Stack results for all dimensions
-    samples = jnp.stack([halton_for_base(int(b)) for b in bases], axis=1)
-    
-    return samples
-
-
 
 
 @jdc.pytree_dataclass
@@ -529,7 +338,7 @@ class NeuralRobotCollision:
         
         # Generate initial Halton sequence samples (2x to have pool for filtering)
         initial_pool_size = num_samples * 2
-        halton_samples = _halton_sequence(initial_pool_size, dof)
+        halton_samples = halton_sequence(initial_pool_size, dof)
         q_pool = lower_limits + halton_samples * (upper_limits - lower_limits)
         
         # Compute distances for the pool to identify collision samples
@@ -544,143 +353,18 @@ class NeuralRobotCollision:
         compute_all_min_dists = jax.vmap(compute_min_dist)
         min_dists = compute_all_min_dists(q_pool)  # Shape: (initial_pool_size,)
         
-        # Separate samples into collision (dist <= 0) and near-collision (0 < dist < threshold)
+        # Rebalance samples to have more collision and near-collision samples
         collision_threshold = 0.1  # Samples within 10cm of collision
-        
-        is_in_collision = min_dists <= 0
-        is_near_collision = (min_dists > 0) & (min_dists < collision_threshold)
-        is_free_space = min_dists >= collision_threshold
-        
-        collision_samples = q_pool[is_in_collision]
-        near_collision_samples = q_pool[is_near_collision]
-        free_space_samples = q_pool[is_free_space]
-        
-        num_collision = collision_samples.shape[0]
-        num_near_collision = near_collision_samples.shape[0]
-        num_free = free_space_samples.shape[0]
-        
-        logger.info(f"Sample distribution from pool: collision={num_collision}, near-collision={num_near_collision}, free-space={num_free}")
-        
-        # Target distribution: 80% collision, 15% near-collision, 5% free space
-        target_collision = int(num_samples * 0.8)
-        target_near = int(num_samples * 0.15)
-        target_free = num_samples - target_collision - target_near
-        
-        # Augment collision samples by perturbing existing ones and verifying they're still in collision
-        key_augment = key_samples
-        max_augment_iterations = 10  # Limit iterations to avoid infinite loops
-        
-        if num_collision < target_collision and num_collision > 0:
-            logger.info(f"Augmenting collision samples from {num_collision} to {target_collision}...")
-            
-            samples_needed = target_collision - num_collision
-            augmented_list = []
-            iteration = 0
-            
-            while len(augmented_list) < samples_needed and iteration < max_augment_iterations:
-                iteration += 1
-                # Generate candidate perturbations
-                batch_size_aug = min(samples_needed * 2, 5000)  # Generate extras to account for filtering
-                key_augment, subk1, subk2 = jax.random.split(key_augment, 3)
-                indices = jax.random.randint(subk1, (batch_size_aug,), 0, num_collision)
-                base_samples = collision_samples[indices]
-                
-                # Add small perturbations (within 5% of joint range)
-                perturbation_scale = 0.05 * (upper_limits - lower_limits)
-                perturbations = jax.random.uniform(subk2, (batch_size_aug, dof), minval=-1, maxval=1) * perturbation_scale
-                candidates = jnp.clip(base_samples + perturbations, lower_limits, upper_limits)
-                
-                # Verify candidates are still in collision
-                candidate_dists = compute_all_min_dists(candidates)
-                valid_mask = candidate_dists <= 0
-                valid_candidates = candidates[valid_mask]
-                
-                if valid_candidates.shape[0] > 0:
-                    augmented_list.append(valid_candidates)
-                    
-                logger.debug(f"  Iteration {iteration}: {valid_candidates.shape[0]} valid collision samples generated")
-            
-            if augmented_list:
-                all_augmented = jnp.concatenate(augmented_list, axis=0)
-                # Take only what we need
-                all_augmented = all_augmented[:samples_needed]
-                collision_samples = jnp.concatenate([collision_samples, all_augmented], axis=0)
-                num_collision = collision_samples.shape[0]
-                logger.info(f"  Final collision sample count: {num_collision}")
-        
-        # Similarly augment near-collision samples with verification
-        if num_near_collision < target_near and num_near_collision > 0:
-            logger.info(f"Augmenting near-collision samples from {num_near_collision} to {target_near}...")
-            
-            samples_needed = target_near - num_near_collision
-            augmented_list = []
-            iteration = 0
-            
-            while len(augmented_list) < samples_needed and iteration < max_augment_iterations:
-                iteration += 1
-                batch_size_aug = min(samples_needed * 2, 5000)
-                key_augment, subk1, subk2 = jax.random.split(key_augment, 3)
-                indices = jax.random.randint(subk1, (batch_size_aug,), 0, num_near_collision)
-                base_samples = near_collision_samples[indices]
-                
-                perturbation_scale = 0.03 * (upper_limits - lower_limits)
-                perturbations = jax.random.uniform(subk2, (batch_size_aug, dof), minval=-1, maxval=1) * perturbation_scale
-                candidates = jnp.clip(base_samples + perturbations, lower_limits, upper_limits)
-                
-                # Verify candidates are in near-collision range
-                candidate_dists = compute_all_min_dists(candidates)
-                valid_mask = (candidate_dists > 0) & (candidate_dists < collision_threshold)
-                valid_candidates = candidates[valid_mask]
-                
-                if valid_candidates.shape[0] > 0:
-                    augmented_list.append(valid_candidates)
-            
-            if augmented_list:
-                all_augmented = jnp.concatenate(augmented_list, axis=0)
-                all_augmented = all_augmented[:samples_needed]
-                near_collision_samples = jnp.concatenate([near_collision_samples, all_augmented], axis=0)
-                num_near_collision = near_collision_samples.shape[0]
-                logger.info(f"  Final near-collision sample count: {num_near_collision}")
-        
-        # Construct final training set
-        actual_collision = min(num_collision, target_collision)
-        actual_near = min(num_near_collision, target_near)
-        actual_free = max(0, num_samples - actual_collision - actual_near)
-        actual_free = min(actual_free, num_free)  # Can't use more free samples than available
-        
-        logger.info(f"Assembling training set: collision={actual_collision}, near={actual_near}, free={actual_free}")
-        
-        # Select samples from each category
-        key_augment, subk = jax.random.split(key_augment)
-        
-        selected_collision = collision_samples[:actual_collision] if actual_collision > 0 else jnp.empty((0, dof))
-        selected_near = near_collision_samples[:actual_near] if actual_near > 0 else jnp.empty((0, dof))
-        
-        if actual_free > 0 and num_free > 0:
-            free_indices = jax.random.choice(subk, num_free, shape=(actual_free,), replace=False)
-            selected_free = free_space_samples[free_indices]
-        else:
-            selected_free = jnp.empty((0, dof))
-        
-        # Combine all samples
-        parts = [p for p in [selected_collision, selected_near, selected_free] if p.shape[0] > 0]
-        q_train = jnp.concatenate(parts, axis=0) if parts else jnp.empty((0, dof))
-        
-        # If we still need more samples, fill with random samples from the pool
-        if q_train.shape[0] < num_samples:
-            shortfall = num_samples - q_train.shape[0]
-            logger.info(f"Filling shortfall of {shortfall} samples from original pool...")
-            key_augment, subk = jax.random.split(key_augment)
-            extra_indices = jax.random.choice(subk, initial_pool_size, shape=(shortfall,), replace=True)
-            extra_samples = q_pool[extra_indices]
-            q_train = jnp.concatenate([q_train, extra_samples], axis=0)
-        
-        # Shuffle the training data
-        key_augment, subk = jax.random.split(key_augment)
-        shuffle_perm = jax.random.permutation(subk, q_train.shape[0])
-        q_train = q_train[shuffle_perm][:num_samples]  # Truncate to exact size
-        
-        logger.info(f"Final training set: {q_train.shape[0]} samples")
+        q_train = rebalance_samples(
+            samples=q_pool,
+            distances=min_dists,
+            num_samples=num_samples,
+            key=key_samples,
+            lower_limits=lower_limits,
+            upper_limits=upper_limits,
+            distance_fn=compute_all_min_dists,
+            collision_threshold=collision_threshold,
+        )
 
         # Compute link poses for all configurations via forward kinematics
         # Shape: (num_samples, num_links, 7) where 7 = wxyz (4) + xyz (3)
@@ -694,13 +378,12 @@ class NeuralRobotCollision:
         # This is important because positional encoding should operate on the
         # original spatial scale of the data, not normalized values
         if self.use_positional_encoding:
-            # Compute scale based on the spatial extent of the data
-            # For positions (xyz), we want frequencies relative to the workspace size
-            # For quaternions (wxyz), they're already in [-1, 1]
-            data_range = jnp.max(X_train_raw, axis=0) - jnp.min(X_train_raw, axis=0)
-            avg_range = jnp.mean(data_range) + 1e-8
-            # Scale so that the average range maps to roughly 2*pi for the lowest frequency
-            auto_scale = (2 * jnp.pi) / avg_range            
+            # For positional encoding, we want the input scaled so that the 
+            # lowest frequency (2^min_deg) captures the full data range,
+            # and higher frequencies capture finer details.
+            # A scale of 1.0 is typically fine when data is already in reasonable ranges.
+            # We use pi as scale so that the range [-1, 1] maps to [-pi, pi]
+            auto_scale = jnp.pi
             logger.info(f"Applying positional encoding (min_deg={self.pe_min_deg}, max_deg={self.pe_max_deg}, scale={auto_scale:.4f})...")
             X_train_pe = positional_encoding(
                 X_train_raw,

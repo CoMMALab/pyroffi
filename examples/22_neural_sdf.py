@@ -224,11 +224,6 @@ def main():
     # Create collision checker using exact model
     exact_check_collisions = make_collision_checker(robot, robot_coll)
 
-    # =====================================================================
-    # Train neural collision checker WITH positional encoding (default)
-    # Positional encoding helps capture fine geometric details near collision
-    # boundaries by embedding input coordinates at multiple frequency scales
-    # =====================================================================
     print("\n" + "="*70)
     print("Training neural collision model WITH positional encoding...")
     print("(iSDF-inspired: projects onto icosahedron directions with frequency bands)")
@@ -240,10 +235,6 @@ def main():
         pe_max_deg=6,  # 7 frequency bands: 2^0, 2^1, ..., 2^6
     )
 
-    # =====================================================================
-    # Train neural collision checker WITHOUT positional encoding
-    # This uses raw link poses as input (smaller network, but less accurate)
-    # =====================================================================
     print("\n" + "="*70)
     print("Training neural collision model WITHOUT positional encoding...")
     print("(Raw link poses as input)")
