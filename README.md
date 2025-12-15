@@ -1,4 +1,4 @@
-# `PyRoNot`: A Python Library for Robot KinematicsUsing Spherical Approximations
+# `PyRoNot`: A Python Library for Robot Kinematics Using Spherical Approximations
 
 
 [![Format Check](https://github.com/CoMMALab/pyronot/actions/workflows/formatting.yml/badge.svg)](https://github.com/CoMMALab/pyronot/actions/workflows/formatting.yml)
