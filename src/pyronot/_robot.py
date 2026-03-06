@@ -67,6 +67,7 @@ class Robot:
         self,
         cfg: Float[Array, "*batch actuated_count"],
         unroll_fk: jdc.Static[bool] = False,
+        use_cuda: jdc.Static[bool] = False,
     ) -> Float[Array, "*batch link_count 7"]:
         """Run forward kinematics on the robot's links, in the provided configuration.
 
@@ -75,6 +76,10 @@ class Robot:
 
         Args:
             cfg: The configuration of the actuated joints, in the format `(*batch actuated_count)`.
+            unroll_fk: If True, unroll the JAX fori_loop over joints (ignored when use_cuda=True).
+            use_cuda: If True, dispatch to an external CUDA kernel via the JAX FFI instead of
+                the default JAX implementation.  Requires ``_fk_cuda.so`` to be compiled first
+                (see ``src/pyronot/cuda_kernels/build_fk_cuda.sh``).
 
         Returns:
             The SE(3) transforms of the links, ordered by `self.link.names`,
@@ -82,8 +87,92 @@ class Robot:
         """
         batch_axes = cfg.shape[:-1]
         assert cfg.shape == (*batch_axes, self.joints.num_actuated_joints)
-        return self._link_poses_from_joint_poses(
-            self._forward_kinematics_joints(cfg, unroll_fk)
+
+        if use_cuda:
+            from .cuda_kernels._fk_cuda import fk_cuda
+            Ts_world_joint = fk_cuda(
+                cfg=cfg,
+                twists=self.joints.twists,
+                parent_tf=self.joints.parent_transforms,
+                parent_idx=self.joints.parent_indices,
+                act_idx=self.joints.actuated_indices,
+                mimic_mul=self.joints.mimic_multiplier,
+                mimic_off=self.joints.mimic_offset,
+                mimic_act_idx=self.joints.mimic_act_indices,
+                topo_inv=self.joints._topo_sort_inv,
+            )
+        else:
+            Ts_world_joint = self._forward_kinematics_joints(cfg, unroll_fk)
+
+        return self._link_poses_from_joint_poses(Ts_world_joint)
+
+    @jdc.jit
+    def inverse_kinematics(
+        self,
+        target_link_name: jdc.Static[str],
+        target_pose: jaxlie.SE3,
+        rng_key: Array | None = None,
+        previous_cfg: Float[Array, "n_actuated_joints"] | None = None,
+        num_seeds: jdc.Static[int] = 32,
+        coarse_max_iter: jdc.Static[int] = 20,
+        lm_max_iter: jdc.Static[int] = 40,
+        epsilon: float = 0.02,
+        nu: float = float(jnp.pi / 2),
+        lambda_init: float = 5e-3,
+        continuity_weight: float = 1e-3,
+        fixed_joint_mask: Float[Array, "n_actuated_joints"] | None = None,
+    ) -> Float[Array, "n_actuated_joints"]:
+        """Solve inverse kinematics using the HJCD-IK two-phase optimizer.
+
+        Phase 1 samples *num_seeds* configurations — the first ``top_k`` are
+        warm-started near *previous_cfg* (or the joint-range midpoint when not
+        provided) and the rest are random — then refines them via greedy
+        coordinate descent.  Phase 2 selects the best solutions and polishes
+        them with Levenberg-Marquardt.  A small *continuity_weight* penalty on
+        distance from *previous_cfg* is added to the final selection criterion
+        to stabilise the choice between equally valid IK solutions.
+
+        Args:
+            target_link_name:  Name of the link whose pose should match *target_pose*.
+            target_pose:       Desired SE(3) world pose for that link.
+            rng_key:           JAX PRNG key (defaults to PRNGKey(0) if None).
+            previous_cfg:      Previous joint configuration for warm-starting and
+                               continuity-aware selection.  Defaults to joint-range
+                               midpoint when not provided.
+            num_seeds:         Number of random seeds for the coarse phase.
+            coarse_max_iter:   Coordinate-descent iteration budget.
+            lm_max_iter:       Levenberg-Marquardt iteration budget.
+            epsilon:           Position convergence threshold [m] (20 mm).
+            nu:                Orientation convergence threshold [rad] (π/2).
+            lambda_init:       Initial LM damping factor.
+            continuity_weight: Weight on ‖q − previous_cfg‖² in best-solution
+                               selection (default 1e-3).
+
+        Returns:
+            Best joint configuration found, shape ``(n_actuated_joints,)``.
+        """
+        from .optimization_engines._hjcd_ik import hjcd_solve
+
+        if rng_key is None:
+            rng_key = jax.random.PRNGKey(0)
+        if previous_cfg is None:
+            previous_cfg = (self.joints.lower_limits + self.joints.upper_limits) / 2
+
+        target_link_index = self.links.names.index(target_link_name)
+        return hjcd_solve(
+            robot=self,
+            target_link_index=target_link_index,
+            target_pose=target_pose,
+            rng_key=rng_key,
+            previous_cfg=previous_cfg,
+            num_seeds=num_seeds,
+            coarse_max_iter=coarse_max_iter,
+            lm_max_iter=lm_max_iter,
+            epsilon=epsilon,
+            nu=nu,
+            lambda_init=lambda_init,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask=fixed_joint_mask,
         )
 
     def _link_poses_from_joint_poses(
