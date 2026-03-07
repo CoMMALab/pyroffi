@@ -1,14 +1,14 @@
 """JAX FFI wrappers for the CUDA HJCD-IK kernels.
 
-The companion shared library ``_ik_cuda_lib.so`` must be compiled from
-``_ik_cuda_kernel.cu`` before this module can be imported:
+The companion shared library ``_hjcd_ik_cuda_lib.so`` must be compiled from
+``_hjcd_ik_cuda_kernel.cu`` before this module can be imported:
 
-    bash src/pyronot/cuda_kernels/build_ik_cuda.sh
+    bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
 
 Provides two primitives called by the CUDA path in ``_hjcd_ik.py``:
 
-  ik_coarse_cuda — Phase 1 greedy coordinate-descent across all seeds.
-  ik_lm_cuda     — Phase 2 Levenberg-Marquardt refinement.
+  hjcd_ik_coarse_cuda — Phase 1 greedy coordinate-descent across all seeds.
+  hjcd_ik_lm_cuda     — Phase 2 Levenberg-Marquardt refinement.
 
 Between the two calls Python/JAX handles seed selection (top-K argsort),
 perturbation, and winner selection, keeping the kernel interface simple.
@@ -28,7 +28,7 @@ import jax.numpy as jnp
 from jax import Array
 from jaxtyping import Float, Int
 
-_LIB_NAME = "_ik_cuda_lib.so"
+_LIB_NAME = "_hjcd_ik_cuda_lib.so"
 
 
 @lru_cache(maxsize=1)
@@ -38,7 +38,7 @@ def _load_and_register() -> None:
     if not lib_path.exists():
         raise RuntimeError(
             f"CUDA IK library not found at {lib_path}.\n"
-            "Compile it first with:  bash src/pyronot/cuda_kernels/build_ik_cuda.sh\n"
+            "Compile it first with:  bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh\n"
         )
     lib = ctypes.CDLL(str(lib_path))
 
@@ -46,8 +46,8 @@ def _load_and_register() -> None:
     _PyCapsule_New.restype = ctypes.py_object
     _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
 
-    for sym, name in [("IkCoarseCudaFfi", "ik_coarse_cuda"),
-                      ("IkLmCudaFfi",     "ik_lm_cuda")]:
+    for sym, name in [("HjcdIkCoarseCudaFfi", "hjcd_ik_coarse_cuda"),
+                      ("HjcdIkLmCudaFfi",     "hjcd_ik_lm_cuda")]:
         capsule = _PyCapsule_New(
             ctypes.cast(getattr(lib, sym), ctypes.c_void_p),
             b"xla._CUSTOM_CALL_TARGET",
@@ -79,7 +79,7 @@ def _robot_buffers(
     )
 
 
-def ik_coarse_cuda(
+def hjcd_ik_coarse_cuda(
     seeds:         Float[Array, "n_seeds n_act"],
     twists:        Float[Array, "n_joints 6"],
     parent_tf:     Float[Array, "n_joints 7"],
@@ -130,7 +130,7 @@ def ik_coarse_cuda(
                         mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
     return jax.ffi.ffi_call(
-        "ik_coarse_cuda",
+        "hjcd_ik_coarse_cuda",
         (
             jax.ShapeDtypeStruct((n_seeds, n_act), jnp.float32),
             jax.ShapeDtypeStruct((n_seeds,), jnp.float32),
@@ -148,7 +148,7 @@ def ik_coarse_cuda(
     )
 
 
-def ik_lm_cuda(
+def hjcd_ik_lm_cuda(
     seeds:         Float[Array, "n_seeds n_act"],
     noise:         Float[Array, "n_seeds max_iter n_act"],
     twists:        Float[Array, "n_joints 6"],
@@ -180,8 +180,8 @@ def ik_lm_cuda(
         seeds:               Initial configurations, shape ``(n_seeds, n_act)``.
         noise:               Pre-generated Gaussian kick noise,
                              shape ``(n_seeds, max_iter, n_act)``.
-        twists, …, topo_inv: Robot model arrays (same as ik_coarse_cuda).
-        ancestor_mask:       Ancestor mask (same as ik_coarse_cuda).
+        twists, …, topo_inv: Robot model arrays (same as hjcd_ik_coarse_cuda).
+        ancestor_mask:       Ancestor mask (same as hjcd_ik_coarse_cuda).
         target_T:            Target pose ``[w,x,y,z,tx,ty,tz]``.
         lower / upper:       Joint limits.
         fixed_mask:          Fixed-joint mask.
@@ -207,7 +207,7 @@ def ik_lm_cuda(
                         mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
     cfgs, errs, _stop = jax.ffi.ffi_call(
-        "ik_lm_cuda",
+        "hjcd_ik_lm_cuda",
         (
             jax.ShapeDtypeStruct((n_seeds, n_act), jnp.float32),
             jax.ShapeDtypeStruct((n_seeds,), jnp.float32),

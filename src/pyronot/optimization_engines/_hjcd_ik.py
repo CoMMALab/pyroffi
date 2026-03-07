@@ -533,7 +533,7 @@ def hjcd_solve(
 
 
 # ---------------------------------------------------------------------------
-# CUDA alternative solver
+# CUDA solver
 # ---------------------------------------------------------------------------
 
 def hjcd_solve_cuda(
@@ -559,7 +559,7 @@ def hjcd_solve_cuda(
 
     Implements the same two-phase HJCD-IK algorithm but offloads the
     coordinate-descent and Levenberg-Marquardt loops to CUDA kernels via
-    the JAX FFI.  The kernels are defined in ``_ik_cuda_kernel.cu`` and
+    the JAX FFI.  The kernels are defined in ``_hjcd_ik_cuda_kernel.cu`` and
     reuse the FK device function from ``_fk_cuda_helpers.cuh``.
 
     Unlike :func:`hjcd_solve` this function is **not** JIT-compiled by the
@@ -574,8 +574,8 @@ def hjcd_solve_cuda(
       - All kernel launches use the caller's CUDA stream so there are no
         implicit device synchronisations.
 
-    Requires ``_ik_cuda_lib.so`` to be compiled first:
-        bash src/pyronot/cuda_kernels/build_ik_cuda.sh
+    Requires ``_hjcd_ik_cuda_lib.so`` to be compiled first:
+        bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
 
     Args:
         robot:               The robot model.
@@ -601,7 +601,7 @@ def hjcd_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
-    from ..cuda_kernels._ik_cuda import ik_coarse_cuda, ik_lm_cuda
+    from ..cuda_kernels._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -648,7 +648,7 @@ def hjcd_solve_cuda(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (num_seeds, n_act)
 
     # ── Phase 1: CUDA coarse coordinate descent ───────────────────────────
-    coarse_cfgs, coarse_errors = ik_coarse_cuda(
+    coarse_cfgs, coarse_errors = hjcd_ik_coarse_cuda(
         seeds=seeds,
         twists=robot.joints.twists,
         parent_tf=robot.joints.parent_transforms,
@@ -690,7 +690,7 @@ def hjcd_solve_cuda(
     ).astype(jnp.float32)
 
     # ── Phase 2: CUDA Levenberg-Marquardt refinement ──────────────────────
-    refine_cfgs, refine_errors_raw = ik_lm_cuda(
+    refine_cfgs, refine_errors_raw = hjcd_ik_lm_cuda(
         seeds=lm_seeds,
         noise=lm_kick_noise,
         twists=robot.joints.twists,

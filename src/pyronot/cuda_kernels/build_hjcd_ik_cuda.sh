@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build _ik_cuda_lib.so from _ik_cuda_kernel.cu.
+# Build _hjcd_ik_cuda_lib.so from _hjcd_ik_cuda_kernel.cu.
 #
 # Usage (from repo root):
-#   bash src/pyronot/cuda_kernels/build_ik_cuda.sh
+#   bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
 #
 # Requirements:
 #   - nvcc (CUDA toolkit)
@@ -12,8 +12,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/_ik_cuda_kernel.cu"
-OUT="${SCRIPT_DIR}/_ik_cuda_lib.so"
+SRC="${SCRIPT_DIR}/_hjcd_ik_cuda_kernel.cu"
+OUT="${SCRIPT_DIR}/_hjcd_ik_cuda_lib.so"
 
 # Locate the jaxlib include directory that ships xla/ffi/api/ffi.h.
 JAXLIB_INC="$(python3 -c \

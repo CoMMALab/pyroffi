@@ -1,7 +1,7 @@
 /**
  * Shared SE(3) math helpers and single-thread FK device function.
  *
- * Included by both _fk_cuda_kernel.cu and _ik_cuda_kernel.cu so the FK
+ * Included by both _fk_cuda_kernel.cu and _hjcd_ik_cuda_kernel.cu so the FK
  * logic is defined exactly once and the IK kernel can call fk_single()
  * directly without duplicating code.
  *

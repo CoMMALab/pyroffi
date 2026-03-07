@@ -12,7 +12,7 @@ Usage:
 Prerequisites:
     1. A CUDA-capable GPU.
     2. CUDA IK library compiled:
-           bash src/pyronot/cuda_kernels/build_ik_cuda.sh
+           bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
     3. robot_descriptions installed:
            pip install robot_descriptions
 """

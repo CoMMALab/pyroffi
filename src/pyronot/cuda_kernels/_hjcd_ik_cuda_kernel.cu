@@ -27,7 +27,7 @@
  *   where z_j = R(T_world[j]) * body_axis[j].
  *   Non-ancestor joints are zeroed out via the ancestor_mask input.
  *
- * Build with:  bash src/pyronot/cuda_kernels/build_ik_cuda.sh
+ * Build with:  bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
  */
 
 #include "_fk_cuda_helpers.cuh"
@@ -408,7 +408,7 @@ __device__ void adaptive_weights(const float* __restrict__ r, float* __restrict_
  * @param n_seeds, n_joints, n_act, target_jnt, k_max
  */
 __global__
-void ik_coarse_kernel(
+void hjcd_ik_coarse_kernel(
     const float* __restrict__ seeds,
     const float* __restrict__ twists,
     const float* __restrict__ parent_tf,
@@ -530,7 +530,7 @@ void ik_coarse_kernel(
  * @param stall_patience, max_iter: ints
  */
 __global__
-void ik_lm_kernel(
+void hjcd_ik_lm_kernel(
     const float* __restrict__ seeds,
     const float* __restrict__ noise,         // (n_seeds, max_iter, n_act)
     const float* __restrict__ twists,
@@ -783,7 +783,7 @@ void ik_lm_kernel(
  * Common robot-model argument list shared by both coarse and LM handlers.
  * Seeds and extra inputs are listed before calling the kernel.
  */
-static ffi::Error IkCoarseCudaImpl(
+static ffi::Error HjcdIkCoarseCudaImpl(
     cudaStream_t stream,
     ffi::Buffer<ffi::DataType::F32> seeds,
     ffi::Buffer<ffi::DataType::F32> twists,
@@ -814,7 +814,7 @@ static ffi::Error IkCoarseCudaImpl(
     const int threads = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
     const int blocks = (n_seeds + threads - 1) / threads;
 
-    ik_coarse_kernel<<<blocks, threads, 0, stream>>>(
+    hjcd_ik_coarse_kernel<<<blocks, threads, 0, stream>>>(
         seeds.typed_data(),
         twists.typed_data(),
         parent_tf.typed_data(),
@@ -841,7 +841,7 @@ static ffi::Error IkCoarseCudaImpl(
     return ffi::Error::Success();
 }
 
-static ffi::Error IkLmCudaImpl(
+static ffi::Error HjcdIkLmCudaImpl(
     cudaStream_t stream,
     ffi::Buffer<ffi::DataType::F32> seeds,
     ffi::Buffer<ffi::DataType::F32> noise,
@@ -883,7 +883,7 @@ static ffi::Error IkLmCudaImpl(
     // Zero the global stop flag before kernel launch (same stream = ordered).
     cudaMemsetAsync(stop_flag->typed_data(), 0, sizeof(int), stream);
 
-    ik_lm_kernel<<<blocks, threads, 0, stream>>>(
+    hjcd_ik_lm_kernel<<<blocks, threads, 0, stream>>>(
         seeds.typed_data(),
         noise.typed_data(),
         twists.typed_data(),
@@ -920,7 +920,7 @@ static ffi::Error IkLmCudaImpl(
 // ---------------------------------------------------------------------------
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    IkCoarseCudaFfi, IkCoarseCudaImpl,
+    HjcdIkCoarseCudaFfi, HjcdIkCoarseCudaImpl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // seeds
@@ -943,7 +943,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::DataType::F32>>()); // out_err
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    IkLmCudaFfi, IkLmCudaImpl,
+    HjcdIkLmCudaFfi, HjcdIkLmCudaImpl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // seeds
