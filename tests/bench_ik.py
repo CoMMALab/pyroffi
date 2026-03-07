@@ -57,8 +57,8 @@ IK_KWARGS_COMMON = dict(
     limit_prior_weight  = 1e-4,
     kick_scale     = 0.02,
 )
-IK_KWARGS_JAX = dict(**IK_KWARGS_COMMON, coarse_method="jacobian_cd")
-IK_KWARGS_CUDA = dict(**IK_KWARGS_COMMON, coarse_method="jacobian_cd")
+IK_KWARGS_JAX = dict(**IK_KWARGS_COMMON)
+IK_KWARGS_CUDA = dict(**IK_KWARGS_COMMON)
 
 # Agreement threshold between JAX and CUDA outputs.
 AGREE_POS_MM  = 5.0   # mm  — task-space position agreement
@@ -206,7 +206,7 @@ def main() -> None:  # noqa: C901
     import functools
     jit_solve = jax.jit(
         functools.partial(hjcd_solve, **IK_KWARGS_JAX),
-        static_argnames=("target_link_index", "num_seeds", "coarse_max_iter", "lm_max_iter", "coarse_method"),
+        static_argnames=("target_link_index", "num_seeds", "coarse_max_iter", "lm_max_iter"),
     )
 
     # Warm-up: compile + discard

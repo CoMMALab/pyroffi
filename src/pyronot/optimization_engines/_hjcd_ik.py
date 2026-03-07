@@ -1,15 +1,12 @@
 """Hamiltonian Jacobian Coordinate Descent IK Solver (HJCD-IK).
 
 Two-phase inverse kinematics solver:
-  Phase 1 (Coarse):  B random seeds refined via either:
-                       - greedy Jacobian coordinate descent, or
-                       - Hamiltonian coordinate-descent dynamics.
+  Phase 1 (Coarse):  B random seeds refined via
+                       Hamiltonian coordinate-descent dynamics.
   Phase 2 (Refine):  Top-K solutions replicated with small perturbations and
                      refined via Levenberg-Marquardt optimisation.
 
 Improvements over the naive version (matching and extending the reference CUDA):
-  - Greedy best-single-joint CD    — select the joint with maximum predicted
-                                     error reduction per step (CUDA strategy)
   - Adaptive pos/ori weighting     — row-equilibrates the Jacobian so position
                                      convergence is prioritised when far away
   - Jacobi column scaling in LM    — prevents ill-conditioning when joint
@@ -33,7 +30,6 @@ Key settings (matching the reference CUDA implementation):
 from __future__ import annotations
 
 import functools
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -56,6 +52,7 @@ _STALL_PATIENCE: int = 6
 # Core residual
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnames=("target_link_index",))
 def _ik_residual(
     cfg: Float[Array, "n_act"],
     robot: Robot,
@@ -68,6 +65,7 @@ def _ik_residual(
     return (T_actual.inverse() @ target_pose).log()
 
 
+@jax.jit
 def _adaptive_weights(f: Float[Array, "6"]) -> Float[Array, "6"]:
     """Adaptive position / orientation balance weights.
 
@@ -82,57 +80,8 @@ def _adaptive_weights(f: Float[Array, "6"]) -> Float[Array, "6"]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — greedy coordinate descent
+# Phase 1 — Hamiltonian coordinate descent
 # ---------------------------------------------------------------------------
-
-def _greedy_cd_step(
-    cfg: Float[Array, "n_act"],
-    robot: Robot,
-    target_link_index: int,
-    target_pose: jaxlie.SE3,
-    lower: Float[Array, "n_act"],
-    upper: Float[Array, "n_act"],
-    fixed_joint_mask: Float[Array, "n_act"],
-) -> Float[Array, "n_act"]:
-    """Single greedy coordinate-descent update.
-
-    For every joint i the optimal 1-D step in the weighted residual space is:
-        δᵢ = −(Jᵢᵀ Wf) / (‖WJᵢ‖² + ε)
-
-    The joint i* with the largest *predicted* squared-error reduction
-        Δᵢ = (Jᵢᵀ Wf)² / (‖WJᵢ‖² + ε)
-    is selected; all other joints are held fixed.
-
-    This matches the greedy joint-selection strategy and is more stable
-    near convergence than updating every joint simultaneously.
-    """
-    J = jax.jacfwd(
-        lambda q: _ik_residual(q, robot, target_link_index, target_pose)
-    )(cfg)                                                     # (6, n_act)
-    f = _ik_residual(cfg, robot, target_link_index, target_pose)  # (6,)
-
-    # Orientation gating: disable ori residual until pos < 1 mm, matching the
-    # reference HJCD coarse phase (s_allow_ori = pos_err < 1e-3).
-    pos_err_m = jnp.linalg.norm(f[:3])
-    w_base    = _adaptive_weights(f)
-    ori_gate  = (pos_err_m < 1e-3).astype(f.dtype)
-    w         = w_base * jnp.concatenate([jnp.ones(3), jnp.full(3, ori_gate)])
-    Jw = J * w[:, None]       # (6, n_act)  row-scaled Jacobian
-    fw = f * w                # (6,)        weighted residual
-
-    JwT_fw    = jnp.einsum("ji,j->i", Jw, fw)      # (n_act,)
-    Jw_normsq = jnp.sum(Jw ** 2, axis=0) + 1e-8    # (n_act,)
-    deltas     = -JwT_fw / Jw_normsq               # optimal per-joint steps
-
-    improvement = JwT_fw ** 2 / Jw_normsq          # predicted Δ per joint
-    improvement = jnp.where(fixed_joint_mask, 0.0, improvement)  # freeze fixed joints
-    best_joint  = jnp.argmax(improvement)
-
-    # Apply only the winning joint's step; zero out the rest.
-    delta = jnp.zeros_like(cfg).at[best_joint].set(deltas[best_joint])
-    delta = jnp.where(fixed_joint_mask, 0.0, delta)  # ensure fixed joints don't move
-    return jnp.clip(cfg + delta, lower, upper)
-
 
 def _hamiltonian_cd_step(
     cfg: Float[Array, "n_act"],
@@ -151,10 +100,12 @@ def _hamiltonian_cd_step(
     Uses a per-joint momentum state p and applies a one-coordinate leapfrog-like
     update on the joint with the largest normalised gradient magnitude.
     """
-    J = jax.jacfwd(
-        lambda q: _ik_residual(q, robot, target_link_index, target_pose)
-    )(cfg)
-    f = _ik_residual(cfg, robot, target_link_index, target_pose)
+    # Use reverse-mode AD: 6 backward passes (one per residual dim) vs
+    # n_act forward passes with jacfwd.  The primal f is obtained for free,
+    # eliminating the separate _ik_residual call.
+    residual_fn = lambda q: _ik_residual(q, robot, target_link_index, target_pose)
+    f, vjp_fn = jax.vjp(residual_fn, cfg)
+    J = jax.vmap(lambda g: vjp_fn(g)[0])(jnp.eye(6, dtype=cfg.dtype))  # (6, n_act)
 
     # Keep coarse-phase weighting behaviour identical across methods.
     pos_err_m = jnp.linalg.norm(f[:3])
@@ -179,6 +130,7 @@ def _hamiltonian_cd_step(
     return new_cfg, new_momentum
 
 
+@functools.partial(jax.jit, static_argnames=("target_link_index", "k_max"))
 def _coarse_search_single(
     cfg: Float[Array, "n_act"],
     robot: Robot,
@@ -187,12 +139,11 @@ def _coarse_search_single(
     k_max: int,
     epsilon: float,
     nu: float,
-    coarse_method: str,
     lower: Float[Array, "n_act"],
     upper: Float[Array, "n_act"],
     fixed_joint_mask: Float[Array, "n_act"],
 ) -> Float[Array, "n_act"]:
-    """Run k_max coarse steps on one seed."""
+    """Run k_max Hamiltonian coarse steps on one seed."""
     def body(_, carry):
         c, m = carry
         f = _ik_residual(c, robot, target_link_index, target_pose)
@@ -202,13 +153,8 @@ def _coarse_search_single(
             return c, m
 
         def _do_step(_):
-            if coarse_method == "hamiltonian":
-                return _hamiltonian_cd_step(
-                    c, m, robot, target_link_index, target_pose, lower, upper, fixed_joint_mask
-                )
-            return (
-                _greedy_cd_step(c, robot, target_link_index, target_pose, lower, upper, fixed_joint_mask),
-                m,
+            return _hamiltonian_cd_step(
+                c, m, robot, target_link_index, target_pose, lower, upper, fixed_joint_mask
             )
 
         return jax.lax.cond(done, _no_op, _do_step, operand=None)
@@ -222,6 +168,7 @@ def _coarse_search_single(
 # Phase 2 — Levenberg-Marquardt refinement
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnames=("target_link_index", "max_iter"))
 def _lm_refine_single(
     cfg: Float[Array, "n_act"],
     robot: Robot,
@@ -295,10 +242,11 @@ def _lm_refine_single(
             c, lam, stall_count, key, best_c, best_err = inner
 
             # ── Jacobian + residual ──────────────────────────────────────
-            J = jax.jacfwd(
-                lambda q: _ik_residual(q, robot, target_link_index, target_pose)
-            )(c)                                               # (6, n)
-            f = _ik_residual(c, robot, target_link_index, target_pose)  # (6,)
+            # Reverse-mode AD: 6 backward passes vs n_act forward passes.
+            # The primal f comes for free, saving one extra FK evaluation.
+            residual_fn = lambda q: _ik_residual(q, robot, target_link_index, target_pose)
+            f, vjp_fn = jax.vjp(residual_fn, c)
+            J = jax.vmap(lambda g: vjp_fn(g)[0])(jnp.eye(6, dtype=c.dtype))  # (6, n)
             curr_err = jnp.dot(f, f)
 
             # ── Row equilibration: adaptive pos/ori weighting ────────────
@@ -432,7 +380,7 @@ def _get_refine_schedule(num_seeds: int) -> tuple[int, int]:
 
 @functools.partial(
     jax.jit,
-    static_argnames=("target_link_index", "num_seeds", "coarse_max_iter", "lm_max_iter", "coarse_method"),
+    static_argnames=("target_link_index", "num_seeds", "coarse_max_iter", "lm_max_iter"),
 )
 def hjcd_solve(
     robot: Robot,
@@ -447,7 +395,6 @@ def hjcd_solve(
     nu: float = jnp.pi / 2,
     eps_pos: float = 1e-8,
     eps_ori: float = 1e-8,
-    coarse_method: str = "jacobian_cd",
     lambda_init: float = 5e-3,
     continuity_weight: float = 0.0,
     limit_prior_weight: float = 1e-4,
@@ -459,8 +406,7 @@ def hjcd_solve(
     Phase 1 — Coarse search
         Warm seeds near ``previous_cfg`` (σ = 0.05) are mixed with uniform
         random seeds across joint ranges.  All seeds are refined with
-        ``coarse_max_iter`` greedy coordinate-descent steps, where each step
-        selects the single joint with maximum predicted error reduction.
+        ``coarse_max_iter`` Hamiltonian coordinate-descent steps.
 
     Phase 2 — LM refinement
         Top-K coarse solutions are tiled ``repeats`` times with small
@@ -494,8 +440,6 @@ def hjcd_solve(
                              both eps_pos and eps_ori (default 1e-8 m).
         eps_ori:             Orientation convergence tolerance [rad] for LM
                              refinement (default 1e-8 rad).
-        coarse_method:       Coarse-phase update rule: "jacobian_cd" or
-                             "hamiltonian".
         lambda_init:         Initial LM damping factor (default 5e-3).
         continuity_weight:   Weight on ‖q − prev‖² in winner selection only
                              (default 0.0 for independent targets).
@@ -513,9 +457,6 @@ def hjcd_solve(
 
     if fixed_joint_mask is None:
         fixed_joint_mask = jnp.zeros(n_act, dtype=jnp.bool_)
-
-    if coarse_method not in ("jacobian_cd", "hamiltonian"):
-        raise ValueError(f"Unknown coarse_method={coarse_method!r}. Use 'jacobian_cd' or 'hamiltonian'.")
 
     top_k, repeats = _get_refine_schedule(num_seeds)
     n_warm   = min(top_k, num_seeds)
@@ -542,7 +483,7 @@ def hjcd_solve(
     coarse_cfgs = jax.vmap(
         lambda cfg: _coarse_search_single(
             cfg, robot, target_link_index, target_pose, coarse_max_iter,
-            epsilon, nu, coarse_method, lower, upper,
+            epsilon, nu, lower, upper,
             fixed_joint_mask,
         )
     )(seeds)                                                   # (B, n_act)
@@ -609,7 +550,6 @@ def hjcd_solve_cuda(
     nu: float = float(jnp.pi / 2),
     eps_pos: float = 1e-8,
     eps_ori: float = 1e-8,
-    coarse_method: str = "jacobian_cd",
     lambda_init: float = 5e-3,
     continuity_weight: float = 0.0,
     limit_prior_weight: float = 1e-4,
@@ -653,9 +593,6 @@ def hjcd_solve_cuda(
                              Hamiltonian coarse mode early-stop.
         eps_pos:             Position convergence tolerance [m] for LM early exit.
         eps_ori:             Orientation convergence tolerance [rad] for LM early exit.
-        coarse_method:       Coarse-phase update rule. CUDA currently supports
-                             only "jacobian_cd"; "hamiltonian" falls back to
-                             "jacobian_cd" with a warning.
         lambda_init:         Initial LM damping factor.
         continuity_weight:   Weight on ‖q − previous_cfg‖² in winner selection.
         limit_prior_weight:  Strength of soft joint-limit prior in LM.
@@ -675,16 +612,6 @@ def hjcd_solve_cuda(
         fixed_joint_mask_int = jnp.zeros(n_act, dtype=jnp.int32)
     else:
         fixed_joint_mask_int = fixed_joint_mask.astype(jnp.int32)
-    if coarse_method not in ("jacobian_cd", "hamiltonian"):
-        raise ValueError(f"Unknown coarse_method={coarse_method!r}. Use 'jacobian_cd' or 'hamiltonian'.")
-    if coarse_method == "hamiltonian":
-        warnings.warn(
-            "hjcd_solve_cuda(coarse_method='hamiltonian') is not CUDA-accelerated yet; "
-            "falling back to coarse_method='jacobian_cd' for performance.",
-            stacklevel=2,
-        )
-        coarse_method = "jacobian_cd"
-
     # ── Pre-compute Python-level values (need concrete arrays) ────────────
     # These cannot be computed inside jax.jit because parent_joint_indices
     # and parent_indices are JAX-array leaves of the Robot pytree.
