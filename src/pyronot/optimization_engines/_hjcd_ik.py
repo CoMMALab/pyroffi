@@ -32,6 +32,7 @@ from __future__ import annotations
 import functools
 
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jaxlie
 import numpy as np
@@ -261,8 +262,6 @@ def _lm_refine_single(
             # ── Normal equations with joint-limit prior (scaled space) ───
             # Formed and solved in float64 to avoid ill-conditioning (matches
             # the CUDA kernel which uses double for the Cholesky solve).
-            # Requires jax_enable_x64=True; silently falls back to float32
-            # otherwise.
             D_prior_s = D_prior_raw / col_scale ** 2          # (n,)
             g_prior_s = D_prior_raw * (c - mid) / col_scale   # (n,)
 
