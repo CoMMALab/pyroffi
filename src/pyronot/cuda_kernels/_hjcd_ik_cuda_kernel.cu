@@ -8,8 +8,8 @@
  *   Phase 2 (Refine):  Levenberg-Marquardt — column-scaled normal equations
  *                      with joint-limit prior, line search, stall kicks.
  *
- * FK is performed by calling fk_single() from _fk_cuda_helpers.cuh so that
- * the FK logic is not duplicated.
+ * FK and shared IK helpers are provided via _ik_cuda_helpers.cuh so that
+ * FK/residual/Jacobian logic is not duplicated.
  *
  * Numerical stability:
  *   - FK and Jacobian in float32.
@@ -30,7 +30,7 @@
  * Build with:  bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
  */
 
-#include "_fk_cuda_helpers.cuh"
+#include "_ik_cuda_helpers.cuh"
 
 #include "xla/ffi/api/ffi.h"
 
@@ -48,314 +48,17 @@ namespace ffi = xla::ffi;
 // MAX_RESIDENT_THREADS × per-thread stack, which scales as MAX_ACT^2 (from
 // the double A_s[MAX_ACT*MAX_ACT] normal-equation matrix in ik_lm_kernel).
 // With MAX_ACT=64 this exceeds 4 GB on a 68-SM GPU; with 16 it is ~730 MB.
-#define MAX_JOINTS 32
-#define MAX_ACT    16
+// Defined in _ik_cuda_helpers.cuh (override by defining before include).
 
 // ---------------------------------------------------------------------------
 // Math helpers (IK-specific)
 // ---------------------------------------------------------------------------
-
-/** Cross product: out = a x b. */
-__device__ __forceinline__
-void cross3(const float* __restrict__ a,
-            const float* __restrict__ b,
-            float* __restrict__ out)
-{
-    out[0] = a[1]*b[2] - a[2]*b[1];
-    out[1] = a[2]*b[0] - a[0]*b[2];
-    out[2] = a[0]*b[1] - a[1]*b[0];
-}
 
 /** Dot product of two 3-vectors. */
 __device__ __forceinline__
 float dot3(const float* __restrict__ a, const float* __restrict__ b)
 {
     return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
-}
-
-/** L2 norm of a 3-vector. */
-__device__ __forceinline__
-float norm3(const float* __restrict__ v)
-{
-    return sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-}
-
-/** Clamp x to [lo, hi]. */
-__device__ __forceinline__
-float clampf(float x, float lo, float hi)
-{
-    return fmaxf(lo, fminf(hi, x));
-}
-
-// ---------------------------------------------------------------------------
-// Cholesky solver (sequential, float64, in-place)
-// ---------------------------------------------------------------------------
-
-/**
- * Solve  A x = b  via Cholesky decomposition (LL^T = A).
- *
- * A is n×n symmetric positive semi-definite, stored row-major.
- * On return b holds the solution x.  A is overwritten with L.
- *
- * Returns true on success; false if A is not positive-definite.
- * On failure, x is set to zero.
- */
-__device__ bool chol_solve(double* __restrict__ A,
-                           double* __restrict__ b,
-                           int n)
-{
-    // Factorization: L L^T = A
-    for (int k = 0; k < n; k++) {
-        double s = A[k*n + k];
-        for (int p = 0; p < k; p++) { double lkp = A[k*n+p]; s -= lkp*lkp; }
-        if (s <= 0.0) {
-            for (int i = 0; i < n; i++) b[i] = 0.0;
-            return false;
-        }
-        double lkk = sqrt(s);
-        A[k*n + k] = lkk;
-        for (int i = k+1; i < n; i++) {
-            double t = A[i*n + k];
-            for (int p = 0; p < k; p++) t -= A[i*n+p] * A[k*n+p];
-            A[i*n + k] = t / lkk;
-        }
-        // Zero upper triangle (not required for the solve, but keeps A tidy).
-        for (int j = k+1; j < n; j++) A[k*n + j] = 0.0;
-    }
-
-    // Forward substitution: L y = b
-    double y[MAX_ACT];
-    for (int i = 0; i < n; i++) {
-        double s = b[i];
-        for (int p = 0; p < i; p++) s -= A[i*n+p] * y[p];
-        y[i] = s / A[i*n + i];
-    }
-
-    // Backward substitution: L^T x = y
-    for (int i = n-1; i >= 0; i--) {
-        double s = y[i];
-        for (int p = i+1; p < n; p++) s -= A[p*n + i] * b[p];
-        b[i] = s / A[i*n + i];
-    }
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// IK residual and geometric Jacobian
-// ---------------------------------------------------------------------------
-
-/**
- * Compute the IK residual r (6-vector) and the world-frame geometric
- * Jacobian J (6 × n_act) for a given joint configuration.
- *
- * FK is performed internally via fk_single().
- *
- * @param cfg             (n_act,)       current actuated configuration
- * @param T_world         (n_joints, 7)  scratch space; filled with FK output
- * @param target_T        [w,x,y,z,tx,ty,tz]  target end-effector pose
- * @param target_jnt      joint index used as end-effector
- * @param ancestor_mask   (n_joints,) int32; 1 if joint contributes to EE
- * @param r               (6,) output residual  [r_pos(3), r_ori(3)]
- * @param J               (6, n_act) output Jacobian, row-major
- */
-__device__ void compute_residual_and_jacobian(
-    const float* __restrict__ cfg,
-    float*       __restrict__ T_world,       // scratch, (n_joints, 7)
-    const float* __restrict__ twists,
-    const float* __restrict__ parent_tf,
-    const int*   __restrict__ parent_idx,
-    const int*   __restrict__ act_idx,
-    const float* __restrict__ mimic_mul,
-    const float* __restrict__ mimic_off,
-    const int*   __restrict__ mimic_act_idx,
-    const int*   __restrict__ topo_inv,
-    const int*   __restrict__ ancestor_mask,
-    const float* __restrict__ target_T,
-    int target_jnt,
-    int n_joints, int n_act,
-    float* __restrict__ r,
-    float* __restrict__ J)
-{
-    // ---- FK ----------------------------------------------------------------
-    fk_single(cfg, twists, parent_tf, parent_idx, act_idx,
-              mimic_mul, mimic_off, mimic_act_idx, topo_inv,
-              T_world, n_joints, n_act);
-
-    // ---- Residual ----------------------------------------------------------
-    const float* T_ee = T_world + target_jnt * 7;
-    const float p_ee[3] = { T_ee[4], T_ee[5], T_ee[6] };
-    const float q_ee[4] = { T_ee[0], T_ee[1], T_ee[2], T_ee[3] };
-
-    const float p_tgt[3] = { target_T[4], target_T[5], target_T[6] };
-    const float q_tgt[4] = { target_T[0], target_T[1], target_T[2], target_T[3] };
-
-    // Position error (world frame).
-    // Convention: r = p_ee - p_tgt so that ∂r/∂q_i = +J_lin_i (consistent
-    // with the world-frame geometric Jacobian stored in J below).
-    r[0] = p_ee[0] - p_tgt[0];
-    r[1] = p_ee[1] - p_tgt[1];
-    r[2] = p_ee[2] - p_tgt[2];
-
-    // Orientation error as rotation vector.
-    // q_err = q_ee * conj(q_tgt)  so that ∂r_ori/∂q_i ≈ +J_ang_i near
-    // convergence, consistent with the world-frame angular Jacobian below.
-    const float q_tgt_inv[4] = { q_tgt[0], -q_tgt[1], -q_tgt[2], -q_tgt[3] };
-    float q_err[4];
-    quat_mul(q_ee, q_tgt_inv, q_err);
-    // Ensure shortest path.
-    if (q_err[0] < 0.0f) {
-        q_err[0] = -q_err[0]; q_err[1] = -q_err[1];
-        q_err[2] = -q_err[2]; q_err[3] = -q_err[3];
-    }
-    // Convert to rotation vector: 2*atan2(||vec||, w) * vec/||vec||.
-    const float sin_half = sqrtf(q_err[1]*q_err[1] + q_err[2]*q_err[2] + q_err[3]*q_err[3]);
-    float theta;
-    if (sin_half > 1e-6f) {
-        theta = 2.0f * atan2f(sin_half, q_err[0]);
-        const float inv_sin = theta / sin_half;
-        r[3] = q_err[1] * inv_sin;
-        r[4] = q_err[2] * inv_sin;
-        r[5] = q_err[3] * inv_sin;
-    } else {
-        // Small angle: rotvec ≈ 2 * q_err.xyz
-        r[3] = 2.0f * q_err[1];
-        r[4] = 2.0f * q_err[2];
-        r[5] = 2.0f * q_err[3];
-    }
-
-    // ---- Geometric Jacobian ------------------------------------------------
-    // Zero all columns first.
-    for (int i = 0; i < 6 * n_act; i++) J[i] = 0.0f;
-
-    const float arm[3] = { p_ee[0], p_ee[1], p_ee[2] };
-
-    for (int j = 0; j < n_joints; j++) {
-        if (!ancestor_mask[j]) continue;
-
-        // Determine which actuated joint(s) this joint feeds into.
-        int a1 = act_idx[j];       // direct actuated index (-1 if fixed)
-        int a2 = mimic_act_idx[j]; // mimicked actuated index (-1 if not mimic)
-        if (a1 < 0 && a2 < 0) continue; // fixed joint, no contribution
-
-        // Body-frame twist axis for this joint.
-        const float* tw = twists + j * 6;
-        const float ang_sq = tw[3]*tw[3] + tw[4]*tw[4] + tw[5]*tw[5];
-        const float lin_sq = tw[0]*tw[0] + tw[1]*tw[1] + tw[2]*tw[2];
-
-        const float* T_j  = T_world + j * 7;
-        const float* q_j  = T_j;        // quaternion [w,x,y,z]
-        const float* p_j  = T_j + 4;    // translation [tx,ty,tz]
-
-        float jg_lin[3], jg_ang[3];
-
-        if (ang_sq > 1e-6f) {
-            // Revolute: body axis from angular part of twist.
-            const float inv_ang = 1.0f / sqrtf(ang_sq);
-            const float body_ax[3] = { tw[3]*inv_ang, tw[4]*inv_ang, tw[5]*inv_ang };
-            // World-frame axis.
-            float z_j[3];
-            quat_rotate(q_j, body_ax, z_j);
-            // Jacobian: J_lin = z x (p_ee - p_j),  J_ang = z.
-            const float arm_j[3] = { arm[0]-p_j[0], arm[1]-p_j[1], arm[2]-p_j[2] };
-            cross3(z_j, arm_j, jg_lin);
-            jg_ang[0] = z_j[0]; jg_ang[1] = z_j[1]; jg_ang[2] = z_j[2];
-        } else if (lin_sq > 1e-6f) {
-            // Prismatic: body axis from linear part of twist.
-            const float inv_lin = 1.0f / sqrtf(lin_sq);
-            const float body_ax[3] = { tw[0]*inv_lin, tw[1]*inv_lin, tw[2]*inv_lin };
-            float z_j[3];
-            quat_rotate(q_j, body_ax, z_j);
-            jg_lin[0] = z_j[0]; jg_lin[1] = z_j[1]; jg_lin[2] = z_j[2];
-            jg_ang[0] = 0.0f;   jg_ang[1] = 0.0f;   jg_ang[2] = 0.0f;
-        } else {
-            // Fixed: zero contribution.
-            continue;
-        }
-
-        // Accumulate into actuated Jacobian columns (with mimic scaling).
-        // For a direct joint, mimic_mul == 1.0; for a mimic, it's the multiplier.
-        if (a1 >= 0) {
-            const float s = mimic_mul[j]; // 1.0 for non-mimic direct joints
-            J[0*n_act + a1] += s * jg_lin[0];
-            J[1*n_act + a1] += s * jg_lin[1];
-            J[2*n_act + a1] += s * jg_lin[2];
-            J[3*n_act + a1] += s * jg_ang[0];
-            J[4*n_act + a1] += s * jg_ang[1];
-            J[5*n_act + a1] += s * jg_ang[2];
-        }
-        if (a2 >= 0) {
-            const float s = mimic_mul[j];
-            J[0*n_act + a2] += s * jg_lin[0];
-            J[1*n_act + a2] += s * jg_lin[1];
-            J[2*n_act + a2] += s * jg_lin[2];
-            J[3*n_act + a2] += s * jg_ang[0];
-            J[4*n_act + a2] += s * jg_ang[1];
-            J[5*n_act + a2] += s * jg_ang[2];
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Residual-only evaluation (no Jacobian) — used by line search
-// ---------------------------------------------------------------------------
-
-/**
- * Compute only the IK residual r (6-vector) without the Jacobian.
- * Much cheaper than compute_residual_and_jacobian for cost-only evaluation
- * (e.g., line search candidates).
- */
-__device__ void compute_residual_only(
-    const float* __restrict__ cfg,
-    float*       __restrict__ T_world,       // scratch, (n_joints, 7)
-    const float* __restrict__ twists,
-    const float* __restrict__ parent_tf,
-    const int*   __restrict__ parent_idx,
-    const int*   __restrict__ act_idx,
-    const float* __restrict__ mimic_mul,
-    const float* __restrict__ mimic_off,
-    const int*   __restrict__ mimic_act_idx,
-    const int*   __restrict__ topo_inv,
-    const float* __restrict__ target_T,
-    int target_jnt,
-    int n_joints, int n_act,
-    float* __restrict__ r)
-{
-    // ---- FK ----------------------------------------------------------------
-    fk_single(cfg, twists, parent_tf, parent_idx, act_idx,
-              mimic_mul, mimic_off, mimic_act_idx, topo_inv,
-              T_world, n_joints, n_act);
-
-    // ---- Residual ----------------------------------------------------------
-    const float* T_ee = T_world + target_jnt * 7;
-    const float p_ee[3] = { T_ee[4], T_ee[5], T_ee[6] };
-    const float q_ee[4] = { T_ee[0], T_ee[1], T_ee[2], T_ee[3] };
-
-    const float p_tgt[3] = { target_T[4], target_T[5], target_T[6] };
-    const float q_tgt[4] = { target_T[0], target_T[1], target_T[2], target_T[3] };
-
-    r[0] = p_ee[0] - p_tgt[0];
-    r[1] = p_ee[1] - p_tgt[1];
-    r[2] = p_ee[2] - p_tgt[2];
-
-    const float q_tgt_inv[4] = { q_tgt[0], -q_tgt[1], -q_tgt[2], -q_tgt[3] };
-    float q_err[4];
-    quat_mul(q_ee, q_tgt_inv, q_err);
-    if (q_err[0] < 0.0f) {
-        q_err[0] = -q_err[0]; q_err[1] = -q_err[1];
-        q_err[2] = -q_err[2]; q_err[3] = -q_err[3];
-    }
-    const float sin_half = sqrtf(q_err[1]*q_err[1] + q_err[2]*q_err[2] + q_err[3]*q_err[3]);
-    if (sin_half > 1e-6f) {
-        const float theta = 2.0f * atan2f(sin_half, q_err[0]);
-        const float inv_sin = theta / sin_half;
-        r[3] = q_err[1] * inv_sin;
-        r[4] = q_err[2] * inv_sin;
-        r[5] = q_err[3] * inv_sin;
-    } else {
-        r[3] = 2.0f * q_err[1];
-        r[4] = 2.0f * q_err[2];
-        r[5] = 2.0f * q_err[3];
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -6,9 +6,8 @@ Sequential (per-problem) timing
     comparison.
 
 Batch timing
-    CUDA batch solvers (ls_ik_solve_cuda_batch / hjcd_solve_cuda_batch) are
-    timed over all N_TARGETS at once to measure GPU throughput.  The
-    effective per-problem time is  batch_wall_time / N_TARGETS.
+    JAX and CUDA batch solvers are timed over all N_TARGETS at once to measure
+    throughput.  The effective per-problem time is batch_wall_time / N_TARGETS.
 
 Correctness
     For each solver the median position / rotation errors across all target
@@ -227,6 +226,21 @@ def _print_summary_batch(label: str, result: BatchResult) -> None:
     print(f"    success: {solved}/{n}  ({100*solved/n:.1f}%)")
 
 
+def _make_batched_jax_solver(base_fn, ik_kwargs):
+    """Create a JITted batched JAX solver (vmap over targets)."""
+    def _solve_batch(
+        robot, target_link_index, target_poses, rng_keys, previous_cfgs, fixed_joint_mask
+    ):
+        def _single(target_pose, rng_key, previous_cfg):
+            return base_fn(
+                robot, target_link_index, target_pose, rng_key, previous_cfg,
+                fixed_joint_mask=fixed_joint_mask, **ik_kwargs,
+            )
+        return jax.vmap(_single, in_axes=(0, 0, 0))(target_poses, rng_keys, previous_cfgs)
+
+    return jax.jit(_solve_batch, static_argnames=("target_link_index",))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -276,6 +290,7 @@ def main() -> None:  # noqa: C901
 
     # Per-pose RNG keys and warm-start configs.
     rng_keys     = [jax.random.PRNGKey(i + 1) for i in range(N_TARGETS)]
+    rng_keys_batch = jnp.stack(rng_keys)
     previous_cfgs_seq = [mid_cfg] * N_TARGETS  # list for sequential solver
     previous_cfgs_batch = jnp.tile(mid_cfg[None], (N_TARGETS, 1))  # (N_TARGETS, n_act)
 
@@ -292,6 +307,8 @@ def main() -> None:  # noqa: C901
         functools.partial(ls_ik_solve, **IK_KWARGS_LS_JAX),
         static_argnames=("target_link_index", "num_seeds", "max_iter"),
     )
+    jit_hjcd_batch = _make_batched_jax_solver(hjcd_solve, IK_KWARGS_HJCD_JAX)
+    jit_ls_batch   = _make_batched_jax_solver(ls_ik_solve, IK_KWARGS_LS_JAX)
 
     warmup_seq = [
         ("HJCD-JAX",  jit_hjcd,       {}),
@@ -299,7 +316,11 @@ def main() -> None:  # noqa: C901
         ("LS-JAX",    jit_ls,         {}),
         ("LS-CUDA",   ls_ik_solve_cuda, IK_KWARGS_LS_CUDA),
     ]
-    warmup_batch = [
+    warmup_batch_jax = [
+        ("HJCD-JAX-BATCH",  jit_hjcd_batch, {}),
+        ("LS-JAX-BATCH",    jit_ls_batch,   {}),
+    ]
+    warmup_batch_cuda = [
         ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
         ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA),
     ]
@@ -311,7 +332,14 @@ def main() -> None:  # noqa: C901
                      fixed_joint_mask=fixed_joint_mask, **kwargs)
             jax.block_until_ready(out)
 
-    for name, fn, kwargs in warmup_batch:
+    for name, fn, kwargs in warmup_batch_jax:
+        print(f"Warming up {name} ...")
+        for _ in range(N_WARMUP):
+            out = fn(robot, target_link_index, target_poses_stacked, rng_keys_batch,
+                     previous_cfgs_batch, fixed_joint_mask)
+            jax.block_until_ready(out)
+
+    for name, fn, kwargs in warmup_batch_cuda:
         print(f"Warming up {name} ...")
         for _ in range(N_WARMUP):
             out = fn(robot, target_link_index, target_poses_stacked, rng0,
@@ -341,23 +369,25 @@ def main() -> None:  # noqa: C901
         )
 
     # ------------------------------------------------------------------
-    # Batch evaluation (CUDA batch solvers)
+    # Batch evaluation (JAX + CUDA batch solvers)
     # ------------------------------------------------------------------
     print(f"\n{'─'*80}")
     print("Batch evaluation (all targets in one kernel launch) ...")
     print(f"{'─'*80}")
 
     batch_solvers = [
-        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
-        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA),
+        ("LS-JAX-BATCH",    jit_ls_batch,   {},                rng_keys_batch),
+        ("HJCD-JAX-BATCH",  jit_hjcd_batch, {},                rng_keys_batch),
+        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0),
+        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA,  rng0),
     ]
     batch_results: dict[str, BatchResult] = {}
 
-    for name, fn, kwargs in batch_solvers:
+    for name, fn, kwargs, rng in batch_solvers:
         print(f"  Running {name} ...")
         batch_results[name] = _run_solver_batch(
             fn, robot, target_link_index, target_poses_stacked,
-            fixed_joint_mask, rng0, previous_cfgs_batch, kwargs,
+            fixed_joint_mask, rng, previous_cfgs_batch, kwargs,
         )
 
     # ------------------------------------------------------------------
@@ -371,9 +401,9 @@ def main() -> None:  # noqa: C901
         print()
 
     print(f"{'='*80}")
-    print(f"SUMMARY — Batch CUDA (effective per-problem time over {N_TARGETS} targets)")
+    print(f"SUMMARY — Batch (effective per-problem time over {N_TARGETS} targets)")
     print(f"{'='*80}")
-    for label in ("LS-CUDA-BATCH", "HJCD-CUDA-BATCH"):
+    for label in ("LS-JAX-BATCH", "HJCD-JAX-BATCH", "LS-CUDA-BATCH", "HJCD-CUDA-BATCH"):
         _print_summary_batch(label, batch_results[label])
         print()
 
@@ -388,12 +418,16 @@ def main() -> None:  # noqa: C901
         return float(np.median([r.time_ms for r in seq_results[k]]))
 
     t = {k: med_seq(k) for k in seq_results}
+    t["LS-JAX-BATCH"]    = batch_results["LS-JAX-BATCH"].time_ms
+    t["HJCD-JAX-BATCH"]  = batch_results["HJCD-JAX-BATCH"].time_ms
     t["LS-CUDA-BATCH"]   = batch_results["LS-CUDA-BATCH"].time_ms
     t["HJCD-CUDA-BATCH"] = batch_results["HJCD-CUDA-BATCH"].time_ms
 
     rows = [
         ("HJCD-CUDA vs HJCD-JAX (sequential)",    "HJCD-JAX",  "HJCD-CUDA"),
         ("LS-CUDA   vs LS-JAX   (sequential)",    "LS-JAX",    "LS-CUDA"),
+        ("LS-CUDA-BATCH   vs LS-JAX-BATCH   (batch)", "LS-JAX-BATCH", "LS-CUDA-BATCH"),
+        ("HJCD-CUDA-BATCH vs HJCD-JAX-BATCH (batch)", "HJCD-JAX-BATCH", "HJCD-CUDA-BATCH"),
         ("LS-CUDA-BATCH   vs LS-JAX   (seq→batch)", "LS-JAX",    "LS-CUDA-BATCH"),
         ("HJCD-CUDA-BATCH vs HJCD-JAX (seq→batch)", "HJCD-JAX",  "HJCD-CUDA-BATCH"),
         ("LS-CUDA-BATCH   vs LS-CUDA  (batch speedup)", "LS-CUDA",   "LS-CUDA-BATCH"),
@@ -409,11 +443,12 @@ def main() -> None:  # noqa: C901
     print("JAX vs CUDA-BATCH agreement")
     print(f"{'='*80}")
 
-    for jax_key, batch_key in [("HJCD-JAX", "HJCD-CUDA-BATCH"), ("LS-JAX", "LS-CUDA-BATCH")]:
+    for jax_key, batch_key in [("HJCD-JAX-BATCH", "HJCD-CUDA-BATCH"),
+                               ("LS-JAX-BATCH",   "LS-CUDA-BATCH")]:
         delta_pos = []
         delta_ori = []
         for i in range(N_TARGETS):
-            Ts_jax  = robot.forward_kinematics(jnp.array(seq_results[jax_key][i].cfg))
+            Ts_jax  = robot.forward_kinematics(jnp.array(batch_results[jax_key].cfgs[i]))
             Ts_cuda = robot.forward_kinematics(jnp.array(batch_results[batch_key].cfgs[i]))
             pa = jaxlie.SE3(Ts_jax[target_link_index])
             pb = jaxlie.SE3(Ts_cuda[target_link_index])
