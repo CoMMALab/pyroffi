@@ -63,8 +63,8 @@ def main():
         start_time = time.perf_counter()
         solution = hjcd_solve_cuda(
             robot=robot,
-            target_link_index=target_link_index,
-            target_pose=target_pose,
+            target_link_indices=(target_link_index,),
+            target_poses=(target_pose,),
             rng_key=subkey,
             previous_cfg=solution,
             fixed_joint_mask=fixed_joint_mask,

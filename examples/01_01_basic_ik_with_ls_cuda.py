@@ -63,8 +63,8 @@ def main():
         start_time = time.perf_counter()
         solution = ls_ik_solve_cuda(
             robot=robot,
-            target_link_index=target_link_index,
-            target_pose=target_pose,
+            target_link_indices=(target_link_index,),
+            target_poses=(target_pose,),
             rng_key=subkey,
             num_seeds=1024,
             previous_cfg=solution,

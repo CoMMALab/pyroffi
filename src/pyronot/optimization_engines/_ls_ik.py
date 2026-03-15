@@ -42,23 +42,23 @@ from ._ik_primitives import _ik_residual, _LS_ALPHAS
 
 @functools.partial(
     jax.jit,
-    static_argnames=("target_link_index", "max_iter", "constraint_fns"),
+    static_argnames=("target_link_indices", "max_iter", "constraint_fns"),
 )
 def _ls_ik_single(
-    cfg:               Float[Array, "n_act"],
-    robot:             Robot,
-    target_link_index: int,
-    target_pose:       jaxlie.SE3,
-    max_iter:          int,
-    lam0:              float,
-    pos_weight:        float,
-    ori_weight:        float,
-    lower:             Float[Array, "n_act"],
-    upper:             Float[Array, "n_act"],
-    fixed_joint_mask:  Float[Array, "n_act"],
-    constraint_fns:    tuple = (),
-    constraint_args:   tuple = (),
-    constraint_weights: Float[Array, "n_constraints"] | None = None,
+    cfg:                   Float[Array, "n_act"],
+    robot:                 Robot,
+    target_link_indices:   tuple[int, ...],
+    target_poses:          tuple,
+    max_iter:              int,
+    lam0:                  float,
+    pos_weight:            float,
+    ori_weight:            float,
+    lower:                 Float[Array, "n_act"],
+    upper:                 Float[Array, "n_act"],
+    fixed_joint_mask:      Float[Array, "n_act"],
+    constraint_fns:        tuple = (),
+    constraint_args:       tuple = (),
+    constraint_weights:    Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_act"]:
     """Levenberg-Marquardt refinement from a single starting configuration.
 
@@ -66,20 +66,21 @@ def _ls_ik_single(
         (Js^T Js + lambda * I) p = -Js^T fw
     where Js is the column-scaled weighted Jacobian and fw = W * f.
 
-    When ``constraint_fns`` is non-empty the residual vector is augmented with
-    per-constraint pseudo-residuals  ``sqrt(w_i) * c_i(q)``  so the LM step
-    simultaneously minimises the task error and the weighted constraint
-    penalties:
-        cost = ||W * f_task||^2 + sum_i  w_i * c_i(q)^2
+    The residual vector is:
+        [W*f_0 | W*f_1 | ... | W*f_{N-1} | sqrt_wc*f_coll]
+    where each f_i is the 6-vector SE(3) log-map residual for EE i.
+
+    The trust-region radius uses the FIRST EE's pos/ori error (primary EE
+    drives the trust region), not the combined error.
 
     FK fusion
-        When constraints are present, task and constraint residuals are
-        wrapped in a single ``fused_scaled(q)`` callable before the
-        ``jax.vjp`` call.  XLA CSE then deduplicates the
-        ``robot.forward_kinematics(q)`` call shared between ``_ik_residual``
-        and the constraint functions, replacing two FK forward passes with
-        one.  The line-search also reuses ``fused_scaled``, halving the
-        number of FK evaluations from 10 to 5 per LM step.
+        Task and constraint residuals are wrapped in a single
+        ``fused_scaled(q)`` callable before the ``jax.vjp`` call.
+        XLA CSE then deduplicates the ``robot.forward_kinematics(q)`` call
+        shared between all ``_ik_residual`` calls and the constraint
+        functions, replacing many FK forward passes with one.  The
+        line-search also reuses ``fused_scaled``, halving the number of FK
+        evaluations per LM step.
 
     Normal equations
         Solved in float32.  Jacobi column scaling provides sufficient
@@ -90,56 +91,47 @@ def _ls_ik_single(
         in parallel via vmap; the one producing the lowest weighted residual
         is accepted.
     """
-    n   = cfg.shape[0]
-    W   = jnp.concatenate([
+    n     = cfg.shape[0]
+    n_c   = len(constraint_fns)
+    n_ee  = len(target_link_indices)
+    W     = jnp.concatenate([
         jnp.full(3, pos_weight, dtype=cfg.dtype),
         jnp.full(3, ori_weight, dtype=cfg.dtype),
     ])  # (6,)
 
-    # ── Build residual callable(s) once, outside the scan ──────────────────
-    # Defining fused_scaled here (rather than inside lm_step) makes the
-    # captured sqrt_wc visible to both the Jacobian pass and the line search.
-    if len(constraint_fns) > 0:
+    # ── Build residual callable once, outside the scan ─────────────────────
+    # fused_scaled returns [W*f_0 | ... | W*f_{N-1} | sqrt_wc*f_coll]
+    # XLA CSE collapses all robot.forward_kinematics(q) calls into one.
+    if n_c > 0:
         sqrt_wc = jnp.sqrt(constraint_weights)
-        n_c     = len(constraint_fns)
 
-        def fused_scaled(q: Array) -> Array:
-            """Weighted [task | constraint] residuals with one FK pass.
-
-            Both _ik_residual and each constraint fn call
-            robot.forward_kinematics(q) internally.  XLA CSE collapses
-            all of them into a single FK computation when traced together.
-            """
-            f_task = _ik_residual(q, robot, target_link_index, target_pose)
+    def fused_scaled(q: Array) -> Array:
+        """Weighted [EE residuals... | constraint residuals] with one FK pass."""
+        parts: list[Array] = []
+        for i in range(n_ee):
+            f_i = _ik_residual(q, robot, target_link_indices[i], target_poses[i])
+            parts.append(f_i * W)
+        if n_c > 0:
             f_coll = jnp.stack([
                 constraint_fns[i](q, robot, constraint_args[i])
                 for i in range(n_c)
             ])
-            return jnp.concatenate([f_task * W, sqrt_wc * f_coll])
-    else:
-        def residual_fn(q: Array) -> Array:
-            return _ik_residual(q, robot, target_link_index, target_pose)
+            parts.append(sqrt_wc * f_coll)
+        return jnp.concatenate(parts)
+
+    n_out = 6 * n_ee + n_c
 
     def lm_step(carry, _):
         c, lam, best_c, best_err = carry
 
         # ── Jacobian + weighted residual (single FK forward pass) ────────
-        if len(constraint_fns) > 0:
-            f_all, vjp_fn = jax.vjp(fused_scaled, c)
-            n_out = 6 + n_c
-            J_all = jax.vmap(lambda g: vjp_fn(g)[0])(
-                jnp.eye(n_out, dtype=f_all.dtype)
-            )  # (n_out, n)
-            fw_eff  = f_all          # already weighted: [W*f_task | sqrt_wc*f_coll]
-            Jw_eff  = J_all
-            f_trust = f_all[:6] / W  # unweighted task residual for trust-region
-        else:
-            f_trust, vjp_fn = jax.vjp(residual_fn, c)
-            J = jax.vmap(lambda g: vjp_fn(g)[0])(
-                jnp.eye(6, dtype=f_trust.dtype)
-            )  # (6, n)
-            fw_eff = f_trust * W
-            Jw_eff = J * W[:, None]
+        f_all, vjp_fn = jax.vjp(fused_scaled, c)
+        J_all = jax.vmap(lambda g: vjp_fn(g)[0])(
+            jnp.eye(n_out, dtype=f_all.dtype)
+        )  # (n_out, n)
+        fw_eff  = f_all          # already weighted
+        Jw_eff  = J_all
+        f_trust = f_all[:6] / W  # unweighted first-EE residual for trust-region
 
         curr_err = jnp.dot(fw_eff, fw_eff)
 
@@ -170,17 +162,10 @@ def _ls_ik_single(
         delta = jnp.where(delta_norm > R, delta * R / delta_norm, delta)
 
         # ── Vectorised line search (single FK call per alpha) ────────────
-        if len(constraint_fns) > 0:
-            def eval_alpha(alpha):
-                nc  = jnp.clip(c + alpha * delta, lower, upper)
-                nf  = fused_scaled(nc)
-                return jnp.dot(nf, nf)
-        else:
-            def eval_alpha(alpha):
-                nc  = jnp.clip(c + alpha * delta, lower, upper)
-                nf  = _ik_residual(nc, robot, target_link_index, target_pose)
-                nfw = nf * W
-                return jnp.dot(nfw, nfw)
+        def eval_alpha(alpha):
+            nc  = jnp.clip(c + alpha * delta, lower, upper)
+            nf  = fused_scaled(nc)
+            return jnp.dot(nf, nf)
 
         alpha_errs  = jax.vmap(eval_alpha)(_LS_ALPHAS)   # (5,)
         best_ls_idx = jnp.argmin(alpha_errs)
@@ -201,12 +186,8 @@ def _ls_ik_single(
         return (c_out, lam_out, new_best_c, new_best_err), None
 
     # ── Initial error ──────────────────────────────────────────────────────
-    if len(constraint_fns) > 0:
-        init_f_all = fused_scaled(cfg)
-        init_err   = jnp.dot(init_f_all, init_f_all)
-    else:
-        init_f   = _ik_residual(cfg, robot, target_link_index, target_pose)
-        init_err = jnp.dot(init_f * W, init_f * W)
+    init_f_all = fused_scaled(cfg)
+    init_err   = jnp.dot(init_f_all, init_f_all)
 
     lam0_arr  = jnp.asarray(lam0, dtype=cfg.dtype)
 
@@ -222,12 +203,12 @@ def _ls_ik_single(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("target_link_index", "num_seeds", "max_iter", "constraint_fns"),
+    static_argnames=("target_link_indices", "num_seeds", "max_iter", "constraint_fns"),
 )
 def ls_ik_solve(
     robot:              Robot,
-    target_link_index:  int,
-    target_pose:        jaxlie.SE3,
+    target_link_indices: tuple[int, ...],
+    target_poses:       tuple,
     rng_key:            Array,
     previous_cfg:       Float[Array, "n_act"],
     num_seeds:          int   = 32,
@@ -247,6 +228,14 @@ def ls_ik_solve(
     Hamiltonian coordinate-descent coarse phase.  This makes the solver
     a clean Gauss-Newton least-squares method suitable for comparison with
     HJCD-IK.
+
+    Multi-EE support
+        Pass multiple end-effectors via ``target_link_indices`` and
+        ``target_poses`` tuples.  The residual vector becomes
+        ``[W*f_0 | W*f_1 | ... | W*f_{N-1} | sqrt_wc*f_coll]`` where each
+        ``f_i`` is the 6-vector SE(3) log-map residual for EE ``i``.
+        For a single EE, pass ``target_link_indices=(idx,)`` and
+        ``target_poses=(pose,)``.
 
     Seed generation
         Half the seeds are warm-starts near ``previous_cfg`` (σ = 0.05).
@@ -270,31 +259,32 @@ def ls_ik_solve(
         both signs are penalised symmetrically.
 
     Winner selection
-        Same as ``hjcd_solve``: lowest weighted task-space residual plus
-        optional ``continuity_weight · ‖q − prev‖²`` tie-breaker, and
-        constraint penalties when applicable.
+        Same as ``hjcd_solve``: lowest weighted task-space residual (summed
+        over all EEs) plus optional ``continuity_weight · ‖q − prev‖²``
+        tie-breaker, and constraint penalties when applicable.
 
     Args:
-        robot:              The robot model.
-        target_link_index:  Index of the target link in ``robot.links.names``.
-        target_pose:        Desired SE(3) world pose for the target link.
-        rng_key:            JAX PRNG key.
-        previous_cfg:       Previous joint configuration for warm-starting
-                            and continuity-aware winner selection.
-        num_seeds:          Number of parallel seeds (default 32).
-        max_iter:           LM iterations per seed (default 60).
-        pos_weight:         Weight on position residual (default 50.0).
-        ori_weight:         Weight on orientation residual (default 10.0).
-        lambda_init:        Initial LM damping factor (default 5e-3).
-        continuity_weight:  Weight on ‖q − prev‖² in winner selection only.
-        fixed_joint_mask:   Boolean mask; True = joint must not move.
-        constraint_fns:     Tuple of constraint callables
-                            ``c(cfg, robot) -> scalar``.  Must be a ``tuple``
-                            for JAX JIT compatibility; pass as
-                            ``constraint_fns=tuple(my_list)``.
-        constraint_weights: Weight for each constraint, shape
-                            ``(len(constraint_fns),)``.  Must be provided when
-                            ``constraint_fns`` is non-empty.
+        robot:               The robot model.
+        target_link_indices: Tuple of target link indices (static, for JIT).
+                             Use a 1-tuple for single-EE problems.
+        target_poses:        Tuple of desired SE(3) world poses (dynamic pytree).
+        rng_key:             JAX PRNG key.
+        previous_cfg:        Previous joint configuration for warm-starting
+                             and continuity-aware winner selection.
+        num_seeds:           Number of parallel seeds (default 32).
+        max_iter:            LM iterations per seed (default 60).
+        pos_weight:          Weight on position residual (default 50.0).
+        ori_weight:          Weight on orientation residual (default 10.0).
+        lambda_init:         Initial LM damping factor (default 5e-3).
+        continuity_weight:   Weight on ‖q − prev‖² in winner selection only.
+        fixed_joint_mask:    Boolean mask; True = joint must not move.
+        constraint_fns:      Tuple of constraint callables
+                             ``c(cfg, robot) -> scalar``.  Must be a ``tuple``
+                             for JAX JIT compatibility; pass as
+                             ``constraint_fns=tuple(my_list)``.
+        constraint_weights:  Weight for each constraint, shape
+                             ``(len(constraint_fns),)``.  Must be provided when
+                             ``constraint_fns`` is non-empty.
 
     Returns:
         Best joint configuration found, shape ``(n_actuated_joints,)``.
@@ -330,7 +320,7 @@ def ls_ik_solve(
     # ── Multi-seed LM (parallel over seeds) ───────────────────────────────
     all_cfgs = jax.vmap(
         lambda cfg: _ls_ik_single(
-            cfg, robot, target_link_index, target_pose,
+            cfg, robot, target_link_indices, target_poses,
             max_iter, lambda_init, pos_weight, ori_weight,
             lower, upper, fixed_joint_mask,
             constraint_fns=constraint_fns,
@@ -339,13 +329,14 @@ def ls_ik_solve(
         )
     )(seeds)   # (num_seeds, n_act)
 
-    # ── Winner selection: task error + constraint penalties + continuity ────
+    # ── Winner selection: task error (all EEs) + constraint penalties + continuity
     W = jnp.concatenate([jnp.full(3, pos_weight), jnp.full(3, ori_weight)])
 
     def weighted_err(cfg: Float[Array, "n_act"]) -> Array:
-        f  = _ik_residual(cfg, robot, target_link_index, target_pose)
-        fw = f * W
-        err = jnp.dot(fw, fw)
+        err = sum(
+            jnp.sum((_ik_residual(cfg, robot, target_link_indices[i], target_poses[i]) * W) ** 2)
+            for i in range(len(target_link_indices))
+        )
         if len(constraint_fns) > 0:
             c_vals = jnp.stack([constraint_fns[i](cfg, robot, constraint_args[i]) for i in range(len(constraint_fns))])
             err    = err + jnp.sum(constraint_weights * c_vals ** 2)
@@ -372,11 +363,12 @@ def ls_ik_solve(
         "eps_pos",
         "eps_ori",
         "constraint_fns",
+        "target_link_indices",
     ),
 )
 def _ls_ik_solve_cuda_jit(
     robot:                Robot,
-    target_pose:          jaxlie.SE3,
+    target_poses:         tuple,
     rng_key:              Array,
     previous_cfg:         Float[Array, "n_act"],
     num_seeds:            int,
@@ -390,6 +382,7 @@ def _ls_ik_solve_cuda_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_mask:        Array,
     target_joint_idx:     int,
+    target_link_indices:  tuple[int, ...],
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
@@ -400,7 +393,8 @@ def _ls_ik_solve_cuda_jit(
     lower  = robot.joints.lower_limits
     upper  = robot.joints.upper_limits
 
-    target_T = target_pose.wxyz_xyz.astype(jnp.float32)
+    # CUDA kernel uses only the FIRST EE target.
+    first_target_T = target_poses[0].wxyz_xyz.astype(jnp.float32)
 
     # ── Seed generation ────────────────────────────────────────────────────
     n_warm   = max(1, num_seeds // 2)
@@ -423,7 +417,7 @@ def _ls_ik_solve_cuda_jit(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
 
-    # ── CUDA LM ───────────────────────────────────────────────────────────
+    # ── CUDA LM (first EE only) ───────────────────────────────────────────
     cfgs, errors = ls_ik_cuda(
         seeds         = seeds[None],        # (1, n_seeds, n_act)
         twists        = robot.joints.twists,
@@ -435,7 +429,7 @@ def _ls_ik_solve_cuda_jit(
         mimic_act_idx = robot.joints.mimic_act_indices,
         topo_inv      = robot.joints._topo_sort_inv,
         ancestor_mask = ancestor_mask,
-        target_T      = target_T[None],     # (1, 7)
+        target_T      = first_target_T[None],     # (1, 7)
         lower         = lower,
         upper         = upper,
         fixed_mask    = fixed_joint_mask_int,
@@ -448,9 +442,28 @@ def _ls_ik_solve_cuda_jit(
         eps_ori       = eps_ori,
     )
     cfgs   = cfgs[0]    # (n_seeds, n_act)
-    errors = errors[0]  # (n_seeds,)
+    errors = errors[0]  # (n_seeds,) — first EE task errors from CUDA
 
-    # ── Winner selection: task error + constraint penalties + continuity ────
+    # ── Winner selection: all EE task errors + constraint penalties + continuity
+    W = jnp.concatenate([
+        jnp.full(3, pos_weight, dtype=jnp.float32),
+        jnp.full(3, ori_weight, dtype=jnp.float32),
+    ])
+
+    def all_ee_error(cfg):
+        """Sum of squared weighted residuals over all EEs."""
+        return sum(
+            jnp.sum((_ik_residual(cfg, robot, target_link_indices[i], target_poses[i]) * W) ** 2)
+            for i in range(len(target_link_indices))
+        )
+
+    if len(target_link_indices) > 1:
+        # Rescore with all EEs (CUDA errors only cover the first EE).
+        multi_ee_errors = jax.vmap(all_ee_error)(cfgs)
+        base_errors = multi_ee_errors
+    else:
+        base_errors = errors
+
     if len(constraint_fns) > 0:
         def constraint_penalty(cfg):
             c_vals = jnp.stack([constraint_fns[i](cfg, robot, constraint_args[i]) for i in range(len(constraint_fns))])
@@ -458,13 +471,14 @@ def _ls_ik_solve_cuda_jit(
 
         constraint_errors = jax.vmap(constraint_penalty)(cfgs)  # (n_seeds,)
         final_errors = (
-            errors
+            base_errors
             + constraint_errors
             + continuity_weight * jnp.sum((cfgs - previous_cfg) ** 2, axis=-1)
         )
     else:
+        constraint_errors = jnp.zeros(cfgs.shape[0])
         final_errors = (
-            errors
+            base_errors
             + continuity_weight * jnp.sum((cfgs - previous_cfg) ** 2, axis=-1)
         )
 
@@ -478,8 +492,8 @@ def _ls_ik_solve_cuda_jit(
 
 def ls_ik_solve_cuda(
     robot:               Robot,
-    target_link_index:   int,
-    target_pose:         jaxlie.SE3,
+    target_link_indices: int | tuple[int, ...],
+    target_poses:        jaxlie.SE3 | tuple,
     rng_key:             Array,
     previous_cfg:        Float[Array, "n_act"],
     num_seeds:           int   = 32,
@@ -505,6 +519,13 @@ def ls_ik_solve_cuda(
     Requires ``_ls_ik_cuda_lib.so`` compiled from ``_ls_ik_cuda_kernel.cu``:
         bash src/pyronot/cuda_kernels/build_ls_ik_cuda.sh
 
+    Multi-EE support
+        Pass multiple end-effectors via ``target_link_indices`` (tuple) and
+        ``target_poses`` (tuple).  The CUDA kernel optimises only the FIRST
+        EE; remaining EEs are incorporated into winner selection and
+        post-CUDA JAX refinement.  For a single EE, pass
+        ``target_link_indices=(idx,)`` and ``target_poses=(pose,)``.
+
     Kinematic constraints
         Because the CUDA kernel cannot call arbitrary Python/JAX functions,
         constraints are incorporated in two stages:
@@ -520,8 +541,8 @@ def ls_ik_solve_cuda(
 
     Args:
         robot:                   The robot model.
-        target_link_index:       Index of the target link.
-        target_pose:             Desired SE(3) world pose.
+        target_link_indices:     Index (or tuple of indices) of target link(s).
+        target_poses:            Desired SE(3) world pose (or tuple of poses).
         rng_key:                 JAX PRNG key.
         previous_cfg:            Previous joint configuration.
         num_seeds:               Number of parallel seeds.
@@ -542,6 +563,13 @@ def ls_ik_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Normalise scalar → 1-tuple API.
+    if isinstance(target_link_indices, int):
+        target_link_indices = (target_link_indices,)
+    if isinstance(target_poses, jaxlie.SE3):
+        target_poses = (target_poses,)
+    target_poses_t = tuple(target_poses)
+
     n_act  = robot.joints.num_actuated_joints
 
     if fixed_joint_mask is None:
@@ -556,9 +584,9 @@ def ls_ik_solve_cuda(
         if constraint_weights is not None else None
     )
 
-    # ── Pre-compute ancestor mask (Python level) ───────────────────────────
+    # ── Pre-compute ancestor mask using the FIRST EE (Python level) ────────
     parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_index])
+    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
 
     parent_idx_np    = np.array(robot.joints.parent_indices)
     ancestor_mask_np = np.zeros(robot.joints.num_joints, dtype=np.int32)
@@ -570,7 +598,7 @@ def ls_ik_solve_cuda(
 
     winner, winner_coll_cost = _ls_ik_solve_cuda_jit(
         robot=robot,
-        target_pose=target_pose,
+        target_poses=target_poses_t,
         rng_key=rng_key,
         previous_cfg=previous_cfg,
         num_seeds=num_seeds,
@@ -584,24 +612,26 @@ def ls_ik_solve_cuda(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_mask=ancestor_mask,
         target_joint_idx=target_joint_idx,
+        target_link_indices=target_link_indices,
         constraint_fns=constraint_fns,
         constraint_args=constraint_args_t,
         constraint_weights=constraint_weights_arr,
     )
 
-    # ── Post-CUDA JAX refinement with constraints ──────────────────────────
-    if constraint_fns and constraint_refine_iters > 0:
+    # ── Post-CUDA JAX refinement with all EEs + constraints ───────────────
+    needs_refinement = bool(constraint_fns) or len(target_link_indices) > 1
+    if needs_refinement and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
             if fixed_joint_mask is not None
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
         # Early-exit: skip refinement when the CUDA winner is already
-        # constraint-feasible.  winner_coll_cost was computed inside the JIT
-        # during winner selection — no extra FK evaluation needed here.
-        if float(winner_coll_cost) > 1e-6:
+        # constraint-feasible (only applicable when constraints are present).
+        skip = bool(constraint_fns) and float(winner_coll_cost) <= 1e-6
+        if not skip:
             winner = _ls_ik_single(
-                winner, robot, target_link_index, target_pose,
+                winner, robot, target_link_indices, target_poses_t,
                 constraint_refine_iters, lambda_init, pos_weight, ori_weight,
                 robot.joints.lower_limits, robot.joints.upper_limits,
                 fmask,
@@ -629,11 +659,12 @@ def ls_ik_solve_cuda(
         "eps_pos",
         "eps_ori",
         "constraint_fns",
+        "target_link_indices",
     ),
 )
 def _ls_ik_solve_cuda_batch_jit(
     robot:                Robot,
-    target_poses:         jaxlie.SE3,
+    target_poses_batch:   jaxlie.SE3,
     rng_key:              Array,
     previous_cfgs:        Float[Array, "n_problems n_act"],
     num_seeds:            int,
@@ -647,6 +678,7 @@ def _ls_ik_solve_cuda_batch_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_mask:        Array,
     target_joint_idx:     int,
+    target_link_indices:  tuple[int, ...],
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
@@ -658,8 +690,8 @@ def _ls_ik_solve_cuda_batch_jit(
     upper      = robot.joints.upper_limits
     n_problems = previous_cfgs.shape[0]
 
-    # Batched target poses: (n_problems, 7)
-    target_T_batch = target_poses.wxyz_xyz.astype(jnp.float32)  # (n_problems, 7)
+    # Batched target poses: (n_problems, 7) — CUDA uses only the first EE.
+    target_T_batch = target_poses_batch.wxyz_xyz.astype(jnp.float32)  # (n_problems, 7)
 
     # Seed generation — vectorised across problems
     n_warm   = max(1, num_seeds // 2)
@@ -682,7 +714,7 @@ def _ls_ik_solve_cuda_batch_jit(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, n_seeds, n_act)
 
-    # CUDA batched LM
+    # CUDA batched LM — first EE only
     cfgs, errors = ls_ik_cuda(
         seeds         = seeds,
         twists        = robot.joints.twists,
@@ -707,7 +739,7 @@ def _ls_ik_solve_cuda_batch_jit(
         eps_ori       = eps_ori,
     )  # cfgs: (n_problems, n_seeds, n_act), errors: (n_problems, n_seeds)
 
-    # ── Winner selection per problem: task + constraint penalties + continuity
+    # ── Winner selection per problem: task (all EEs) + constraint penalties + continuity
     if len(constraint_fns) > 0:
         # cfgs: (n_problems, n_seeds, n_act)  — flatten to (n_problems*n_seeds, n_act),
         # evaluate constraints, then reshape back.
@@ -737,7 +769,7 @@ def _ls_ik_solve_cuda_batch_jit(
 
 def ls_ik_solve_cuda_batch(
     robot:               Robot,
-    target_link_index:   int,
+    target_link_indices: int | tuple[int, ...],
     target_poses:        jaxlie.SE3,
     rng_key:             Array,
     previous_cfgs:       Float[Array, "n_problems n_act"],
@@ -757,6 +789,9 @@ def ls_ik_solve_cuda_batch(
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA LS-IK: solve n_problems targets in a single kernel launch.
 
+    The CUDA kernel optimises only the FIRST EE.  Remaining EEs are
+    incorporated into post-CUDA JAX refinement.
+
     Kinematic constraints
         Constraints are evaluated via JAX on all returned candidates for
         winner selection.  When ``constraint_refine_iters > 0`` a short
@@ -765,8 +800,9 @@ def ls_ik_solve_cuda_batch(
 
     Args:
         robot:                   The robot model.
-        target_link_index:       Index of the target link in ``robot.links.names``.
-        target_poses:            Batch of SE(3) targets, shape ``(n_problems,)`` pytree.
+        target_link_indices:     Index (or tuple of indices) of target link(s).
+        target_poses:            Batch of SE(3) targets for the FIRST EE,
+                                 shape ``(n_problems,)`` pytree.
         rng_key:                 JAX PRNG key (split internally per problem).
         previous_cfgs:           Previous configurations, shape ``(n_problems, n_act)``.
         num_seeds:               Number of parallel seeds per problem.
@@ -782,11 +818,15 @@ def ls_ik_solve_cuda_batch(
                                  ``c(cfg, robot) -> scalar``.
         constraint_weights:      Scalar weight for each constraint.
         constraint_refine_iters: JAX LM iterations applied post-CUDA on each
-                                 problem's winner (default 30, set 0 to disable).
+                                 problem's winner (default 12, set 0 to disable).
 
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Normalise scalar → 1-tuple API.
+    if isinstance(target_link_indices, int):
+        target_link_indices = (target_link_indices,)
+
     n_act      = robot.joints.num_actuated_joints
 
     if fixed_joint_mask is None:
@@ -801,9 +841,9 @@ def ls_ik_solve_cuda_batch(
         if constraint_weights is not None else None
     )
 
-    # Ancestor mask (same for all problems — same target link)
+    # Ancestor mask using first EE (same for all problems — same target link)
     parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_index])
+    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
     parent_idx_np    = np.array(robot.joints.parent_indices)
     ancestor_mask_np = np.zeros(robot.joints.num_joints, dtype=np.int32)
     j = target_joint_idx
@@ -814,7 +854,7 @@ def ls_ik_solve_cuda_batch(
 
     winners = _ls_ik_solve_cuda_batch_jit(
         robot=robot,
-        target_poses=target_poses,
+        target_poses_batch=target_poses,
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
         num_seeds=num_seeds,
@@ -828,12 +868,13 @@ def ls_ik_solve_cuda_batch(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_mask=ancestor_mask,
         target_joint_idx=target_joint_idx,
+        target_link_indices=target_link_indices,
         constraint_fns=constraint_fns,
         constraint_args=constraint_args_t,
         constraint_weights=constraint_weights_arr,
     )
 
-    # ── Post-CUDA JAX refinement with constraints (vmapped over batch) ─────
+    # ── Post-CUDA JAX refinement with all EEs + constraints (vmapped over batch)
     if constraint_fns and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
@@ -843,10 +884,14 @@ def ls_ik_solve_cuda_batch(
         lower = robot.joints.lower_limits
         upper = robot.joints.upper_limits
 
+        # For batched, target_poses is the batch for the first EE only.
+        # Wrap each problem's first-EE pose as a 1-tuple for the single-EE
+        # or multi-EE call.  Note: only single-EE is supported for the batch
+        # path's post-CUDA refinement (multi-EE batch is handled by winner selection).
         winners = jax.vmap(
             lambda cfg, wxyz_xyz: _ls_ik_single(
-                cfg, robot, target_link_index,
-                jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),
+                cfg, robot, target_link_indices,
+                (jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),),
                 constraint_refine_iters, lambda_init, pos_weight, ori_weight,
                 lower, upper, fmask,
                 constraint_fns=constraint_fns,

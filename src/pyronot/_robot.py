@@ -161,8 +161,8 @@ class Robot:
         target_link_index = self.links.names.index(target_link_name)
         return hjcd_solve(
             robot=self,
-            target_link_index=target_link_index,
-            target_pose=target_pose,
+            target_link_indices=(target_link_index,),
+            target_poses=(target_pose,),
             rng_key=rng_key,
             previous_cfg=previous_cfg,
             num_seeds=num_seeds,

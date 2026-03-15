@@ -137,13 +137,13 @@ def _coarse_search_single(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("target_link_index", "max_iter", "constraint_fns"),
+    static_argnames=("target_link_indices", "max_iter", "constraint_fns"),
 )
 def _lm_refine_single(
     cfg: Float[Array, "n_act"],
     robot: Robot,
-    target_link_index: int,
-    target_pose: jaxlie.SE3,
+    target_link_indices: tuple[int, ...],
+    target_poses: tuple,
     max_iter: int,
     lambda_init: float,
     limit_prior_weight: float,
@@ -160,6 +160,12 @@ def _lm_refine_single(
 ) -> Float[Array, "n_act"]:
     """Robust Levenberg-Marquardt refinement for one seed.
 
+    Multi-EE support
+        The residual vector becomes
+        ``[w_sg*f_0 | ... | w_sg*f_{N-1} | sqrt_wc*f_coll]``.
+        Adaptive weights ``w_sg`` are computed from the FIRST EE's residual
+        ``f_0`` (intentional — trust region is driven by the primary EE).
+
     Jacobi column scaling
         Each Jacobian column is normalised to unit length before forming the
         normal equations.  This prevents ill-conditioning when joint
@@ -175,6 +181,7 @@ def _lm_refine_single(
     Adaptive residual weighting
         `_adaptive_weights` scales orientation residuals by pos_err/ori_err
         so the solver focuses on closing the translational gap first.
+        Applied to the FIRST EE only; remaining EEs use the same w_sg.
 
     Vectorised line search
         Five step multipliers [1, 0.5, 0.25, 0.1, 0.025] are evaluated
@@ -199,6 +206,8 @@ def _lm_refine_single(
         best-config tracking both use the augmented cost.
     """
     n          = cfg.shape[0]
+    n_c        = len(constraint_fns)
+    n_ee       = len(target_link_indices)
     mid        = (lower + upper) * 0.5
     half_range = (upper - lower) * 0.5 + 1e-8
 
@@ -208,62 +217,47 @@ def _lm_refine_single(
     if fixed_joint_mask is None:
         fixed_joint_mask = jnp.zeros(n, dtype=jnp.bool_)
 
-    # ── Build fused residual callable once, outside the scan ─────────────────
-    # When constraints are present, task and constraint residuals are wrapped in
-    # a single callable.  XLA CSE then deduplicates the robot.forward_kinematics
-    # call shared between _ik_residual and each constraint function.
-    # Adaptive weights are stopped-gradient constants so the Jacobian equals
-    # J_task * w (not J_task * w + f * dw/dq), matching the original behaviour.
-    if len(constraint_fns) > 0:
+    if n_c > 0:
         sqrt_wc = jnp.sqrt(constraint_weights)
-        n_c     = len(constraint_fns)
 
     def lm_step(carry, _):
         c, lam, stall_count, key, best_c, best_err = carry
 
-        # ── Forward pass: unweighted task residual + adaptive weights ─────
-        # Used for: trust-region radius, curr_err_task, and fixed-weight
-        # Jacobian (stop_gradient prevents dw/dq from entering the normal eqs).
-        f         = _ik_residual(c, robot, target_link_index, target_pose)
-        w_sg      = jax.lax.stop_gradient(_adaptive_weights(f))
-        pos_err_r = jnp.linalg.norm(f[:3])
-        ori_err_r = jnp.linalg.norm(f[3:])
+        # ── Forward pass: unweighted first-EE residual + adaptive weights ─
+        # Adaptive weights are computed from f_0 (first EE) — intentional.
+        # Used for: trust-region radius, adaptive weight for ALL EEs.
+        f_0       = _ik_residual(c, robot, target_link_indices[0], target_poses[0])
+        w_sg      = jax.lax.stop_gradient(_adaptive_weights(f_0))
+        pos_err_r = jnp.linalg.norm(f_0[:3])
+        ori_err_r = jnp.linalg.norm(f_0[3:])
 
-        # ── Fused Jacobian (single FK via XLA CSE with the call above) ───
-        if len(constraint_fns) > 0:
-            def fused_fixed(q):
-                ft = _ik_residual(q, robot, target_link_index, target_pose)
+        # ── Fused Jacobian: all EEs + constraints (single FK via XLA CSE) ─
+        def fused_fixed(q: Array) -> Array:
+            """Weighted [EE residuals... | constraint residuals] with one FK pass."""
+            parts: list[Array] = []
+            for i in range(n_ee):
+                ft = _ik_residual(q, robot, target_link_indices[i], target_poses[i])
+                parts.append(ft * w_sg)
+            if n_c > 0:
                 fc = jnp.stack([
                     constraint_fns[i](q, robot, constraint_args[i])
                     for i in range(n_c)
                 ])
-                return jnp.concatenate([ft * w_sg, sqrt_wc * fc])
+                parts.append(sqrt_wc * fc)
+            return jnp.concatenate(parts)
 
-            f_all, vjp_fn = jax.vjp(fused_fixed, c)
-            n_out  = 6 + n_c
-            J_all  = jax.vmap(lambda g: vjp_fn(g)[0])(
-                jnp.eye(n_out, dtype=f_all.dtype)
-            )  # (6+n_c, n)
-            fw_eff   = f_all
-            Jw_eff   = J_all
-            # Consistent with new_err from eval_alpha: both use dot(fused_fixed, fused_fixed)
-            # = ||f*w_sg||^2 + ||sqrt_wc * r_c||^2  (weighted task + constraint)
-            curr_err = jnp.dot(f_all, f_all)
-        else:
-            def task_weighted(q):
-                return _ik_residual(q, robot, target_link_index, target_pose) * w_sg
-
-            fw6, vjp_fn = jax.vjp(task_weighted, c)
-            J6 = jax.vmap(lambda g: vjp_fn(g)[0])(
-                jnp.eye(6, dtype=fw6.dtype)
-            )  # (6, n)
-            fw_eff   = fw6
-            Jw_eff   = J6
-            curr_err = jnp.dot(fw6, fw6)  # = ||f*w_sg||^2, consistent with eval_alpha
+        n_out = 6 * n_ee + n_c
+        f_all, vjp_fn = jax.vjp(fused_fixed, c)
+        J_all  = jax.vmap(lambda g: vjp_fn(g)[0])(
+            jnp.eye(n_out, dtype=f_all.dtype)
+        )  # (n_out, n)
+        fw_eff   = f_all
+        Jw_eff   = J_all
+        curr_err = jnp.dot(f_all, f_all)
 
         # ── Jacobi column scaling ─────────────────────────────────────────
         col_scale = jnp.linalg.norm(Jw_eff, axis=0) + 1e-8    # (n,)
-        Js        = Jw_eff / col_scale[None, :]                # (6+n_c, n) unit-cols
+        Js        = Jw_eff / col_scale[None, :]                # (n_out, n) unit-cols
 
         # ── Normal equations with joint-limit prior (float32) ────────────
         D_prior_s = D_prior_raw / col_scale ** 2          # (n,)
@@ -275,7 +269,7 @@ def _lm_refine_single(
         delta = p / col_scale                               # (n,) unscaled
         delta = jnp.where(fixed_joint_mask, 0.0, delta)   # freeze fixed joints
 
-        # ── Trust-region step clipping ────────────────────────────────────
+        # ── Trust-region step clipping (first EE drives the radius) ──────
         R = jnp.where(
             (pos_err_r > 1e-2) | (ori_err_r > 0.6),  0.38,
             jnp.where(
@@ -287,16 +281,10 @@ def _lm_refine_single(
         delta = jnp.where(delta_norm > R, delta * R / delta_norm, delta)
 
         # ── Vectorised line search (fused: single FK per candidate) ──────
-        if len(constraint_fns) > 0:
-            def eval_alpha(alpha):
-                nc     = jnp.clip(c + alpha * delta, lower, upper)
-                nf_all = fused_fixed(nc)
-                return jnp.dot(nf_all, nf_all)
-        else:
-            def eval_alpha(alpha):
-                nc = jnp.clip(c + alpha * delta, lower, upper)
-                nf = task_weighted(nc)
-                return jnp.dot(nf, nf)
+        def eval_alpha(alpha):
+            nc     = jnp.clip(c + alpha * delta, lower, upper)
+            nf_all = fused_fixed(nc)
+            return jnp.dot(nf_all, nf_all)
 
         alpha_errs  = jax.vmap(eval_alpha)(_LS_ALPHAS)    # (5,)
         best_ls_idx = jnp.argmin(alpha_errs)
@@ -328,14 +316,20 @@ def _lm_refine_single(
         return (c_out.astype(c.dtype), lam_out, stall_out, key, new_best_c, new_best_err), None
 
     # ── Initial error (same weighted metric as curr_err / eval_alpha) ────────
-    init_f   = _ik_residual(cfg, robot, target_link_index, target_pose)
-    init_w   = jax.lax.stop_gradient(_adaptive_weights(init_f))
-    if len(constraint_fns) > 0:
-        init_rc  = jnp.stack([constraint_fns[i](cfg, robot, constraint_args[i]) for i in range(n_c)])
-        init_err = (jnp.dot(init_f * init_w, init_f * init_w)
-                    + jnp.dot(sqrt_wc * init_rc, sqrt_wc * init_rc))
-    else:
-        init_err = jnp.dot(init_f * init_w, init_f * init_w)
+    init_f_0 = _ik_residual(cfg, robot, target_link_indices[0], target_poses[0])
+    init_w   = jax.lax.stop_gradient(_adaptive_weights(init_f_0))
+
+    # Build initial fused residual for init_err
+    init_parts: list[Array] = [init_f_0 * init_w]
+    for i in range(1, n_ee):
+        f_i = _ik_residual(cfg, robot, target_link_indices[i], target_poses[i])
+        init_parts.append(f_i * init_w)
+    if n_c > 0:
+        sqrt_wc_init = jnp.sqrt(constraint_weights)
+        init_rc = jnp.stack([constraint_fns[i](cfg, robot, constraint_args[i]) for i in range(n_c)])
+        init_parts.append(sqrt_wc_init * init_rc)
+    init_fused = jnp.concatenate(init_parts)
+    init_err   = jnp.dot(init_fused, init_fused)
 
     init_carry = (
         cfg,
@@ -379,14 +373,14 @@ def _get_refine_schedule(num_seeds: int) -> tuple[int, int]:
 @functools.partial(
     jax.jit,
     static_argnames=(
-        "target_link_index", "num_seeds", "coarse_max_iter", "lm_max_iter",
+        "target_link_indices", "num_seeds", "coarse_max_iter", "lm_max_iter",
         "constraint_fns",
     ),
 )
 def hjcd_solve(
     robot: Robot,
-    target_link_index: int,
-    target_pose: jaxlie.SE3,
+    target_link_indices: tuple[int, ...],
+    target_poses: tuple,
     rng_key: Array,
     previous_cfg: Float[Array, "n_act"],
     num_seeds: int = 32,
@@ -410,20 +404,28 @@ def hjcd_solve(
     Phase 1 — Coarse search
         Warm seeds near ``previous_cfg`` (σ = 0.05) are mixed with uniform
         random seeds across joint ranges.  All seeds are refined with
-        ``coarse_max_iter`` Hamiltonian coordinate-descent steps.
+        ``coarse_max_iter`` Hamiltonian coordinate-descent steps using the
+        FIRST EE only (intentional — the coarse phase is a global explorer).
 
     Phase 2 — LM refinement
         Top-K coarse solutions are tiled ``repeats`` times with small
         Gaussian perturbations (σ = 0.01).  Each copy is refined with the
         advanced LM solver (column scaling, joint-limit prior, line search,
-        stall kicks).  Each refinement seed gets an independent RNG key for
-        its kick sequence so the batch explores diverse recovery trajectories.
+        stall kicks, ALL EEs in residual).  Each refinement seed gets an
+        independent RNG key for its kick sequence so the batch explores
+        diverse recovery trajectories.
+
+    Multi-EE support
+        Pass multiple end-effectors via ``target_link_indices`` (tuple) and
+        ``target_poses`` (tuple).  The coarse phase uses only the first EE;
+        LM refinement uses all EEs.  For a single EE, pass
+        ``target_link_indices=(idx,)`` and ``target_poses=(pose,)``.
 
     Winner selection
-        The best refined configuration is chosen by task-space residual plus
-        ``continuity_weight`` · ‖q − previous_cfg‖².  This weight is used
-        **only here** (tie-breaking), never inside the optimisation loop, so
-        it cannot cause the "dancing around" instability.
+        The best refined configuration is chosen by task-space residual
+        summed over ALL EEs, plus ``continuity_weight`` · ‖q − previous_cfg‖².
+        This weight is used **only here** (tie-breaking), never inside the
+        optimisation loop, so it cannot cause the "dancing around" instability.
 
     Kinematic constraints
         Optional penalty terms added to the LM phase objective (Phase 2).
@@ -441,8 +443,9 @@ def hjcd_solve(
 
     Args:
         robot:               The robot model.
-        target_link_index:   Index of the target link in ``robot.links.names``.
-        target_pose:         Desired SE(3) pose for the target link.
+        target_link_indices: Tuple of target link indices (static, for JIT).
+                             Use a 1-tuple for single-EE problems.
+        target_poses:        Tuple of desired SE(3) poses (dynamic pytree).
         rng_key:             JAX PRNG key.
         previous_cfg:        Previous joint configuration for warm-starting
                              and continuity-aware winner selection.
@@ -488,7 +491,7 @@ def hjcd_solve(
     n_warm   = min(top_k, num_seeds)
     n_random = num_seeds - n_warm
 
-    # ── Phase 1: coarse coordinate descent ────────────────────────────────
+    # ── Phase 1: coarse coordinate descent (FIRST EE only) ────────────────
     key_seeds, key_warm, key_perturb, key_lm = jax.random.split(rng_key, 4)
 
     warm_keys  = jax.random.split(key_warm, n_warm)
@@ -506,9 +509,10 @@ def hjcd_solve(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (B, n_act)
 
+    # Coarse phase uses only the first EE (global explorer).
     coarse_cfgs = jax.vmap(
         lambda cfg: _coarse_search_single(
-            cfg, robot, target_link_index, target_pose, coarse_max_iter,
+            cfg, robot, target_link_indices[0], target_poses[0], coarse_max_iter,
             epsilon, nu, lower, upper,
             fixed_joint_mask,
         )
@@ -516,11 +520,11 @@ def hjcd_solve(
 
     coarse_errors = jax.vmap(
         lambda cfg: jnp.sum(
-            _ik_residual(cfg, robot, target_link_index, target_pose) ** 2
+            _ik_residual(cfg, robot, target_link_indices[0], target_poses[0]) ** 2
         )
     )(coarse_cfgs)                                             # (B,)
 
-    # ── Phase 2: select top-K, perturb, refine with LM ────────────────────
+    # ── Phase 2: select top-K, perturb, refine with LM (ALL EEs) ──────────
     top_k_indices = jnp.argsort(coarse_errors)[:top_k]
     top_k_cfgs    = coarse_cfgs[top_k_indices]                # (top_k, n_act)
 
@@ -540,7 +544,7 @@ def hjcd_solve(
 
     refine_cfgs = jax.vmap(
         lambda cfg, key: _lm_refine_single(
-            cfg, robot, target_link_index, target_pose,
+            cfg, robot, target_link_indices, target_poses,
             lm_max_iter, lambda_init, limit_prior_weight, kick_scale,
             key, lower, upper, eps_pos, eps_ori, fixed_joint_mask,
             constraint_fns=constraint_fns,
@@ -549,10 +553,14 @@ def hjcd_solve(
         )
     )(refine_seeds, lm_keys)                                   # (top_k*repeats, n_act)
 
-    # ── Winner selection: task error + constraint penalties + continuity ───
+    # ── Winner selection: task error (all EEs) + constraint penalties + continuity
     # continuity_weight acts only here, NOT during optimisation.
     def winner_err(cfg):
-        task_err = jnp.sum(_ik_residual(cfg, robot, target_link_index, target_pose) ** 2)
+        # Sum squared residuals over all EEs.
+        task_err = sum(
+            jnp.sum(_ik_residual(cfg, robot, target_link_indices[i], target_poses[i]) ** 2)
+            for i in range(len(target_link_indices))
+        )
         if len(constraint_fns) > 0:
             c_vals = jnp.stack([constraint_fns[i](cfg, robot, constraint_args[i]) for i in range(len(constraint_fns))])
             task_err = task_err + jnp.sum(constraint_weights * c_vals ** 2)
@@ -581,11 +589,12 @@ def hjcd_solve(
         "eps_pos",
         "eps_ori",
         "constraint_fns",
+        "target_link_indices",
     ),
 )
 def _hjcd_solve_cuda_jit(
     robot: Robot,
-    target_pose: jaxlie.SE3,
+    target_poses: tuple,
     rng_key: Array,
     previous_cfg: Float[Array, "n_act"],
     num_seeds: int,
@@ -602,6 +611,7 @@ def _hjcd_solve_cuda_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_mask: Array,
     target_joint_idx: int,
+    target_link_indices: tuple[int, ...],
     constraint_fns: tuple = (),
     constraint_args: tuple = (),
     constraint_weights: Float[Array, "n_constraints"] | None = None,
@@ -612,8 +622,8 @@ def _hjcd_solve_cuda_jit(
     lower  = robot.joints.lower_limits
     upper  = robot.joints.upper_limits
 
-    # Target pose as [w, x, y, z, tx, ty, tz] float32.
-    target_T = target_pose.wxyz_xyz.astype(jnp.float32)
+    # Target pose as [w, x, y, z, tx, ty, tz] float32 — FIRST EE only for CUDA.
+    target_T = target_poses[0].wxyz_xyz.astype(jnp.float32)
 
     # ── Seed generation (mirrors hjcd_solve exactly) ──────────────────────
     top_k, repeats = _get_refine_schedule(num_seeds)
@@ -634,7 +644,7 @@ def _hjcd_solve_cuda_jit(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (num_seeds, n_act)
 
-    # ── Phase 1: CUDA coarse coordinate descent ───────────────────────────
+    # ── Phase 1: CUDA coarse coordinate descent (first EE) ───────────────
     coarse_cfgs, coarse_errors = hjcd_ik_coarse_cuda(
         seeds=seeds[None],          # (1, num_seeds, n_act)
         twists=robot.joints.twists,
@@ -680,7 +690,7 @@ def _hjcd_solve_cuda_jit(
         key_lm, (n_lm_seeds, lm_max_iter, n_act)
     ).astype(jnp.float32)
 
-    # ── Phase 2: CUDA Levenberg-Marquardt refinement ──────────────────────
+    # ── Phase 2: CUDA Levenberg-Marquardt refinement (first EE) ──────────
     refine_cfgs, refine_errors_raw = hjcd_ik_lm_cuda(
         seeds=lm_seeds[None],           # (1, n_lm_seeds, n_act)
         noise=lm_kick_noise[None],      # (1, n_lm_seeds, lm_max_iter, n_act)
@@ -707,9 +717,21 @@ def _hjcd_solve_cuda_jit(
         eps_ori=eps_ori,
     )
     refine_cfgs       = refine_cfgs[0]       # (n_lm_seeds, n_act)
-    refine_errors_raw = refine_errors_raw[0]  # (n_lm_seeds,)
+    refine_errors_raw = refine_errors_raw[0]  # (n_lm_seeds,) — first EE only
 
-    # ── Winner selection: task error + constraint penalties + continuity ───
+    # ── Winner selection: all EE task errors + constraint penalties + continuity
+    if len(target_link_indices) > 1:
+        # Rescore with remaining EEs on top of the CUDA first-EE errors.
+        def extra_ee_error(cfg):
+            return sum(
+                jnp.sum(_ik_residual(cfg, robot, target_link_indices[i], target_poses[i]) ** 2)
+                for i in range(1, len(target_link_indices))
+            )
+        extra_errors = jax.vmap(extra_ee_error)(refine_cfgs)
+        base_errors  = refine_errors_raw + extra_errors
+    else:
+        base_errors = refine_errors_raw
+
     if len(constraint_fns) > 0:
         def constraint_penalty(cfg):
             c_vals = jnp.stack([constraint_fns[i](cfg, robot, constraint_args[i]) for i in range(len(constraint_fns))])
@@ -717,13 +739,13 @@ def _hjcd_solve_cuda_jit(
 
         constraint_errors = jax.vmap(constraint_penalty)(refine_cfgs)  # (n_lm_seeds,)
         refine_errors = (
-            refine_errors_raw
+            base_errors
             + constraint_errors
             + continuity_weight * jnp.sum((refine_cfgs - previous_cfg) ** 2, axis=-1)
         )
     else:
         refine_errors = (
-            refine_errors_raw
+            base_errors
             + continuity_weight * jnp.sum((refine_cfgs - previous_cfg) ** 2, axis=-1)
         )
 
@@ -733,8 +755,8 @@ def _hjcd_solve_cuda_jit(
 
 def hjcd_solve_cuda(
     robot: Robot,
-    target_link_index: int,
-    target_pose: jaxlie.SE3,
+    target_link_indices: int | tuple[int, ...],
+    target_poses: jaxlie.SE3 | tuple,
     rng_key: Array,
     previous_cfg: Float[Array, "n_act"],
     num_seeds: int = 1024,
@@ -767,6 +789,13 @@ def hjcd_solve_cuda(
     JITed region, so seed generation, top-K selection, and winner selection
     benefit from JAX's tracing/dispatch cache.
 
+    Multi-EE support
+        Pass multiple end-effectors via ``target_link_indices`` (tuple) and
+        ``target_poses`` (tuple).  The CUDA kernels optimise only the FIRST
+        EE; remaining EEs are incorporated into winner selection and
+        post-CUDA JAX refinement.  For a single EE, pass
+        ``target_link_indices=(idx,)`` and ``target_poses=(pose,)``.
+
     Key numerical improvement over the JAX path:
       - Normal equations are formed and solved in **float64** inside the CUDA
         kernel, which avoids the ill-conditioning that causes the accuracy
@@ -790,8 +819,8 @@ def hjcd_solve_cuda(
 
     Args:
         robot:                   The robot model.
-        target_link_index:       Index into ``robot.links.names``.
-        target_pose:             Desired SE(3) world pose for the target link.
+        target_link_indices:     Index (or tuple of indices) of target link(s).
+        target_poses:            Desired SE(3) world pose (or tuple of poses).
         rng_key:                 JAX PRNG key.
         previous_cfg:            Previous joint configuration (warm-start + continuity).
         num_seeds:               Coarse-phase batch size B.
@@ -812,11 +841,18 @@ def hjcd_solve_cuda(
                                  ``c(cfg, robot) -> scalar``.
         constraint_weights:      Scalar weight for each constraint.
         constraint_refine_iters: JAX LM iterations applied post-CUDA on the
-                                 winner when constraints are provided (default 30).
+                                 winner when constraints are provided (default 12).
 
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Normalise scalar → 1-tuple API.
+    if isinstance(target_link_indices, int):
+        target_link_indices = (target_link_indices,)
+    if isinstance(target_poses, jaxlie.SE3):
+        target_poses = (target_poses,)
+    target_poses_t = tuple(target_poses)
+
     n_act  = robot.joints.num_actuated_joints
 
     if fixed_joint_mask is None:
@@ -831,11 +867,11 @@ def hjcd_solve_cuda(
         if constraint_weights is not None else None
     )
 
-    # ── Pre-compute Python-level values (need concrete arrays) ────────────
+    # ── Pre-compute Python-level values using FIRST EE ─────────────────────
     # These cannot be computed inside jax.jit because parent_joint_indices
     # and parent_indices are JAX-array leaves of the Robot pytree.
     parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx = int(parent_joint_indices_np[target_link_index])
+    target_joint_idx = int(parent_joint_indices_np[target_link_indices[0]])
 
     parent_idx_np = np.array(robot.joints.parent_indices)
     ancestor_mask_np = np.zeros(robot.joints.num_joints, dtype=np.int32)
@@ -847,7 +883,7 @@ def hjcd_solve_cuda(
 
     winner = _hjcd_solve_cuda_jit(
         robot=robot,
-        target_pose=target_pose,
+        target_poses=target_poses_t,
         rng_key=rng_key,
         previous_cfg=previous_cfg,
         num_seeds=num_seeds,
@@ -864,13 +900,15 @@ def hjcd_solve_cuda(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_mask=ancestor_mask,
         target_joint_idx=target_joint_idx,
+        target_link_indices=target_link_indices,
         constraint_fns=constraint_fns,
         constraint_args=constraint_args_t,
         constraint_weights=constraint_weights_arr,
     )
 
-    # ── Post-CUDA JAX refinement with constraints ──────────────────────────
-    if constraint_fns and constraint_refine_iters > 0:
+    # ── Post-CUDA JAX refinement with all EEs + constraints ───────────────
+    needs_refinement = bool(constraint_fns) or len(target_link_indices) > 1
+    if needs_refinement and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
             if fixed_joint_mask is not None
@@ -878,7 +916,7 @@ def hjcd_solve_cuda(
         )
         key_post = jax.random.PRNGKey(0)  # deterministic post-refinement key
         winner = _lm_refine_single(
-            winner, robot, target_link_index, target_pose,
+            winner, robot, target_link_indices, target_poses_t,
             constraint_refine_iters, lambda_init, limit_prior_weight, kick_scale,
             key_post, robot.joints.lower_limits, robot.joints.upper_limits,
             eps_pos, eps_ori, fmask,
@@ -907,11 +945,12 @@ def hjcd_solve_cuda(
         "eps_pos",
         "eps_ori",
         "constraint_fns",
+        "target_link_indices",
     ),
 )
 def _hjcd_solve_cuda_batch_jit(
     robot:                Robot,
-    target_poses:         jaxlie.SE3,
+    target_poses_batch:   jaxlie.SE3,
     rng_key:              Array,
     previous_cfgs:        Float[Array, "n_problems n_act"],
     num_seeds:            int,
@@ -928,6 +967,7 @@ def _hjcd_solve_cuda_batch_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_mask:        Array,
     target_joint_idx:     int,
+    target_link_indices:  tuple[int, ...],
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
@@ -939,8 +979,8 @@ def _hjcd_solve_cuda_batch_jit(
     upper      = robot.joints.upper_limits
     n_problems = previous_cfgs.shape[0]
 
-    # Batched target poses: (n_problems, 7)
-    target_T_batch = target_poses.wxyz_xyz.astype(jnp.float32)
+    # Batched target poses: (n_problems, 7) — CUDA uses first EE only.
+    target_T_batch = target_poses_batch.wxyz_xyz.astype(jnp.float32)
 
     # ── Seed generation (mirrors hjcd_solve exactly) ──────────────────────
     top_k, repeats = _get_refine_schedule(num_seeds)
@@ -964,7 +1004,7 @@ def _hjcd_solve_cuda_batch_jit(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, num_seeds, n_act)
 
-    # ── Phase 1: CUDA coarse coordinate descent ───────────────────────────
+    # ── Phase 1: CUDA coarse coordinate descent (first EE) ───────────────
     coarse_cfgs, coarse_errors = hjcd_ik_coarse_cuda(
         seeds=seeds,                 # (n_problems, num_seeds, n_act)
         twists=robot.joints.twists,
@@ -1004,7 +1044,7 @@ def _hjcd_solve_cuda_batch_jit(
         key_lm, (n_problems, n_lm_seeds, lm_max_iter, n_act)
     ).astype(jnp.float32)
 
-    # ── Phase 2: CUDA Levenberg-Marquardt refinement ──────────────────────
+    # ── Phase 2: CUDA Levenberg-Marquardt refinement (first EE) ──────────
     refine_cfgs, refine_errors_raw = hjcd_ik_lm_cuda(
         seeds=lm_seeds,
         noise=lm_kick_noise,
@@ -1031,7 +1071,7 @@ def _hjcd_solve_cuda_batch_jit(
         eps_ori=eps_ori,
     )
 
-    # ── Winner selection: task + constraint penalties + continuity ─────────
+    # ── Winner selection: task (all EEs) + constraint penalties + continuity ─
     if len(constraint_fns) > 0:
         flat_cfgs = refine_cfgs.reshape(n_problems * n_lm_seeds, n_act)
 
@@ -1059,7 +1099,7 @@ def _hjcd_solve_cuda_batch_jit(
 
 def hjcd_solve_cuda_batch(
     robot:               Robot,
-    target_link_index:   int,
+    target_link_indices: int | tuple[int, ...],
     target_poses:        jaxlie.SE3,
     rng_key:             Array,
     previous_cfgs:       Float[Array, "n_problems n_act"],
@@ -1090,8 +1130,9 @@ def hjcd_solve_cuda_batch(
 
     Args:
         robot:                   The robot model.
-        target_link_index:       Index into ``robot.links.names``.
-        target_poses:            Batch of SE(3) targets, shape ``(n_problems,)`` pytree.
+        target_link_indices:     Index (or tuple of indices) of target link(s).
+        target_poses:            Batch of SE(3) targets for the FIRST EE,
+                                 shape ``(n_problems,)`` pytree.
         rng_key:                 JAX PRNG key.
         previous_cfgs:           Previous configurations, shape ``(n_problems, n_act)``.
         num_seeds:               Coarse-phase batch size per problem.
@@ -1115,6 +1156,10 @@ def hjcd_solve_cuda_batch(
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Normalise scalar → 1-tuple API.
+    if isinstance(target_link_indices, int):
+        target_link_indices = (target_link_indices,)
+
     n_act      = robot.joints.num_actuated_joints
 
     if fixed_joint_mask is None:
@@ -1129,9 +1174,9 @@ def hjcd_solve_cuda_batch(
         if constraint_weights is not None else None
     )
 
-    # Ancestor mask (same for all problems)
+    # Ancestor mask using first EE (same for all problems)
     parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx = int(parent_joint_indices_np[target_link_index])
+    target_joint_idx = int(parent_joint_indices_np[target_link_indices[0]])
     parent_idx_np = np.array(robot.joints.parent_indices)
     ancestor_mask_np = np.zeros(robot.joints.num_joints, dtype=np.int32)
     j = target_joint_idx
@@ -1142,7 +1187,7 @@ def hjcd_solve_cuda_batch(
 
     winners = _hjcd_solve_cuda_batch_jit(
         robot=robot,
-        target_poses=target_poses,
+        target_poses_batch=target_poses,
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
         num_seeds=num_seeds,
@@ -1159,12 +1204,13 @@ def hjcd_solve_cuda_batch(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_mask=ancestor_mask,
         target_joint_idx=target_joint_idx,
+        target_link_indices=target_link_indices,
         constraint_fns=constraint_fns,
         constraint_args=constraint_args_t,
         constraint_weights=constraint_weights_arr,
     )
 
-    # ── Post-CUDA JAX refinement with constraints (vmapped over batch) ─────
+    # ── Post-CUDA JAX refinement with all EEs + constraints (vmapped over batch)
     if constraint_fns and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
@@ -1177,8 +1223,8 @@ def hjcd_solve_cuda_batch(
 
         winners = jax.vmap(
             lambda cfg, wxyz_xyz: _lm_refine_single(
-                cfg, robot, target_link_index,
-                jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),
+                cfg, robot, target_link_indices,
+                (jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),),
                 constraint_refine_iters, lambda_init, limit_prior_weight, kick_scale,
                 key_post, lower, upper, eps_pos, eps_ori, fmask,
                 constraint_fns=constraint_fns,

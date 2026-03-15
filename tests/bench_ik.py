@@ -157,8 +157,11 @@ def _run_solver_sequential(
     results = []
     for i, target_pose in enumerate(target_poses):
         cfg, t = _time_solve(
-            fn, robot, target_link_index, target_pose,
-            rng_keys[i], previous_cfgs[i],
+            fn, robot,
+            target_link_indices=(target_link_index,),
+            target_poses=(target_pose,),
+            rng_key=rng_keys[i],
+            previous_cfg=previous_cfgs[i],
             fixed_joint_mask=fixed_joint_mask,
             **kwargs,
         )
@@ -172,8 +175,9 @@ def _run_solver_batch(
     rng_key, previous_cfgs, kwargs,
 ) -> BatchResult:
     """Run a batch solver once over all N_TARGETS, time it N_TIMED times."""
+    tli = (target_link_index,)
     cfgs_out, total_t = _time_solve(
-        fn, robot, target_link_index, target_poses_stacked,
+        fn, robot, tli, target_poses_stacked,
         rng_key, previous_cfgs,
         fixed_joint_mask=fixed_joint_mask,
         **kwargs,
@@ -229,16 +233,21 @@ def _print_summary_batch(label: str, result: BatchResult) -> None:
 def _make_batched_jax_solver(base_fn, ik_kwargs):
     """Create a JITted batched JAX solver (vmap over targets)."""
     def _solve_batch(
-        robot, target_link_index, target_poses, rng_keys, previous_cfgs, fixed_joint_mask
+        robot, target_link_indices, target_poses, rng_keys, previous_cfgs, fixed_joint_mask
     ):
         def _single(target_pose, rng_key, previous_cfg):
             return base_fn(
-                robot, target_link_index, target_pose, rng_key, previous_cfg,
-                fixed_joint_mask=fixed_joint_mask, **ik_kwargs,
+                robot=robot,
+                target_link_indices=target_link_indices,
+                target_poses=(target_pose,),
+                rng_key=rng_key,
+                previous_cfg=previous_cfg,
+                fixed_joint_mask=fixed_joint_mask,
+                **ik_kwargs,
             )
         return jax.vmap(_single, in_axes=(0, 0, 0))(target_poses, rng_keys, previous_cfgs)
 
-    return jax.jit(_solve_batch, static_argnames=("target_link_index",))
+    return jax.jit(_solve_batch, static_argnames=("target_link_indices",))
 
 
 # ---------------------------------------------------------------------------
@@ -301,11 +310,11 @@ def main() -> None:  # noqa: C901
 
     jit_hjcd = jax.jit(
         functools.partial(hjcd_solve, **IK_KWARGS_HJCD_JAX),
-        static_argnames=("target_link_index", "num_seeds", "coarse_max_iter", "lm_max_iter"),
+        static_argnames=("target_link_indices", "num_seeds", "coarse_max_iter", "lm_max_iter"),
     )
     jit_ls = jax.jit(
         functools.partial(ls_ik_solve, **IK_KWARGS_LS_JAX),
-        static_argnames=("target_link_index", "num_seeds", "max_iter"),
+        static_argnames=("target_link_indices", "num_seeds", "max_iter"),
     )
     jit_hjcd_batch = _make_batched_jax_solver(hjcd_solve, IK_KWARGS_HJCD_JAX)
     jit_ls_batch   = _make_batched_jax_solver(ls_ik_solve, IK_KWARGS_LS_JAX)
@@ -325,25 +334,29 @@ def main() -> None:  # noqa: C901
         ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA),
     ]
 
+    tli = (target_link_index,)
+
     for name, fn, kwargs in warmup_seq:
         print(f"Warming up {name} ...")
         for _ in range(N_WARMUP):
-            out = fn(robot, target_link_index, target_poses[0], rng0, mid_cfg,
+            out = fn(robot=robot, target_link_indices=tli, target_poses=(target_poses[0],),
+                     rng_key=rng0, previous_cfg=mid_cfg,
                      fixed_joint_mask=fixed_joint_mask, **kwargs)
             jax.block_until_ready(out)
 
     for name, fn, kwargs in warmup_batch_jax:
         print(f"Warming up {name} ...")
         for _ in range(N_WARMUP):
-            out = fn(robot, target_link_index, target_poses_stacked, rng_keys_batch,
+            out = fn(robot, tli, target_poses_stacked, rng_keys_batch,
                      previous_cfgs_batch, fixed_joint_mask)
             jax.block_until_ready(out)
 
     for name, fn, kwargs in warmup_batch_cuda:
         print(f"Warming up {name} ...")
         for _ in range(N_WARMUP):
-            out = fn(robot, target_link_index, target_poses_stacked, rng0,
-                     previous_cfgs_batch, fixed_joint_mask=fixed_joint_mask, **kwargs)
+            out = fn(robot=robot, target_link_indices=tli, target_poses=target_poses_stacked,
+                     rng_key=rng0, previous_cfgs=previous_cfgs_batch,
+                     fixed_joint_mask=fixed_joint_mask, **kwargs)
             jax.block_until_ready(out)
 
     # ------------------------------------------------------------------
@@ -368,6 +381,7 @@ def main() -> None:  # noqa: C901
             fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs,
         )
 
+
     # ------------------------------------------------------------------
     # Batch evaluation (JAX + CUDA batch solvers)
     # ------------------------------------------------------------------
@@ -389,6 +403,7 @@ def main() -> None:  # noqa: C901
             fn, robot, target_link_index, target_poses_stacked,
             fixed_joint_mask, rng, previous_cfgs_batch, kwargs,
         )
+
 
     # ------------------------------------------------------------------
     # Summary

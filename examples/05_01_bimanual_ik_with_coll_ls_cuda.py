@@ -4,32 +4,24 @@ Bimanual Inverse Kinematics with collision avoidance for a Baxter robot
 using the CUDA LS-IK solver.
 
 Two end-effectors are controlled simultaneously:
-  - right_gripper: primary IK target (direct task objective)
-  - left_gripper:  secondary IK target (constraint penalty)
+  - right_gripper: primary IK target (CUDA kernel optimises this EE)
+  - left_gripper:  secondary IK target (incorporated in JAX post-refinement)
 
 Two obstacles are demonstrated:
   - A floor half-space (z = 0).
   - A user-draggable sphere obstacle.
 
-How constraints work in the CUDA path
---------------------------------------
-The CUDA kernel itself cannot call arbitrary Python/JAX functions, so
-constraints are applied in two JAX-side stages after the CUDA LM loop:
+How multi-EE + constraints work in the CUDA path
+-------------------------------------------------
+The CUDA kernel optimises only the first EE (right_gripper).  Both EEs are
+incorporated in two JAX-side stages:
 
-  1. Winner selection — all ``num_seeds`` CUDA-returned configurations are
-     scored with the collision and left-arm IK penalties added to the task
-     error.  The least penalised seed is selected as the winner.
+  1. Winner selection — all CUDA-returned configurations are scored with all
+     EE residuals and the collision penalty.  The least penalised seed wins.
 
-  2. Post-CUDA JAX refinement — ``constraint_refine_iters`` additional
-     Levenberg-Marquardt steps are run on the winner using the full
-     constraint-augmented JAX solver.  This lets the robot escape
-     configurations that the unconstrained CUDA kernel left in collision
-     or with poor left-arm IK accuracy.
-
-The left-arm penalty is the weighted L2 norm of the SE(3) log-map residual
-for the left gripper — when squared by the LM cost it yields:
-    pos_weight^2 * ||r_pos||^2 + ori_weight^2 * ||r_ori||^2
-which matches the primary task cost structure.
+  2. Post-CUDA JAX refinement — ``constraint_refine_iters`` additional LM
+     steps are run on the winner using the full multi-EE + constraint cost,
+     giving the left arm a proper 6D Jacobian contribution.
 """
 
 import time
@@ -116,25 +108,8 @@ def main():
             + jnp.sum(jax.nn.softplus(-d_sphere / _COLL_EPS) * _COLL_EPS)
         )
 
-    _LEFT_POS_W = 50.0
-    _LEFT_ORI_W = 10.0
-
-    def _left_arm_ik_penalty(cfg, robot, left_target_pose):
-        """Left-arm IK residual as a differentiable scalar penalty.
-
-        Returns the weighted L2 norm of the SE(3) log-map residual so that
-        when the LM cost squares it, it yields:
-            pos_weight^2 * ||r_pos||^2 + ori_weight^2 * ||r_ori||^2
-        which matches the primary task cost structure.
-        """
-        Ts = robot.forward_kinematics(cfg)
-        T_actual = jaxlie.SE3(Ts[left_ee_idx])
-        res = (T_actual.inverse() @ left_target_pose).log()
-        fw = jnp.concatenate([_LEFT_POS_W * res[:3], _LEFT_ORI_W * res[3:]])
-        return jnp.linalg.norm(fw)
-
-    constraints        = [_collision_penalty, _left_arm_ik_penalty]
-    constraint_weights = [1e8, 1.0]
+    constraints        = [_collision_penalty]
+    constraint_weights = [1e8]
 
     # Initialise sphere geometry (updated each frame from the handle).
     sphere_world = sphere_coll_template.transform_from_wxyz_position(
@@ -160,22 +135,22 @@ def main():
         )
 
         # ── Solve bimanual IK with collision constraints (CUDA LS solver) ────
-        # Stage 1: CUDA kernel finds num_seeds collision-unaware candidates.
-        # Stage 2: JAX winner selection scores candidates with both penalties.
-        # Stage 3: Post-CUDA JAX LM refines winner with full constraint cost.
+        # Stage 1: CUDA kernel finds num_seeds candidates for the right arm.
+        # Stage 2: JAX winner selection scores all EEs + collision penalty.
+        # Stage 3: Post-CUDA JAX LM refines winner with full multi-EE + constraint cost.
         rng_key, subkey = jax.random.split(rng_key)
         start_time = time.perf_counter()
 
         solution = ls_ik_solve_cuda(
             robot=robot,
-            target_link_index=right_ee_idx,
-            target_pose=target_pose_right,
+            target_link_indices=(right_ee_idx, left_ee_idx),
+            target_poses=(target_pose_right, target_pose_left),
             rng_key=subkey,
             previous_cfg=solution,
             num_seeds=256,
             fixed_joint_mask=fixed_joint_mask,
             constraints=constraints,
-            constraint_args=[sphere_world, target_pose_left],
+            constraint_args=[sphere_world],
             constraint_weights=constraint_weights,
         )
         solution.block_until_ready()

@@ -142,8 +142,8 @@ def main():
 
         solution = ls_ik_solve_cuda(
             robot=robot,
-            target_link_index=target_link_index,
-            target_pose=target_pose,
+            target_link_indices=(target_link_index,),
+            target_poses=(target_pose,),
             rng_key=subkey,
             previous_cfg=solution,
             num_seeds=256,

@@ -4,22 +4,16 @@ Bimanual Inverse Kinematics with collision avoidance for a Baxter robot
 using the pure-JAX LS-IK solver.
 
 Two end-effectors are controlled simultaneously:
-  - right_gripper: primary IK target (direct task objective)
-  - left_gripper:  secondary IK target (constraint penalty)
+  - right_gripper: primary IK target
+  - left_gripper:  secondary IK target
 
 Two obstacles are demonstrated:
   - A floor half-space (z = 0).
   - A user-draggable sphere obstacle.
 
-The right-arm IK is the primary task residual.  The left-arm IK target and
-collision avoidance are added as differentiable penalty terms inside the
-Levenberg-Marquardt normal equations, so every LM step simultaneously
-minimises both end-effector errors and drives the robot away from obstacles.
-
-The left-arm penalty is the weighted L2 norm of the SE(3) log-map residual
-for the left gripper — when squared by the LM cost it gives:
-    w * (pos_weight^2 * ||r_pos||^2 + ori_weight^2 * ||r_ori||^2)
-which has the same form as the primary task cost.
+Both arm IK targets are passed natively as a multi-EE tuple to ls_ik_solve.
+The residual vector is [W*f_right | W*f_left | sqrt_wc*f_coll], giving the
+LM solver a full 6D Jacobian contribution per arm — no scalar penalty hack.
 """
 
 import time
@@ -106,25 +100,8 @@ def main():
             + jnp.sum(jax.nn.softplus(-d_sphere / _COLL_EPS) * _COLL_EPS)
         )
 
-    _LEFT_POS_W = 50.0
-    _LEFT_ORI_W = 10.0
-
-    def _left_arm_ik_penalty(cfg, robot, left_target_pose):
-        """Left-arm IK residual as a differentiable scalar penalty.
-
-        Returns the weighted L2 norm of the SE(3) log-map residual so that
-        when the LM cost squares it, it yields:
-            pos_weight^2 * ||r_pos||^2 + ori_weight^2 * ||r_ori||^2
-        which matches the primary task cost structure.
-        """
-        Ts = robot.forward_kinematics(cfg)
-        T_actual = jaxlie.SE3(Ts[left_ee_idx])
-        res = (T_actual.inverse() @ left_target_pose).log()
-        fw = jnp.concatenate([_LEFT_POS_W * res[:3], _LEFT_ORI_W * res[3:]])
-        return jnp.linalg.norm(fw)
-
-    constraint_fns    = (_collision_penalty, _left_arm_ik_penalty)
-    constraint_weights = jnp.array([1e8, 1.0])
+    constraint_fns    = (_collision_penalty,)
+    constraint_weights = jnp.array([1e8])
 
     # Initialise sphere geometry (updated each frame from the handle).
     sphere_world = sphere_coll_template.transform_from_wxyz_position(
@@ -150,24 +127,23 @@ def main():
         )
 
         # ── Solve bimanual IK with collision constraints (JAX LS solver) ─────
-        # Primary task: right_gripper tracks target_pose_right.
-        # Constraints:
-        #   1. Collision avoidance (floor + sphere) — weight 1e8.
-        #   2. Left arm IK (left_gripper → target_pose_left) — weight 1.0.
+        # Both EEs are passed as a tuple — the solver builds a full 6D Jacobian
+        # contribution per arm rather than collapsing the left arm into a scalar.
+        # Constraint: collision avoidance (floor + sphere) — weight 1e8.
         rng_key, subkey = jax.random.split(rng_key)
         start_time = time.perf_counter()
 
         solution = ls_ik_solve(
             robot=robot,
-            target_link_index=right_ee_idx,
-            target_pose=target_pose_right,
+            target_link_indices=(right_ee_idx, left_ee_idx),
+            target_poses=(target_pose_right, target_pose_left),
             rng_key=subkey,
             previous_cfg=solution,
             num_seeds=32,
             max_iter=60,
             fixed_joint_mask=fixed_joint_mask,
             constraint_fns=constraint_fns,
-            constraint_args=(sphere_world, target_pose_left),
+            constraint_args=(sphere_world,),
             constraint_weights=constraint_weights,
         )
         solution.block_until_ready()
