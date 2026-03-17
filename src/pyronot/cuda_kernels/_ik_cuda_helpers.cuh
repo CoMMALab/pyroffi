@@ -2,8 +2,10 @@
  * Shared IK helpers for CUDA kernels.
  *
  * Provides:
+ *   - xorshift32, rng_normal        (fast GPU PRNG, Box–Muller)
  *   - cross3, norm3, clampf
- *   - chol_solve (float64 Cholesky solve)
+ *   - lbfgs_two_loop                (Nocedal two-loop L-BFGS recursion)
+ *   - chol_solve                    (float64 Cholesky solve)
  *   - compute_residual_and_jacobian
  *   - compute_residual_only
  *   - compute_multi_ee_residual_and_jacobian
@@ -15,6 +17,7 @@
 #include "_fk_cuda_helpers.cuh"
 
 #include <cmath>
+#include <cstdint>
 
 // ---------------------------------------------------------------------------
 // Compile-time limits (override by defining before include)
@@ -32,9 +35,37 @@
 #define MAX_EE 4
 #endif
 
+#ifndef MAX_PARTICLES
+#define MAX_PARTICLES 32
+#endif
+
+#ifndef MAX_LBFGS_M
+#define MAX_LBFGS_M 8
+#endif
+
 // ---------------------------------------------------------------------------
 // Math helpers
 // ---------------------------------------------------------------------------
+
+// xorshift32 fast PRNG (GPU-friendly, no libcurand dependency).
+static __device__ __forceinline__
+uint32_t xorshift32(uint32_t& state)
+{
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+// Box–Muller transform: returns one standard-normal sample, advances state twice.
+static __device__ __forceinline__
+float rng_normal(uint32_t& state)
+{
+    // Two uniform samples in (0, 1] via bit-masking to 24-bit mantissa.
+    const float u1 = fmaxf(1e-7f, (float)(xorshift32(state) >> 8) * (1.0f / 16777216.0f));
+    const float u2 =              (float)(xorshift32(state) >> 8) * (1.0f / 16777216.0f);
+    return sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+}
 
 static __device__ __forceinline__
 void cross3(const float* __restrict__ a,
@@ -56,6 +87,79 @@ static __device__ __forceinline__
 float clampf(float x, float lo, float hi)
 {
     return fmaxf(lo, fminf(hi, x));
+}
+
+// ---------------------------------------------------------------------------
+// L-BFGS two-loop recursion (float32, in-place on p)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the L-BFGS descent direction  p = H_k^{-1} (-g)  using the
+ * Nocedal two-loop recursion.
+ *
+ * Initialises q = -g, applies m history pairs (newest → oldest), scales by
+ * the Shanno–Kettler γ, then applies the second loop (oldest → newest).
+ * Result stored in p[].
+ *
+ * @param g           gradient at current point (n_act,)
+ * @param s_buf       circular buffer of s = Δq vectors  (m_max, n_act)
+ * @param y_buf       circular buffer of y = Δg vectors  (m_max, n_act)
+ * @param rho_buf     rho = 1/(y^T s) scalars            (m_max,)
+ * @param alpha_buf   scratch space                       (m_max,)
+ * @param n_act       number of active DOF
+ * @param m_max       buffer capacity (≤ MAX_LBFGS_M)
+ * @param m_used      number of valid pairs stored        (0 → m_max)
+ * @param newest      index of the most recently stored pair (-1 if m_used==0)
+ * @param p           output: descent direction (n_act,)
+ */
+static __device__ void lbfgs_two_loop(
+    const float* __restrict__ g,
+    const float* __restrict__ s_buf,
+    const float* __restrict__ y_buf,
+    const float* __restrict__ rho_buf,
+    float*       __restrict__ alpha_buf,
+    int n_act, int m_max, int m_used, int newest,
+    float* __restrict__ p)
+{
+    // q = -g
+    for (int a = 0; a < n_act; a++) p[a] = -g[a];
+
+    if (m_used == 0) return;   // No history → steepest descent.
+
+    // First loop: newest → oldest
+    for (int i = 0; i < m_used; i++) {
+        const int idx        = (newest - i + m_max) % m_max;
+        const float* s_i     = s_buf + idx * n_act;
+        const float* y_i     = y_buf + idx * n_act;
+        const float  rho_i   = rho_buf[idx];
+        float alpha_i = 0.0f;
+        for (int a = 0; a < n_act; a++) alpha_i += rho_i * s_i[a] * p[a];
+        alpha_buf[i] = alpha_i;
+        for (int a = 0; a < n_act; a++) p[a] -= alpha_i * y_i[a];
+    }
+
+    // Initial Hessian: H_0 = γ I  (Shanno–Kettler scaling using newest pair).
+    {
+        const float* s_k = s_buf + newest * n_act;
+        const float* y_k = y_buf + newest * n_act;
+        float sy = 0.0f, yy = 0.0f;
+        for (int a = 0; a < n_act; a++) { sy += s_k[a] * y_k[a]; yy += y_k[a] * y_k[a]; }
+        const float gamma = (yy > 1e-20f) ? fmaxf(1e-8f, fminf(1.0f, sy / yy)) : 1.0f;
+        for (int a = 0; a < n_act; a++) p[a] *= gamma;
+    }
+
+    // Second loop: oldest → newest
+    for (int i = m_used - 1; i >= 0; i--) {
+        const int idx      = (newest - i + m_max) % m_max;
+        const float* s_i   = s_buf + idx * n_act;
+        const float* y_i   = y_buf + idx * n_act;
+        const float  rho_i = rho_buf[idx];
+        float beta = 0.0f;
+        for (int a = 0; a < n_act; a++) beta += rho_i * y_i[a] * p[a];
+        const float coeff = alpha_buf[i] - beta;
+        for (int a = 0; a < n_act; a++) p[a] += s_i[a] * coeff;
+    }
+    // p = H_k^{-1} (-g) = descent direction.
 }
 
 // ---------------------------------------------------------------------------

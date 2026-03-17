@@ -1,4 +1,4 @@
-"""Benchmark and correctness evaluation: HJCD-IK, LS-IK, and SQP-IK (JAX and CUDA).
+"""Benchmark and correctness evaluation: HJCD-IK, LS-IK, SQP-IK, and MPPI-IK (JAX and CUDA).
 
 Sequential (per-problem) timing
     JAX solvers are evaluated one pose at a time to measure single-problem
@@ -22,6 +22,7 @@ Prerequisites:
            bash src/pyronot/cuda_kernels/build_hjcd_ik_cuda.sh
            bash src/pyronot/cuda_kernels/build_ls_ik_cuda.sh
            bash src/pyronot/cuda_kernels/build_sqp_ik_cuda.sh
+           bash src/pyronot/cuda_kernels/build_mppi_ik_cuda.sh
     3. robot_descriptions installed:
            pip install robot_descriptions
 """
@@ -53,6 +54,11 @@ from pyronot.optimization_engines._sqp_ik import (
     sqp_ik_solve,
     sqp_ik_solve_cuda,
     sqp_ik_solve_cuda_batch,
+)
+from pyronot.optimization_engines._mppi_ik import (
+    mppi_ik_solve,
+    mppi_ik_solve_cuda,
+    mppi_ik_solve_cuda_batch,
 )
 
 # ---------------------------------------------------------------------------
@@ -110,6 +116,33 @@ IK_KWARGS_SQP_CUDA = dict(
     **IK_KWARGS_SQP_JAX,
     eps_pos = 1e-8,
     eps_ori = 1e-8,
+)
+
+# MPPI-IK hyper-parameters.
+IK_KWARGS_MPPI_JAX = dict(
+    num_seeds         = 32,
+    n_particles       = 16,
+    n_mppi_iters      = 5,
+    max_lbfgs_iter    = 30,
+    pos_weight        = 50.0,
+    ori_weight        = 10.0,
+    sigma             = 0.3,
+    mppi_temperature  = 0.05,
+    continuity_weight = 0.0,
+)
+IK_KWARGS_MPPI_CUDA = dict(
+    num_seeds         = 32,
+    n_particles       = 16,
+    n_mppi_iters      = 5,
+    n_lbfgs_iters     = 25,
+    m_lbfgs           = 5,
+    pos_weight        = 50.0,
+    ori_weight        = 10.0,
+    sigma             = 0.3,
+    mppi_temperature  = 0.05,
+    eps_pos           = 1e-8,
+    eps_ori           = 1e-8,
+    continuity_weight = 0.0,
 )
 
 # Agreement threshold between JAX and CUDA outputs.
@@ -278,7 +311,7 @@ def _make_batched_jax_solver(base_fn, ik_kwargs):
 
 def main() -> None:  # noqa: C901
     print("=" * 80)
-    print(f"IK benchmark: HJCD-IK, LS-IK, and SQP-IK  (robot={ROBOT_NAME}, "
+    print(f"IK benchmark: HJCD-IK, LS-IK, SQP-IK, and MPPI-IK  (robot={ROBOT_NAME}, "
           f"n_targets={N_TARGETS}, n_timed={N_TIMED})")
     print("=" * 80)
 
@@ -345,24 +378,34 @@ def main() -> None:  # noqa: C901
     jit_hjcd_batch = _make_batched_jax_solver(hjcd_solve, IK_KWARGS_HJCD_JAX)
     jit_ls_batch   = _make_batched_jax_solver(ls_ik_solve, IK_KWARGS_LS_JAX)
     jit_sqp_batch  = _make_batched_jax_solver(sqp_ik_solve, IK_KWARGS_SQP_JAX)
+    jit_mppi = jax.jit(
+        functools.partial(mppi_ik_solve, **IK_KWARGS_MPPI_JAX),
+        static_argnames=("target_link_indices", "num_seeds", "n_particles",
+                         "n_mppi_iters", "max_lbfgs_iter"),
+    )
+    jit_mppi_batch = _make_batched_jax_solver(mppi_ik_solve, IK_KWARGS_MPPI_JAX)
 
     warmup_seq = [
-        ("HJCD-JAX",  jit_hjcd,        {}),
-        ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA),
-        ("LS-JAX",    jit_ls,          {}),
-        ("LS-CUDA",   ls_ik_solve_cuda, IK_KWARGS_LS_CUDA),
-        ("SQP-JAX",   jit_sqp,         {}),
-        ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA),
+        ("HJCD-JAX",   jit_hjcd,          {}),
+        ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
+        ("LS-JAX",     jit_ls,            {}),
+        ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
+        ("SQP-JAX",    jit_sqp,           {}),
+        ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
+        ("MPPI-JAX",   jit_mppi,          {}),
+        ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
     ]
     warmup_batch_jax = [
-        ("HJCD-JAX-BATCH", jit_hjcd_batch, {}),
-        ("LS-JAX-BATCH",   jit_ls_batch,   {}),
-        ("SQP-JAX-BATCH",  jit_sqp_batch,  {}),
+        ("HJCD-JAX-BATCH",  jit_hjcd_batch,  {}),
+        ("LS-JAX-BATCH",    jit_ls_batch,    {}),
+        ("SQP-JAX-BATCH",   jit_sqp_batch,   {}),
+        ("MPPI-JAX-BATCH",  jit_mppi_batch,  {}),
     ]
     warmup_batch_cuda = [
         ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
         ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
         ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
+        ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
     ]
 
     tli = (target_link_index,)
@@ -398,12 +441,14 @@ def main() -> None:  # noqa: C901
     print(f"{'─'*80}")
 
     seq_solvers = [
-        ("HJCD-JAX",  jit_hjcd,         {}),
-        ("HJCD-CUDA", hjcd_solve_cuda,   IK_KWARGS_HJCD_CUDA),
-        ("LS-JAX",    jit_ls,           {}),
-        ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA),
-        ("SQP-JAX",   jit_sqp,          {}),
-        ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA),
+        ("HJCD-JAX",  jit_hjcd,           {}),
+        ("HJCD-CUDA", hjcd_solve_cuda,     IK_KWARGS_HJCD_CUDA),
+        ("LS-JAX",    jit_ls,             {}),
+        ("LS-CUDA",   ls_ik_solve_cuda,    IK_KWARGS_LS_CUDA),
+        ("SQP-JAX",   jit_sqp,            {}),
+        ("SQP-CUDA",  sqp_ik_solve_cuda,   IK_KWARGS_SQP_CUDA),
+        ("MPPI-JAX",  jit_mppi,           {}),
+        ("MPPI-CUDA", mppi_ik_solve_cuda,  IK_KWARGS_MPPI_CUDA),
     ]
     seq_results: dict[str, list[SolveResult]] = {}
 
@@ -423,12 +468,14 @@ def main() -> None:  # noqa: C901
     print(f"{'─'*80}")
 
     batch_solvers = [
-        ("LS-JAX-BATCH",    jit_ls_batch,          {},                rng_keys_batch),
-        ("HJCD-JAX-BATCH",  jit_hjcd_batch,         {},                rng_keys_batch),
-        ("SQP-JAX-BATCH",   jit_sqp_batch,          {},                rng_keys_batch),
-        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,  IK_KWARGS_LS_CUDA,  rng0),
-        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,   IK_KWARGS_HJCD_CUDA, rng0),
-        ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA,  rng0),
+        ("LS-JAX-BATCH",    jit_ls_batch,             {},                 rng_keys_batch),
+        ("HJCD-JAX-BATCH",  jit_hjcd_batch,            {},                 rng_keys_batch),
+        ("SQP-JAX-BATCH",   jit_sqp_batch,             {},                 rng_keys_batch),
+        ("MPPI-JAX-BATCH",  jit_mppi_batch,            {},                 rng_keys_batch),
+        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,    IK_KWARGS_LS_CUDA,   rng0),
+        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,      IK_KWARGS_HJCD_CUDA, rng0),
+        ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,   IK_KWARGS_SQP_CUDA,  rng0),
+        ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch,  IK_KWARGS_MPPI_CUDA, rng0),
     ]
     batch_results: dict[str, BatchResult] = {}
 
@@ -446,15 +493,16 @@ def main() -> None:  # noqa: C901
     print(f"\n{'='*80}")
     print("SUMMARY — Sequential (per-problem latency)")
     print(f"{'='*80}")
-    for label in ("HJCD-JAX", "HJCD-CUDA", "LS-JAX", "LS-CUDA", "SQP-JAX", "SQP-CUDA"):
+    for label in ("HJCD-JAX", "HJCD-CUDA", "LS-JAX", "LS-CUDA",
+                  "SQP-JAX", "SQP-CUDA", "MPPI-JAX", "MPPI-CUDA"):
         _print_summary_seq(label, seq_results[label])
         print()
 
     print(f"{'='*80}")
     print(f"SUMMARY — Batch (effective per-problem time over {N_TARGETS} targets)")
     print(f"{'='*80}")
-    for label in ("LS-JAX-BATCH", "HJCD-JAX-BATCH", "SQP-JAX-BATCH",
-                  "LS-CUDA-BATCH", "HJCD-CUDA-BATCH", "SQP-CUDA-BATCH"):
+    for label in ("LS-JAX-BATCH", "HJCD-JAX-BATCH", "SQP-JAX-BATCH", "MPPI-JAX-BATCH",
+                  "LS-CUDA-BATCH", "HJCD-CUDA-BATCH", "SQP-CUDA-BATCH", "MPPI-CUDA-BATCH"):
         _print_summary_batch(label, batch_results[label])
         print()
 
@@ -472,22 +520,31 @@ def main() -> None:  # noqa: C901
     t["LS-JAX-BATCH"]    = batch_results["LS-JAX-BATCH"].time_ms
     t["HJCD-JAX-BATCH"]  = batch_results["HJCD-JAX-BATCH"].time_ms
     t["SQP-JAX-BATCH"]   = batch_results["SQP-JAX-BATCH"].time_ms
+    t["MPPI-JAX-BATCH"]  = batch_results["MPPI-JAX-BATCH"].time_ms
     t["LS-CUDA-BATCH"]   = batch_results["LS-CUDA-BATCH"].time_ms
     t["HJCD-CUDA-BATCH"] = batch_results["HJCD-CUDA-BATCH"].time_ms
     t["SQP-CUDA-BATCH"]  = batch_results["SQP-CUDA-BATCH"].time_ms
+    t["MPPI-CUDA-BATCH"] = batch_results["MPPI-CUDA-BATCH"].time_ms
 
     rows = [
-        ("HJCD-CUDA vs HJCD-JAX (sequential)",       "HJCD-JAX",      "HJCD-CUDA"),
-        ("LS-CUDA   vs LS-JAX   (sequential)",        "LS-JAX",        "LS-CUDA"),
-        ("SQP-CUDA  vs SQP-JAX  (sequential)",        "SQP-JAX",       "SQP-CUDA"),
-        ("LS-CUDA-BATCH   vs LS-JAX-BATCH   (batch)", "LS-JAX-BATCH",  "LS-CUDA-BATCH"),
-        ("HJCD-CUDA-BATCH vs HJCD-JAX-BATCH (batch)", "HJCD-JAX-BATCH","HJCD-CUDA-BATCH"),
-        ("SQP-CUDA-BATCH  vs SQP-JAX-BATCH  (batch)", "SQP-JAX-BATCH", "SQP-CUDA-BATCH"),
-        ("LS-CUDA-BATCH   vs LS-JAX   (seq→batch)",   "LS-JAX",        "LS-CUDA-BATCH"),
-        ("HJCD-CUDA-BATCH vs HJCD-JAX (seq→batch)",   "HJCD-JAX",      "HJCD-CUDA-BATCH"),
-        ("SQP-CUDA-BATCH  vs SQP-JAX  (seq→batch)",   "SQP-JAX",       "SQP-CUDA-BATCH"),
-        ("SQP-CUDA vs LS-CUDA (sequential)",           "LS-CUDA",       "SQP-CUDA"),
-        ("SQP-CUDA-BATCH vs LS-CUDA-BATCH (batch)",    "LS-CUDA-BATCH", "SQP-CUDA-BATCH"),
+        ("HJCD-CUDA  vs HJCD-JAX  (sequential)",       "HJCD-JAX",       "HJCD-CUDA"),
+        ("LS-CUDA    vs LS-JAX    (sequential)",        "LS-JAX",         "LS-CUDA"),
+        ("SQP-CUDA   vs SQP-JAX   (sequential)",        "SQP-JAX",        "SQP-CUDA"),
+        ("MPPI-CUDA  vs MPPI-JAX  (sequential)",        "MPPI-JAX",       "MPPI-CUDA"),
+        ("LS-CUDA-BATCH   vs LS-JAX-BATCH   (batch)",   "LS-JAX-BATCH",   "LS-CUDA-BATCH"),
+        ("HJCD-CUDA-BATCH vs HJCD-JAX-BATCH (batch)",   "HJCD-JAX-BATCH", "HJCD-CUDA-BATCH"),
+        ("SQP-CUDA-BATCH  vs SQP-JAX-BATCH  (batch)",   "SQP-JAX-BATCH",  "SQP-CUDA-BATCH"),
+        ("MPPI-CUDA-BATCH vs MPPI-JAX-BATCH (batch)",   "MPPI-JAX-BATCH", "MPPI-CUDA-BATCH"),
+        ("LS-CUDA-BATCH   vs LS-JAX   (seq→batch)",     "LS-JAX",         "LS-CUDA-BATCH"),
+        ("HJCD-CUDA-BATCH vs HJCD-JAX (seq→batch)",     "HJCD-JAX",       "HJCD-CUDA-BATCH"),
+        ("SQP-CUDA-BATCH  vs SQP-JAX  (seq→batch)",     "SQP-JAX",        "SQP-CUDA-BATCH"),
+        ("MPPI-CUDA-BATCH vs MPPI-JAX (seq→batch)",     "MPPI-JAX",       "MPPI-CUDA-BATCH"),
+        ("SQP-CUDA  vs LS-CUDA  (sequential)",          "LS-CUDA",        "SQP-CUDA"),
+        ("MPPI-CUDA vs LS-CUDA  (sequential)",          "LS-CUDA",        "MPPI-CUDA"),
+        ("MPPI-CUDA vs SQP-CUDA (sequential)",          "SQP-CUDA",       "MPPI-CUDA"),
+        ("SQP-CUDA-BATCH  vs LS-CUDA-BATCH  (batch)",   "LS-CUDA-BATCH",  "SQP-CUDA-BATCH"),
+        ("MPPI-CUDA-BATCH vs LS-CUDA-BATCH  (batch)",   "LS-CUDA-BATCH",  "MPPI-CUDA-BATCH"),
+        ("MPPI-CUDA-BATCH vs SQP-CUDA-BATCH (batch)",   "SQP-CUDA-BATCH", "MPPI-CUDA-BATCH"),
     ]
     for desc, slow, fast in rows:
         ratio = t[slow] / t[fast]
@@ -501,9 +558,10 @@ def main() -> None:  # noqa: C901
     print("JAX vs CUDA-BATCH agreement")
     print(f"{'='*80}")
 
-    for jax_key, batch_key in [("HJCD-JAX-BATCH", "HJCD-CUDA-BATCH"),
-                               ("LS-JAX-BATCH",   "LS-CUDA-BATCH"),
-                               ("SQP-JAX-BATCH",  "SQP-CUDA-BATCH")]:
+    for jax_key, batch_key in [("HJCD-JAX-BATCH",  "HJCD-CUDA-BATCH"),
+                               ("LS-JAX-BATCH",    "LS-CUDA-BATCH"),
+                               ("SQP-JAX-BATCH",   "SQP-CUDA-BATCH"),
+                               ("MPPI-JAX-BATCH",  "MPPI-CUDA-BATCH")]:
         delta_pos = []
         delta_ori = []
         for i in range(N_TARGETS):
@@ -526,21 +584,24 @@ def main() -> None:  # noqa: C901
     # SQP vs LS accuracy comparison
     # ------------------------------------------------------------------
     print(f"\n{'='*80}")
-    print("SQP vs LS accuracy comparison (batch)")
+    print("LS vs SQP vs MPPI accuracy comparison (CUDA batch)")
     print(f"{'='*80}")
 
-    sqp_pos  = batch_results["SQP-CUDA-BATCH"].pos_errs * 1e3
-    ls_pos   = batch_results["LS-CUDA-BATCH"].pos_errs  * 1e3
-    sqp_succ = int(np.sum(
-        (batch_results["SQP-CUDA-BATCH"].pos_errs < POS_THR_M) &
-        (batch_results["SQP-CUDA-BATCH"].rot_errs < ROT_THR_RAD)
-    ))
-    ls_succ  = int(np.sum(
-        (batch_results["LS-CUDA-BATCH"].pos_errs  < POS_THR_M) &
-        (batch_results["LS-CUDA-BATCH"].rot_errs  < ROT_THR_RAD)
-    ))
-    print(f"  SQP-CUDA-BATCH  median pos {np.median(sqp_pos):.4f} mm  success {sqp_succ}/{N_TARGETS}")
-    print(f"  LS-CUDA-BATCH   median pos {np.median(ls_pos):.4f} mm  success {ls_succ}/{N_TARGETS}")
+    def _succ_stats(key):
+        r   = batch_results[key]
+        pos = r.pos_errs * 1e3
+        ok  = int(np.sum((r.pos_errs < POS_THR_M) & (r.rot_errs < ROT_THR_RAD)))
+        return pos, ok
+
+    ls_pos,   ls_succ   = _succ_stats("LS-CUDA-BATCH")
+    sqp_pos,  sqp_succ  = _succ_stats("SQP-CUDA-BATCH")
+    mppi_pos, mppi_succ = _succ_stats("MPPI-CUDA-BATCH")
+    print(f"  LS-CUDA-BATCH    median pos {np.median(ls_pos):.4f} mm  "
+          f"p95 {np.percentile(ls_pos, 95):.4f} mm  success {ls_succ}/{N_TARGETS}")
+    print(f"  SQP-CUDA-BATCH   median pos {np.median(sqp_pos):.4f} mm  "
+          f"p95 {np.percentile(sqp_pos, 95):.4f} mm  success {sqp_succ}/{N_TARGETS}")
+    print(f"  MPPI-CUDA-BATCH  median pos {np.median(mppi_pos):.4f} mm  "
+          f"p95 {np.percentile(mppi_pos, 95):.4f} mm  success {mppi_succ}/{N_TARGETS}")
     print()
 
 
