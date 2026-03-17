@@ -8,11 +8,15 @@ Two-stage inverse kinematics solver following the cuRobo approach:
     seed, forward kinematics and the SE(3) cost are evaluated for every
     particle, and a temperature-weighted mean update moves the seed toward
     the low-cost region of configuration space.  No Jacobians are required.
+    The best config seen across all MPPI iterations is retained as the
+    warm-start for Stage 2.
 
   Stage 2 — L-BFGS gradient refinement
     Limited-memory BFGS (Nocedal two-loop, m history pairs) starting from
     the MPPI warm-start.  Gradient: g = J_w^T (W r).  5-point line search
-    and trust-region step clipping identical to LS-IK / SQP-IK.
+    with sufficient-decrease early exit and adaptive trust-region step
+    clipping identical to the CUDA kernel.  A convergence gate skips Stage 2
+    entirely if MPPI already satisfies eps_pos / eps_ori for all EEs.
 
 CUDA kernel
     Offloads both stages to a single CUDA kernel via JAX FFI.  The kernel
@@ -22,7 +26,9 @@ CUDA kernel
 JAX reference implementation
     ``mppi_ik_solve`` provides a pure-JAX variant for debugging and
     non-CUDA environments.  The MPPI inner loop uses ``jax.vmap`` over
-    particles; the L-BFGS refinement reuses ``_ls_ik_single`` (LM).
+    particles and tracks the best config across iterations.  The L-BFGS
+    stage uses Nocedal two-loop with 5-point line search, trust-region
+    step clipping, and a convergence gate matching the CUDA kernel.
 
 Shared with LS-IK / SQP-IK
   - Same seed generation (warm + random, multi-EE tight/loose split).
@@ -46,6 +52,244 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS
 from ._ls_ik import _ls_ik_single
+
+
+# ---------------------------------------------------------------------------
+# L-BFGS two-loop helper (Nocedal, mirrors CUDA lbfgs_two_loop)
+# ---------------------------------------------------------------------------
+
+def _lbfgs_two_loop(
+    g:       Float[Array, "n_act"],
+    s_buf:   Float[Array, "m n_act"],
+    y_buf:   Float[Array, "m n_act"],
+    rho_buf: Float[Array, "m"],
+    m_used:  Array,   # traced int32
+    newest:  Array,   # traced int32
+    m_lbfgs: int,     # static Python int → unrolled
+) -> Float[Array, "n_act"]:
+    """Nocedal two-loop recursion: returns -H*g.
+
+    m_lbfgs is a static Python int so both loops are unrolled at trace time.
+    Active entries are gated by ``step < m_used``; inactive steps are no-ops.
+    When m_used == 0 the function returns the zero vector; the caller must
+    fall back to the normalized gradient direction.
+    """
+    # alpha_arr is workspace indexed by circular buffer position.
+    alpha_arr = jnp.zeros(m_lbfgs)
+    q = g
+
+    # Forward pass: newest → oldest
+    for i in range(m_lbfgs):
+        buf_idx = (newest - i + m_lbfgs) % m_lbfgs
+        active  = i < m_used
+        si      = s_buf[buf_idx]
+        yi      = y_buf[buf_idx]
+        rho_i   = rho_buf[buf_idx]
+        alpha_i = rho_i * jnp.dot(si, q)
+        alpha_arr = jnp.where(active, alpha_arr.at[buf_idx].set(alpha_i), alpha_arr)
+        q = jnp.where(active, q - alpha_i * yi, q)
+
+    # Shanno-Kettler H₀ scaling using the most-recent pair.
+    sy    = jnp.dot(s_buf[newest], y_buf[newest])
+    yy    = jnp.dot(y_buf[newest], y_buf[newest])
+    gamma = sy / (yy + 1e-18)
+    r     = gamma * q
+
+    # Backward pass: oldest → newest
+    for step in range(m_lbfgs):
+        buf_idx = (newest - m_used + 1 + step + m_lbfgs) % m_lbfgs
+        active  = step < m_used
+        si      = s_buf[buf_idx]
+        yi      = y_buf[buf_idx]
+        rho_i   = rho_buf[buf_idx]
+        alpha_i = alpha_arr[buf_idx]
+        beta    = rho_i * jnp.dot(yi, r)
+        r       = jnp.where(active, r + si * (alpha_i - beta), r)
+
+    return -r
+
+
+# ---------------------------------------------------------------------------
+# True L-BFGS single-seed refinement (mirrors CUDA Stage 2)
+# ---------------------------------------------------------------------------
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "target_link_indices", "n_lbfgs_iters", "m_lbfgs",
+        "eps_pos", "eps_ori", "constraint_fns",
+    ),
+)
+def _lbfgs_ik_single(
+    cfg:                  Float[Array, "n_act"],
+    robot:                Robot,
+    target_link_indices:  tuple[int, ...],
+    target_poses:         tuple,
+    n_lbfgs_iters:        int,
+    m_lbfgs:              int,
+    pos_weight:           float,
+    ori_weight:           float,
+    lower:                Float[Array, "n_act"],
+    upper:                Float[Array, "n_act"],
+    fixed_joint_mask:     Float[Array, "n_act"],
+    eps_pos:              float = 1e-8,
+    eps_ori:              float = 1e-8,
+    constraint_fns:       tuple = (),
+    constraint_args:      tuple = (),
+    constraint_weights:   Float[Array, "n_constraints"] | None = None,
+) -> Float[Array, "n_act"]:
+    """True Nocedal two-loop L-BFGS IK refinement.
+
+    Mirrors CUDA Stage 2 exactly (except JAX-native vmap line search):
+      - Gradient: g = J_w^T (W r)  via jax.value_and_grad
+      - History update with positive-curvature guard  (s^T y > ε)
+      - Shanno-Kettler H₀ scaling
+      - Trust-region step clipping (4 adaptive radii matching CUDA)
+      - 5-point line search; first sufficient-decrease alpha wins
+      - Per-iteration convergence check (eps_pos, eps_ori for each EE)
+      - Best-config tracking across all iterations
+    """
+    n_act = cfg.shape[0]
+    n_ee  = len(target_link_indices)
+    n_c   = len(constraint_fns)
+    W_ee  = jnp.concatenate([jnp.full(3, pos_weight), jnp.full(3, ori_weight)])
+
+    if n_c > 0:
+        sqrt_wc = jnp.sqrt(constraint_weights)
+
+    def cost_half_and_residuals(q):
+        """Returns (half_cost, residuals) for combined value+grad+aux in one pass."""
+        residuals = jnp.stack([
+            _ik_residual(q, robot, target_link_indices[i], target_poses[i])
+            for i in range(n_ee)
+        ])  # (n_ee, 6)
+        total = jnp.sum((residuals * W_ee[None, :]) ** 2) * 0.5
+        if n_c > 0:
+            f_coll = jnp.stack([
+                constraint_fns[i](q, robot, constraint_args[i])
+                for i in range(n_c)
+            ])
+            total = total + jnp.dot(sqrt_wc * f_coll, sqrt_wc * f_coll) * 0.5
+        return total, residuals
+
+    def cost_half(q):
+        return cost_half_and_residuals(q)[0]
+
+    # Initial gradient.
+    (init_cost, _), init_g = jax.value_and_grad(
+        cost_half_and_residuals, has_aux=True
+    )(cfg)
+    init_g = jnp.where(fixed_joint_mask, 0.0, init_g)
+
+    # ── lax.scan carry ─────────────────────────────────────────────────────
+    # (cfg, best_cfg, best_cost, cfg_prev, g_prev,
+    #  s_buf, y_buf, rho_buf, m_used, newest, converged, iter_count)
+    init_carry = (
+        cfg,
+        cfg,
+        init_cost,
+        cfg,                            # cfg_prev — dummy for iter 0
+        jnp.zeros(n_act),               # g_prev   — dummy for iter 0
+        jnp.zeros((m_lbfgs, n_act)),
+        jnp.zeros((m_lbfgs, n_act)),
+        jnp.zeros(m_lbfgs),
+        jnp.int32(0),                   # m_used
+        jnp.int32(0),                   # newest   — valid after first update
+        jnp.bool_(False),               # converged
+        jnp.int32(0),                   # iter_count
+    )
+
+    def lbfgs_body(carry, _):
+        (cfg_c, best_cfg, best_cost, cfg_prev, g_prev,
+         s_buf, y_buf, rho_buf, m_used, newest, converged, iter_count) = carry
+
+        # ── Gradient at current config ────────────────────────────────────
+        (half_cost, residuals), g = jax.value_and_grad(
+            cost_half_and_residuals, has_aux=True
+        )(cfg_c)
+        g = jnp.where(fixed_joint_mask, 0.0, g)
+
+        # ── Per-iteration convergence check ───────────────────────────────
+        pos_norms = jnp.linalg.norm(residuals[:, :3], axis=-1)  # (n_ee,)
+        ori_norms = jnp.linalg.norm(residuals[:, 3:], axis=-1)  # (n_ee,)
+        converged = converged | (
+            jnp.all(pos_norms < eps_pos) & jnp.all(ori_norms < eps_ori)
+        )
+
+        # ── Update L-BFGS history ─────────────────────────────────────────
+        # s_k = Δcfg,  y_k = Δgrad.  Skip on iter 0 (no valid prev yet).
+        s_k   = cfg_c - cfg_prev
+        y_k   = g     - g_prev
+        sy    = jnp.dot(s_k, y_k)
+        yy    = jnp.dot(y_k, y_k)
+        valid = (sy > 1e-10 * yy + 1e-30) & (iter_count > 0)
+
+        new_newest     = (newest + 1) % m_lbfgs
+        actual_newest  = jnp.where(valid, new_newest, newest)
+        s_buf   = jnp.where(valid, s_buf.at[new_newest].set(s_k),       s_buf)
+        y_buf   = jnp.where(valid, y_buf.at[new_newest].set(y_k),       y_buf)
+        rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / sy), rho_buf)
+        m_used  = jnp.where(valid & (m_used < m_lbfgs), m_used + 1,     m_used)
+        newest  = actual_newest
+
+        # ── L-BFGS two-loop direction ─────────────────────────────────────
+        dir_lbfgs = _lbfgs_two_loop(g, s_buf, y_buf, rho_buf, m_used, newest, m_lbfgs)
+        dir_gd    = -g / (jnp.linalg.norm(g) + 1e-18)
+        direction = jnp.where(m_used > 0, dir_lbfgs, dir_gd)
+        direction = jnp.where(fixed_joint_mask, 0.0, direction)
+
+        # ── Trust-region step clipping (4 adaptive radii, same as CUDA) ──
+        max_p = jnp.max(pos_norms)
+        max_o = jnp.max(ori_norms)
+        R = jnp.where(
+            (max_p > 1e-2) | (max_o > 0.6),   0.38,
+            jnp.where(
+            (max_p > 1e-3) | (max_o > 0.25),  0.22,
+            jnp.where(
+            (max_p > 2e-4) | (max_o > 0.08),  0.12,
+            0.05)))
+        dnorm     = jnp.linalg.norm(direction)
+        direction = direction * jnp.where(dnorm > R, R / (dnorm + 1e-18), 1.0)
+
+        # ── 5-point line search (vmapped; first sufficient-decrease wins) ─
+        # Mirrors CUDA: first alpha satisfying err < curr*(1-1e-4) is chosen;
+        # fall back to argmin if none qualifies.
+        suff_thresh = half_cost * (1.0 - 1e-4)
+
+        def eval_alpha(alpha):
+            return cost_half(jnp.clip(cfg_c + alpha * direction, lower, upper))
+
+        trial_costs  = jax.vmap(eval_alpha)(_LS_ALPHAS)   # (5,)
+        has_suff     = trial_costs < suff_thresh
+        best_ls_idx  = jnp.where(
+            jnp.any(has_suff),
+            jnp.argmax(has_suff),        # first sufficient-decrease alpha
+            jnp.argmin(trial_costs),     # fall back to best
+        )
+        best_alpha   = _LS_ALPHAS[best_ls_idx]
+        step_cost    = trial_costs[best_ls_idx]
+        cfg_new      = jnp.clip(cfg_c + best_alpha * direction, lower, upper)
+
+        # ── Best-config tracking ──────────────────────────────────────────
+        improved  = step_cost < best_cost
+        best_cfg  = jnp.where(improved, cfg_new, best_cfg)
+        best_cost = jnp.where(improved, step_cost, best_cost)
+
+        # ── Apply step only if not converged ──────────────────────────────
+        cfg_out = jnp.where(converged, cfg_c, cfg_new)
+
+        new_carry = (
+            cfg_out, best_cfg, best_cost,
+            cfg_c, g,          # save current (cfg, grad) as prev for next iter
+            s_buf, y_buf, rho_buf, m_used, newest,
+            converged, iter_count + 1,
+        )
+        return new_carry, None
+
+    (_, best_cfg, _, _, _, _, _, _, _, _, _, _), _ = jax.lax.scan(
+        lbfgs_body, init_carry, None, length=n_lbfgs_iters,
+    )
+    return best_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +372,8 @@ def _mppi_step(
     jax.jit,
     static_argnames=(
         "target_link_indices", "num_seeds", "n_particles",
-        "n_mppi_iters", "max_lbfgs_iter", "constraint_fns",
+        "n_mppi_iters", "n_lbfgs_iters", "m_lbfgs",
+        "eps_pos", "eps_ori", "constraint_fns",
     ),
 )
 def mppi_ik_solve(
@@ -140,23 +385,33 @@ def mppi_ik_solve(
     num_seeds:           int   = 32,
     n_particles:         int   = 16,
     n_mppi_iters:        int   = 5,
-    max_lbfgs_iter:      int   = 30,
+    n_lbfgs_iters:       int   = 30,
+    m_lbfgs:             int   = 5,
     pos_weight:          float = 50.0,
     ori_weight:          float = 10.0,
     sigma:               float = 0.3,
     mppi_temperature:    float = 0.05,
-    lambda_init:         float = 5e-3,
+    eps_pos:             float = 1e-8,
+    eps_ori:             float = 1e-8,
     continuity_weight:   float = 0.0,
     fixed_joint_mask:    Float[Array, "n_act"] | None = None,
     constraint_fns:      tuple = (),
     constraint_args:     tuple = (),
     constraint_weights:  Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_act"]:
-    """Solve IK via MPPI coarse search followed by L-BFGS (LM) refinement.
+    """Solve IK via MPPI coarse search followed by true L-BFGS refinement.
 
-    The JAX implementation uses ``jax.vmap`` over particles for the MPPI phase
-    and reuses ``_ls_ik_single`` (Levenberg–Marquardt) for the L-BFGS phase.
-    The CUDA variant runs a true L-BFGS.
+    Aligned with the CUDA kernel:
+      Stage 1 (MPPI): ``jax.vmap`` over particles; best config across all
+        iterations is retained as the L-BFGS warm-start.
+      Stage 2 (L-BFGS): Nocedal two-loop with 5-point line search, adaptive
+        trust-region clipping, and per-iteration convergence checks.
+      Convergence gate: L-BFGS is skipped if MPPI already satisfies
+        ``eps_pos`` / ``eps_ori`` for every EE.
+
+    JAX-specific: vmap over particles (vs. sequential in CUDA), and
+    constraint residuals are embedded directly in the cost (vs. post-kernel
+    in the CUDA path).
 
     Args:
         robot:               The robot model.
@@ -167,12 +422,14 @@ def mppi_ik_solve(
         num_seeds:           Number of parallel seeds.
         n_particles:         MPPI particles per step.
         n_mppi_iters:        MPPI stage iterations.
-        max_lbfgs_iter:      LM (L-BFGS stand-in) refinement iterations.
+        n_lbfgs_iters:       L-BFGS stage iterations.
+        m_lbfgs:             L-BFGS history size.
         pos_weight:          Weight on position residual.
         ori_weight:          Weight on orientation residual.
         sigma:               MPPI noise std dev [rad/m].
         mppi_temperature:    MPPI softmax temperature.
-        lambda_init:         Initial LM damping.
+        eps_pos:             Position convergence threshold [m].
+        eps_ori:             Orientation convergence threshold [rad].
         continuity_weight:   Weight on ‖q − prev‖² in winner selection.
         fixed_joint_mask:    Boolean mask; True = joint must not move.
         constraint_fns:      Tuple of constraint callables.
@@ -182,11 +439,32 @@ def mppi_ik_solve(
         Best joint configuration found, shape ``(n_actuated_joints,)``.
     """
     n_act  = robot.joints.num_actuated_joints
+    n_ee   = len(target_link_indices)
+    n_c    = len(constraint_fns)
     lower  = robot.joints.lower_limits
     upper  = robot.joints.upper_limits
 
     if fixed_joint_mask is None:
         fixed_joint_mask = jnp.zeros(n_act, dtype=jnp.bool_)
+
+    W_ee = jnp.concatenate([jnp.full(3, pos_weight), jnp.full(3, ori_weight)])
+    if n_c > 0:
+        sqrt_wc = jnp.sqrt(constraint_weights)
+
+    # Cost for MPPI best-tracking (full squared weighted residual).
+    def pose_cost(q: Array) -> Array:
+        total = jnp.zeros(())
+        for i in range(n_ee):
+            r_i = _ik_residual(q, robot, target_link_indices[i], target_poses[i])
+            wr  = r_i * W_ee
+            total = total + jnp.dot(wr, wr)
+        if n_c > 0:
+            f_coll = jnp.stack([
+                constraint_fns[i](q, robot, constraint_args[i])
+                for i in range(n_c)
+            ])
+            total = total + jnp.dot(sqrt_wc * f_coll, sqrt_wc * f_coll)
+        return total
 
     # ── Seed generation (identical to LS/SQP) ─────────────────────────────
     n_warm   = max(1, num_seeds // 2)
@@ -222,10 +500,12 @@ def mppi_ik_solve(
     )
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (num_seeds, n_act)
 
-    # ── Stage 1: MPPI coarse search (per seed) ────────────────────────────
+    # ── Stage 1: MPPI coarse search with best-cfg tracking ────────────────
     def mppi_refine(seed: Array, seed_key: Array) -> Array:
+        init_cost = pose_cost(seed)
+
         def mppi_scan_step(carry, _):
-            cfg, key = carry
+            cfg, best_cfg, best_cost, key = carry
             key, sub = jax.random.split(key)
             cfg = _mppi_step(
                 cfg, sub, robot, target_link_indices, target_poses,
@@ -235,28 +515,47 @@ def mppi_ik_solve(
                 constraint_args=constraint_args,
                 constraint_weights=constraint_weights,
             )
-            return (cfg, key), None
+            curr_cost = pose_cost(cfg)
+            improved  = curr_cost < best_cost
+            return (
+                cfg,
+                jnp.where(improved, cfg,       best_cfg),
+                jnp.where(improved, curr_cost, best_cost),
+                key,
+            ), None
 
-        (cfg, _), _ = jax.lax.scan(
-            mppi_scan_step, (seed, seed_key), None, length=n_mppi_iters,
+        (_, best_cfg, _, _), _ = jax.lax.scan(
+            mppi_scan_step, (seed, seed, init_cost, seed_key), None, length=n_mppi_iters,
         )
-        return cfg
+        return best_cfg
 
-    # Per-seed keys for MPPI.
     seed_keys = jax.random.split(key_mppi, num_seeds)
     mppi_cfgs = jax.vmap(mppi_refine)(seeds, seed_keys)  # (num_seeds, n_act)
 
-    # ── Stage 2: L-BFGS (LM) refinement ──────────────────────────────────
-    all_cfgs = jax.vmap(
-        lambda cfg: _ls_ik_single(
-            cfg, robot, target_link_indices, target_poses,
-            max_lbfgs_iter, lambda_init, pos_weight, ori_weight,
-            lower, upper, fixed_joint_mask,
-            constraint_fns=constraint_fns,
-            constraint_args=constraint_args,
-            constraint_weights=constraint_weights,
+    # ── Stage 2: convergence gate + true L-BFGS refinement ────────────────
+    def refine_with_gate(cfg: Array) -> Array:
+        residuals = jnp.stack([
+            _ik_residual(cfg, robot, target_link_indices[i], target_poses[i])
+            for i in range(n_ee)
+        ])  # (n_ee, 6)
+        all_conv = (
+            jnp.all(jnp.linalg.norm(residuals[:, :3], axis=-1) < eps_pos) &
+            jnp.all(jnp.linalg.norm(residuals[:, 3:], axis=-1) < eps_ori)
         )
-    )(mppi_cfgs)  # (num_seeds, n_act)
+        return jax.lax.cond(
+            all_conv,
+            lambda: cfg,
+            lambda: _lbfgs_ik_single(
+                cfg, robot, target_link_indices, target_poses,
+                n_lbfgs_iters, m_lbfgs, pos_weight, ori_weight,
+                lower, upper, fixed_joint_mask, eps_pos, eps_ori,
+                constraint_fns=constraint_fns,
+                constraint_args=constraint_args,
+                constraint_weights=constraint_weights,
+            ),
+        )
+
+    all_cfgs = jax.vmap(refine_with_gate)(mppi_cfgs)  # (num_seeds, n_act)
 
     # ── Winner selection ──────────────────────────────────────────────────
     W = jnp.concatenate([jnp.full(3, pos_weight), jnp.full(3, ori_weight)])
@@ -264,12 +563,12 @@ def mppi_ik_solve(
     def weighted_err(cfg: Float[Array, "n_act"]) -> Array:
         err = sum(
             jnp.sum((_ik_residual(cfg, robot, target_link_indices[i], target_poses[i]) * W) ** 2)
-            for i in range(len(target_link_indices))
+            for i in range(n_ee)
         )
-        if len(constraint_fns) > 0:
+        if n_c > 0:
             c_vals = jnp.stack([
                 constraint_fns[i](cfg, robot, constraint_args[i])
-                for i in range(len(constraint_fns))
+                for i in range(n_c)
             ])
             err = err + jnp.sum(constraint_weights * c_vals ** 2)
         return err + continuity_weight * jnp.sum((cfg - previous_cfg) ** 2)

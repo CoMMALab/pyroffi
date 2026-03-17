@@ -123,7 +123,8 @@ IK_KWARGS_MPPI_JAX = dict(
     num_seeds         = 32,
     n_particles       = 16,
     n_mppi_iters      = 5,
-    max_lbfgs_iter    = 30,
+    n_lbfgs_iters     = 30,
+    m_lbfgs           = 5,
     pos_weight        = 50.0,
     ori_weight        = 10.0,
     sigma             = 0.3,
@@ -381,7 +382,7 @@ def main() -> None:  # noqa: C901
     jit_mppi = jax.jit(
         functools.partial(mppi_ik_solve, **IK_KWARGS_MPPI_JAX),
         static_argnames=("target_link_indices", "num_seeds", "n_particles",
-                         "n_mppi_iters", "max_lbfgs_iter"),
+                         "n_mppi_iters", "n_lbfgs_iters", "m_lbfgs"),
     )
     jit_mppi_batch = _make_batched_jax_solver(mppi_ik_solve, IK_KWARGS_MPPI_JAX)
 
