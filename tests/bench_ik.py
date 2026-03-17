@@ -29,7 +29,9 @@ Prerequisites:
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import threading
 import time
 from dataclasses import dataclass
 
@@ -39,6 +41,45 @@ import jaxlie
 import numpy as np
 import pyronot as pk
 from robot_descriptions.loaders.yourdfpy import load_robot_description
+
+# Optional NVML for GPU monitoring (nvidia-ml-py / pynvml).
+try:
+    import pynvml as _pynvml
+    _pynvml.nvmlInit()
+    _NVML_HANDLE: object | None = _pynvml.nvmlDeviceGetHandleByIndex(0)
+    _NVML_OK = True
+except Exception:
+    _NVML_HANDLE = None
+    _NVML_OK = False
+
+
+@contextlib.contextmanager
+def _gpu_monitor(interval_s: float = 0.02):
+    """Sample GPU utilisation and VRAM in a background thread.
+
+    Yields a dict; on exit the dict contains:
+        ``gpu_util``  – list of utilisation % samples
+        ``vram_mb``   – list of used VRAM (MiB) samples
+    """
+    samples: dict[str, list[float]] = {"gpu_util": [], "vram_mb": []}
+    stop_evt = threading.Event()
+
+    def _sample() -> None:
+        while not stop_evt.is_set():
+            if _NVML_OK and _NVML_HANDLE is not None:
+                util = _pynvml.nvmlDeviceGetUtilizationRates(_NVML_HANDLE)
+                mem  = _pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
+                samples["gpu_util"].append(float(util.gpu))
+                samples["vram_mb"].append(float(mem.used) / 1024 ** 2)
+            stop_evt.wait(interval_s)
+
+    t = threading.Thread(target=_sample, daemon=True)
+    t.start()
+    try:
+        yield samples
+    finally:
+        stop_evt.set()
+        t.join(timeout=1.0)
 
 from pyronot.optimization_engines._hjcd_ik import (
     hjcd_solve,
@@ -71,7 +112,8 @@ TARGET_LINK_NAME = "panda_hand"
 # Joints to keep fixed during IK (finger joints for the Panda).
 FIXED_JOINT_NAMES = ("panda_finger_joint1", "panda_finger_joint2")
 
-N_TARGETS = 100    # number of random target poses to evaluate
+N_TARGETS = 10    # number of random target poses to evaluate
+N_TARGETS_BATCH = 2048
 N_WARMUP  = 3      # JIT / kernel warm-up calls (discarded from timing)
 N_TIMED   = 5      # timed repetitions (sequential: per pose; batch: per full call)
 
@@ -146,10 +188,6 @@ IK_KWARGS_MPPI_CUDA = dict(
     continuity_weight = 0.0,
 )
 
-# Agreement threshold between JAX and CUDA outputs.
-AGREE_POS_MM  = 5.0
-AGREE_ORI_RAD = 0.5
-
 # Success threshold.
 POS_THR_M   = 1e-3
 ROT_THR_RAD = 0.05
@@ -168,10 +206,13 @@ class SolveResult:
 
 @dataclass
 class BatchResult:
-    cfgs:     np.ndarray   # (N_TARGETS, n_act)
-    pos_errs: np.ndarray   # (N_TARGETS,) metres
-    rot_errs: np.ndarray   # (N_TARGETS,) radians
-    time_ms:  float        # effective per-problem time (total / N_TARGETS)
+    cfgs:          np.ndarray   # (N_TARGETS, n_act)
+    pos_errs:      np.ndarray   # (N_TARGETS,) metres
+    rot_errs:      np.ndarray   # (N_TARGETS,) radians
+    time_ms:       float        # effective per-problem time (total / N_TARGETS)
+    peak_gpu_util: float = float("nan")   # peak GPU utilisation (%)
+    avg_gpu_util:  float = float("nan")   # mean GPU utilisation (%)
+    peak_vram_mb:  float = float("nan")   # peak VRAM used (MiB)
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +273,18 @@ def _run_solver_batch(
 ) -> BatchResult:
     """Run a batch solver once over all N_TARGETS, time it N_TIMED times."""
     tli = (target_link_index,)
-    cfgs_out, total_t = _time_solve(
-        fn, robot, tli, target_poses_stacked,
-        rng_key, previous_cfgs,
-        fixed_joint_mask=fixed_joint_mask,
-        **kwargs,
-    )
+    with _gpu_monitor() as gpu_samples:
+        cfgs_out, total_t = _time_solve(
+            fn, robot, tli, target_poses_stacked,
+            rng_key, previous_cfgs,
+            fixed_joint_mask=fixed_joint_mask,
+            **kwargs,
+        )
     cfgs_np = np.array(cfgs_out)  # (N_TARGETS, n_act)
+
+    peak_gpu = max(gpu_samples["gpu_util"], default=float("nan"))
+    avg_gpu  = float(np.mean(gpu_samples["gpu_util"])) if gpu_samples["gpu_util"] else float("nan")
+    peak_vram = max(gpu_samples["vram_mb"], default=float("nan"))
 
     pos_errs = np.empty(len(target_poses_stacked.wxyz_xyz))
     rot_errs = np.empty(len(target_poses_stacked.wxyz_xyz))
@@ -249,41 +295,75 @@ def _run_solver_batch(
         )
 
     effective_ms = total_t * 1e3 / len(pos_errs)
-    return BatchResult(cfgs_np, pos_errs, rot_errs, effective_ms)
+    return BatchResult(cfgs_np, pos_errs, rot_errs, effective_ms,
+                       peak_gpu_util=peak_gpu, avg_gpu_util=avg_gpu, peak_vram_mb=peak_vram)
 
 
 # ---------------------------------------------------------------------------
 # Summary helpers
 # ---------------------------------------------------------------------------
 
-def _stats(vals, unit: str = "") -> str:
-    a = np.asarray(vals)
-    return (f"mean={a.mean():.4f}{unit}  median={np.median(a):.4f}{unit}"
-            f"  p95={np.percentile(a, 95):.4f}{unit}  max={a.max():.4f}{unit}")
+_COL_W = 20  # method name column width
+_NUM_W = 10  # numeric column width
+
+def _table_header(cols: list[str]) -> str:
+    row = f"  {'Method':<{_COL_W}}"
+    for c in cols:
+        row += f"  {c:>{_NUM_W}}"
+    return row
+
+def _table_sep(n_cols: int) -> str:
+    return "  " + "-" * (_COL_W + n_cols * (_NUM_W + 2))
+
+def _table_row(label: str, vals: list[str]) -> str:
+    row = f"  {label:<{_COL_W}}"
+    for v in vals:
+        row += f"  {v:>{_NUM_W}}"
+    return row
 
 
-def _print_summary_seq(label: str, results: list[SolveResult]) -> None:
-    pos    = [r.pos_err * 1e3 for r in results]
-    rot    = [r.rot_err       for r in results]
-    t      = [r.time_ms       for r in results]
+def _seq_row(label: str, results: list[SolveResult]) -> tuple[str, dict]:
+    pos    = np.array([r.pos_err * 1e3 for r in results])
+    rot    = np.array([r.rot_err       for r in results])
+    t      = np.array([r.time_ms       for r in results])
     solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
-    print(f"  {label}")
-    print(f"    pos  {_stats(pos, ' mm')}")
-    print(f"    rot  {_stats(rot, ' rad')}")
-    print(f"    time {_stats(t,   ' ms')}  [per-problem sequential]")
-    print(f"    success: {solved}/{len(results)}  ({100*solved/len(results):.1f}%)")
+    n      = len(results)
+    vals = [
+        f"{np.median(t):.3f}",
+        f"{np.percentile(t, 95):.3f}",
+        f"{np.median(pos):.4f}",
+        f"{np.percentile(pos, 95):.4f}",
+        f"{np.median(rot):.4f}",
+        f"{np.percentile(rot, 95):.4f}",
+        f"{solved}/{n}",
+    ]
+    return _table_row(label, vals), {"t_med": float(np.median(t))}
 
 
-def _print_summary_batch(label: str, result: BatchResult) -> None:
+def _batch_row(label: str, result: BatchResult) -> tuple[str, dict]:
     pos    = result.pos_errs * 1e3
     rot    = result.rot_errs
     solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
     n      = len(pos)
-    print(f"  {label}")
-    print(f"    pos  {_stats(pos, ' mm')}")
-    print(f"    rot  {_stats(rot, ' rad')}")
-    print(f"    time {result.time_ms:.4f} ms/problem  [batch, N={n}]")
-    print(f"    success: {solved}/{n}  ({100*solved/n:.1f}%)")
+
+    def _fmt_pct(v: float) -> str:
+        return f"{v:.0f}%" if not np.isnan(v) else "n/a"
+
+    def _fmt_mb(v: float) -> str:
+        return f"{v:.0f}" if not np.isnan(v) else "n/a"
+
+    vals = [
+        f"{result.time_ms:.3f}",
+        f"{np.median(pos):.4f}",
+        f"{np.percentile(pos, 95):.4f}",
+        f"{np.median(rot):.4f}",
+        f"{np.percentile(rot, 95):.4f}",
+        f"{solved}/{n}",
+        _fmt_pct(result.peak_gpu_util),
+        _fmt_pct(result.avg_gpu_util),
+        _fmt_mb(result.peak_vram_mb),
+    ]
+    return _table_row(label, vals), {}
 
 
 def _make_batched_jax_solver(base_fn, ik_kwargs):
@@ -314,6 +394,8 @@ def main() -> None:  # noqa: C901
     print("=" * 80)
     print(f"IK benchmark: HJCD-IK, LS-IK, SQP-IK, and MPPI-IK  (robot={ROBOT_NAME}, "
           f"n_targets={N_TARGETS}, n_timed={N_TIMED})")
+    gpu_mon_status = "enabled (pynvml)" if _NVML_OK else "disabled (install nvidia-ml-py for GPU stats)"
+    print(f"GPU monitoring: {gpu_mon_status}")
     print("=" * 80)
 
     # ------------------------------------------------------------------
@@ -338,26 +420,29 @@ def main() -> None:  # noqa: C901
     rng_np  = np.random.default_rng(0)
 
     # ------------------------------------------------------------------
-    # Generate target poses
+    # Generate target poses  (batch superset; sequential uses first N_TARGETS)
     # ------------------------------------------------------------------
-    print("\nGenerating target poses ...")
-    target_cfgs_np = rng_np.uniform(lo, hi, size=(N_TARGETS, n_act)).astype(np.float32)
-    target_poses: list[jaxlie.SE3] = []
-    for i in range(N_TARGETS):
+    print(f"\nGenerating target poses (seq={N_TARGETS}, batch={N_TARGETS_BATCH}) ...")
+    target_cfgs_np = rng_np.uniform(lo, hi, size=(N_TARGETS_BATCH, n_act)).astype(np.float32)
+    all_target_poses: list[jaxlie.SE3] = []
+    for i in range(N_TARGETS_BATCH):
         cfg_i = jnp.array(target_cfgs_np[i])
         Ts    = robot.forward_kinematics(cfg_i)
-        target_poses.append(jaxlie.SE3(Ts[target_link_index]))
+        all_target_poses.append(jaxlie.SE3(Ts[target_link_index]))
 
-    # Stack all poses into a single batched SE3 for the batch solvers.
+    # Sequential subset.
+    target_poses = all_target_poses[:N_TARGETS]
+
+    # Stack all batch poses into a single batched SE3 for the batch solvers.
     target_poses_stacked = jaxlie.SE3(
-        jnp.stack([p.wxyz_xyz for p in target_poses])
-    )  # (N_TARGETS, 7)
+        jnp.stack([p.wxyz_xyz for p in all_target_poses])
+    )  # (N_TARGETS_BATCH, 7)
 
     # Per-pose RNG keys and warm-start configs.
-    rng_keys     = [jax.random.PRNGKey(i + 1) for i in range(N_TARGETS)]
-    rng_keys_batch = jnp.stack(rng_keys)
-    previous_cfgs_seq = [mid_cfg] * N_TARGETS  # list for sequential solver
-    previous_cfgs_batch = jnp.tile(mid_cfg[None], (N_TARGETS, 1))  # (N_TARGETS, n_act)
+    rng_keys          = [jax.random.PRNGKey(i + 1) for i in range(N_TARGETS)]
+    rng_keys_batch    = jnp.stack([jax.random.PRNGKey(i + 1) for i in range(N_TARGETS_BATCH)])
+    previous_cfgs_seq   = [mid_cfg] * N_TARGETS
+    previous_cfgs_batch = jnp.tile(mid_cfg[None], (N_TARGETS_BATCH, 1))  # (N_TARGETS_BATCH, n_act)
 
     # ------------------------------------------------------------------
     # JIT-compile / warm up all solvers
@@ -489,120 +574,46 @@ def main() -> None:  # noqa: C901
 
 
     # ------------------------------------------------------------------
-    # Summary
+    # Results tables
     # ------------------------------------------------------------------
-    print(f"\n{'='*80}")
-    print("SUMMARY — Sequential (per-problem latency)")
-    print(f"{'='*80}")
-    for label in ("HJCD-JAX", "HJCD-CUDA", "LS-JAX", "LS-CUDA",
-                  "SQP-JAX", "SQP-CUDA", "MPPI-JAX", "MPPI-CUDA"):
-        _print_summary_seq(label, seq_results[label])
-        print()
+    seq_cols   = ["t_med(ms)", "t_p95(ms)", "pos_med(mm)", "pos_p95(mm)",
+                  "rot_med(rad)", "rot_p95(rad)", "success"]
+    batch_cols = ["ms/prob",   "pos_med(mm)", "pos_p95(mm)",
+                  "rot_med(rad)", "rot_p95(rad)", "success",
+                  "gpu_pk(%)", "gpu_avg(%)", "vram_pk(MB)"]
 
-    print(f"{'='*80}")
-    print(f"SUMMARY — Batch (effective per-problem time over {N_TARGETS} targets)")
-    print(f"{'='*80}")
-    for label in ("LS-JAX-BATCH", "HJCD-JAX-BATCH", "SQP-JAX-BATCH", "MPPI-JAX-BATCH",
-                  "LS-CUDA-BATCH", "HJCD-CUDA-BATCH", "SQP-CUDA-BATCH", "MPPI-CUDA-BATCH"):
-        _print_summary_batch(label, batch_results[label])
-        print()
-
-    # ------------------------------------------------------------------
-    # Speedup table
-    # ------------------------------------------------------------------
-    print(f"{'='*80}")
-    print("Speedups (median sequential time vs effective batch time)")
-    print(f"{'='*80}")
-
-    def med_seq(k):
-        return float(np.median([r.time_ms for r in seq_results[k]]))
-
-    t = {k: med_seq(k) for k in seq_results}
-    t["LS-JAX-BATCH"]    = batch_results["LS-JAX-BATCH"].time_ms
-    t["HJCD-JAX-BATCH"]  = batch_results["HJCD-JAX-BATCH"].time_ms
-    t["SQP-JAX-BATCH"]   = batch_results["SQP-JAX-BATCH"].time_ms
-    t["MPPI-JAX-BATCH"]  = batch_results["MPPI-JAX-BATCH"].time_ms
-    t["LS-CUDA-BATCH"]   = batch_results["LS-CUDA-BATCH"].time_ms
-    t["HJCD-CUDA-BATCH"] = batch_results["HJCD-CUDA-BATCH"].time_ms
-    t["SQP-CUDA-BATCH"]  = batch_results["SQP-CUDA-BATCH"].time_ms
-    t["MPPI-CUDA-BATCH"] = batch_results["MPPI-CUDA-BATCH"].time_ms
-
-    rows = [
-        ("HJCD-CUDA  vs HJCD-JAX  (sequential)",       "HJCD-JAX",       "HJCD-CUDA"),
-        ("LS-CUDA    vs LS-JAX    (sequential)",        "LS-JAX",         "LS-CUDA"),
-        ("SQP-CUDA   vs SQP-JAX   (sequential)",        "SQP-JAX",        "SQP-CUDA"),
-        ("MPPI-CUDA  vs MPPI-JAX  (sequential)",        "MPPI-JAX",       "MPPI-CUDA"),
-        ("LS-CUDA-BATCH   vs LS-JAX-BATCH   (batch)",   "LS-JAX-BATCH",   "LS-CUDA-BATCH"),
-        ("HJCD-CUDA-BATCH vs HJCD-JAX-BATCH (batch)",   "HJCD-JAX-BATCH", "HJCD-CUDA-BATCH"),
-        ("SQP-CUDA-BATCH  vs SQP-JAX-BATCH  (batch)",   "SQP-JAX-BATCH",  "SQP-CUDA-BATCH"),
-        ("MPPI-CUDA-BATCH vs MPPI-JAX-BATCH (batch)",   "MPPI-JAX-BATCH", "MPPI-CUDA-BATCH"),
-        ("LS-CUDA-BATCH   vs LS-JAX   (seq→batch)",     "LS-JAX",         "LS-CUDA-BATCH"),
-        ("HJCD-CUDA-BATCH vs HJCD-JAX (seq→batch)",     "HJCD-JAX",       "HJCD-CUDA-BATCH"),
-        ("SQP-CUDA-BATCH  vs SQP-JAX  (seq→batch)",     "SQP-JAX",        "SQP-CUDA-BATCH"),
-        ("MPPI-CUDA-BATCH vs MPPI-JAX (seq→batch)",     "MPPI-JAX",       "MPPI-CUDA-BATCH"),
-        ("SQP-CUDA  vs LS-CUDA  (sequential)",          "LS-CUDA",        "SQP-CUDA"),
-        ("MPPI-CUDA vs LS-CUDA  (sequential)",          "LS-CUDA",        "MPPI-CUDA"),
-        ("MPPI-CUDA vs SQP-CUDA (sequential)",          "SQP-CUDA",       "MPPI-CUDA"),
-        ("SQP-CUDA-BATCH  vs LS-CUDA-BATCH  (batch)",   "LS-CUDA-BATCH",  "SQP-CUDA-BATCH"),
-        ("MPPI-CUDA-BATCH vs LS-CUDA-BATCH  (batch)",   "LS-CUDA-BATCH",  "MPPI-CUDA-BATCH"),
-        ("MPPI-CUDA-BATCH vs SQP-CUDA-BATCH (batch)",   "SQP-CUDA-BATCH", "MPPI-CUDA-BATCH"),
+    seq_order = [
+        "HJCD-JAX", "HJCD-CUDA",
+        "LS-JAX",   "LS-CUDA",
+        "SQP-JAX",  "SQP-CUDA",
+        "MPPI-JAX", "MPPI-CUDA",
     ]
-    for desc, slow, fast in rows:
-        ratio = t[slow] / t[fast]
-        faster = "faster" if ratio >= 1.0 else "slower"
-        print(f"  {desc:<55}: {ratio:.2f}x {faster}")
+    batch_order = [
+        "HJCD-JAX-BATCH",  "HJCD-CUDA-BATCH",
+        "LS-JAX-BATCH",    "LS-CUDA-BATCH",
+        "SQP-JAX-BATCH",   "SQP-CUDA-BATCH",
+        "MPPI-JAX-BATCH",  "MPPI-CUDA-BATCH",
+    ]
 
-    # ------------------------------------------------------------------
-    # JAX vs CUDA-BATCH agreement
-    # ------------------------------------------------------------------
     print(f"\n{'='*80}")
-    print("JAX vs CUDA-BATCH agreement")
+    print(f"Sequential results — per-problem latency  (N={N_TARGETS}, timed={N_TIMED})")
     print(f"{'='*80}")
+    print(_table_header(seq_cols))
+    print(_table_sep(len(seq_cols)))
+    for label in seq_order:
+        row, _ = _seq_row(label, seq_results[label])
+        print(row)
 
-    for jax_key, batch_key in [("HJCD-JAX-BATCH",  "HJCD-CUDA-BATCH"),
-                               ("LS-JAX-BATCH",    "LS-CUDA-BATCH"),
-                               ("SQP-JAX-BATCH",   "SQP-CUDA-BATCH"),
-                               ("MPPI-JAX-BATCH",  "MPPI-CUDA-BATCH")]:
-        delta_pos = []
-        delta_ori = []
-        for i in range(N_TARGETS):
-            Ts_jax  = robot.forward_kinematics(jnp.array(batch_results[jax_key].cfgs[i]))
-            Ts_cuda = robot.forward_kinematics(jnp.array(batch_results[batch_key].cfgs[i]))
-            pa = jaxlie.SE3(Ts_jax[target_link_index])
-            pb = jaxlie.SE3(Ts_cuda[target_link_index])
-            delta_pos.append(float(jnp.linalg.norm(pa.translation() - pb.translation())) * 1e3)
-            delta_ori.append(float(jnp.linalg.norm((pa.rotation().inverse() @ pb.rotation()).log())))
+    
 
-        pos_ok = all(d < AGREE_POS_MM  for d in delta_pos)
-        ori_ok = all(d < AGREE_ORI_RAD for d in delta_ori)
-        label  = jax_key.split("-")[0]
-        print(f"  {label:<6}: pos={'OK' if pos_ok else 'FAIL'}  "
-              f"(mean {np.mean(delta_pos):.3f} mm, max {np.max(delta_pos):.3f} mm)  "
-              f"ori={'OK' if ori_ok else 'FAIL'}  "
-              f"(mean {np.mean(delta_ori):.4f} rad, max {np.max(delta_ori):.4f} rad)")
-
-    # ------------------------------------------------------------------
-    # SQP vs LS accuracy comparison
-    # ------------------------------------------------------------------
     print(f"\n{'='*80}")
-    print("LS vs SQP vs MPPI accuracy comparison (CUDA batch)")
+    print(f"Batch results — effective per-problem time  (N={N_TARGETS_BATCH}, timed={N_TIMED})")
     print(f"{'='*80}")
-
-    def _succ_stats(key):
-        r   = batch_results[key]
-        pos = r.pos_errs * 1e3
-        ok  = int(np.sum((r.pos_errs < POS_THR_M) & (r.rot_errs < ROT_THR_RAD)))
-        return pos, ok
-
-    ls_pos,   ls_succ   = _succ_stats("LS-CUDA-BATCH")
-    sqp_pos,  sqp_succ  = _succ_stats("SQP-CUDA-BATCH")
-    mppi_pos, mppi_succ = _succ_stats("MPPI-CUDA-BATCH")
-    print(f"  LS-CUDA-BATCH    median pos {np.median(ls_pos):.4f} mm  "
-          f"p95 {np.percentile(ls_pos, 95):.4f} mm  success {ls_succ}/{N_TARGETS}")
-    print(f"  SQP-CUDA-BATCH   median pos {np.median(sqp_pos):.4f} mm  "
-          f"p95 {np.percentile(sqp_pos, 95):.4f} mm  success {sqp_succ}/{N_TARGETS}")
-    print(f"  MPPI-CUDA-BATCH  median pos {np.median(mppi_pos):.4f} mm  "
-          f"p95 {np.percentile(mppi_pos, 95):.4f} mm  success {mppi_succ}/{N_TARGETS}")
+    print(_table_header(batch_cols))
+    print(_table_sep(len(batch_cols)))
+    for label in batch_order:
+        row, _ = _batch_row(label, batch_results[label])
+        print(row)
     print()
 
 
