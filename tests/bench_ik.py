@@ -1,4 +1,4 @@
-"""Benchmark and correctness evaluation: HJCD-IK, LS-IK, SQP-IK, and MPPI-IK (JAX and CUDA).
+"""Benchmark and correctness evaluation: HJCD-IK, LS-IK, SQP-IK, MPPI-IK, and Learned-IK.
 
 Sequential (per-problem) timing
     JAX solvers are evaluated one pose at a time to measure single-problem
@@ -13,6 +13,12 @@ Correctness
     For each solver the median position / rotation errors across all target
     poses are reported.  JAX vs CUDA agreement is checked at batch level.
 
+Learned-IK
+    The Learned-IK solver requires a pre-trained Flax model.  Train one with:
+        python train_learned_ik.py --robot panda
+    The model is saved to resources/learned_ik/panda.pkl and loaded
+    automatically.  If no model is found the learned-IK rows are skipped.
+
 Usage:
     python tests/bench_ik.py
 
@@ -25,6 +31,9 @@ Prerequisites:
            bash src/pyronot/cuda_kernels/build_mppi_ik_cuda.sh
     3. robot_descriptions installed:
            pip install robot_descriptions
+    4. (Optional) Flax model for Learned-IK:
+           pip install flax optax
+           python train_learned_ik.py --robot panda
 """
 
 from __future__ import annotations
@@ -101,6 +110,17 @@ from pyronot.optimization_engines._mppi_ik import (
     mppi_ik_solve_cuda,
     mppi_ik_solve_cuda_batch,
 )
+
+# Learned-IK: imports only; model is loaded inside main() after the robot is known.
+try:
+    from pyronot.optimization_engines._learned_ik import (
+        get_default_model_path,
+        load_learned_ik,
+        make_learned_ik_solve,
+    )
+    _LEARNED_IK_IMPORT_OK = True
+except Exception:
+    _LEARNED_IK_IMPORT_OK = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -185,6 +205,18 @@ IK_KWARGS_MPPI_CUDA = dict(
     mppi_temperature  = 0.05,
     eps_pos           = 1e-8,
     eps_ori           = 1e-8,
+    continuity_weight = 0.0,
+)
+
+# Learned-IK hyper-parameters.
+# num_seeds:      half come from the MLP prediction ± noise; half are random.
+# n_refine_iters: LM steps run on each seed after the MLP warm-start.
+IK_KWARGS_LEARNED_JAX = dict(
+    num_seeds         = 16,
+    n_refine_iters    = 15,
+    pos_weight        = 50.0,
+    ori_weight        = 10.0,
+    lambda_init       = 5e-3,
     continuity_weight = 0.0,
 )
 
@@ -414,6 +446,45 @@ def main() -> None:  # noqa: C901
     print(f"  {n_act} actuated joints, target link: '{TARGET_LINK_NAME}'")
     print(f"  Fixed joints: {[n for n in FIXED_JOINT_NAMES if n in robot.joints.actuated_names]}")
 
+    # ------------------------------------------------------------------
+    # Learned-IK: load pre-trained Flax model (optional)
+    # ------------------------------------------------------------------
+    _learned_ik_available = False
+    _learned_ik_fn        = None
+    _learned_ik_fn_batch  = None
+    if _LEARNED_IK_IMPORT_OK:
+        _model_path = get_default_model_path(ROBOT_NAME)
+        if _model_path.exists():
+            print(f"\nLoaded Learned-IK model: {_model_path}")
+            _model_data  = load_learned_ik(_model_path)
+            _model_params = _model_data["params"]
+            _learned_base = make_learned_ik_solve(robot)
+
+            # Wrap so that model_params is baked in and the signature
+            # matches the other single-problem solvers used in the benchmark.
+            def _learned_ik_fn(
+                robot, target_link_indices, target_poses,
+                rng_key, previous_cfg, fixed_joint_mask=None, **kwargs,
+            ):
+                return _learned_base(
+                    robot, target_link_indices, target_poses,
+                    rng_key, previous_cfg,
+                    model_params=_model_params,
+                    fixed_joint_mask=fixed_joint_mask,
+                    **kwargs,
+                )
+
+            _learned_ik_fn_batch = _make_batched_jax_solver(
+                _learned_ik_fn, IK_KWARGS_LEARNED_JAX,
+            )
+            _learned_ik_available = True
+        else:
+            print(f"\nLearned-IK model not found at {_model_path}")
+            print("  Run: python train_learned_ik.py --robot panda")
+            print("  Learned-IK rows will be skipped in the benchmark.")
+    else:
+        print("\nLearned-IK unavailable (flax not installed).")
+
     lo     = np.array(robot.joints.lower_limits)
     hi     = np.array(robot.joints.upper_limits)
     mid_cfg = jnp.array((lo + hi) / 2, dtype=jnp.float32)
@@ -481,12 +552,17 @@ def main() -> None:  # noqa: C901
         ("MPPI-JAX",   jit_mppi,          {}),
         ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
     ]
+    if _learned_ik_available:
+        warmup_seq.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
+
     warmup_batch_jax = [
         ("HJCD-JAX-BATCH",  jit_hjcd_batch,  {}),
         ("LS-JAX-BATCH",    jit_ls_batch,    {}),
         ("SQP-JAX-BATCH",   jit_sqp_batch,   {}),
         ("MPPI-JAX-BATCH",  jit_mppi_batch,  {}),
     ]
+    if _learned_ik_available:
+        warmup_batch_jax.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}))
     warmup_batch_cuda = [
         ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
         ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
@@ -536,6 +612,9 @@ def main() -> None:  # noqa: C901
         ("MPPI-JAX",  jit_mppi,           {}),
         ("MPPI-CUDA", mppi_ik_solve_cuda,  IK_KWARGS_MPPI_CUDA),
     ]
+    if _learned_ik_available:
+        seq_solvers.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
+
     seq_results: dict[str, list[SolveResult]] = {}
 
     for name, fn, kwargs in seq_solvers:
@@ -563,6 +642,9 @@ def main() -> None:  # noqa: C901
         ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,   IK_KWARGS_SQP_CUDA,  rng0),
         ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch,  IK_KWARGS_MPPI_CUDA, rng0),
     ]
+    if _learned_ik_available:
+        batch_solvers.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}, rng_keys_batch))
+
     batch_results: dict[str, BatchResult] = {}
 
     for name, fn, kwargs, rng in batch_solvers:
@@ -588,12 +670,17 @@ def main() -> None:  # noqa: C901
         "SQP-JAX",  "SQP-CUDA",
         "MPPI-JAX", "MPPI-CUDA",
     ]
+    if _learned_ik_available:
+        seq_order.append("Learned-JAX")
+
     batch_order = [
         "HJCD-JAX-BATCH",  "HJCD-CUDA-BATCH",
         "LS-JAX-BATCH",    "LS-CUDA-BATCH",
         "SQP-JAX-BATCH",   "SQP-CUDA-BATCH",
         "MPPI-JAX-BATCH",  "MPPI-CUDA-BATCH",
     ]
+    if _learned_ik_available:
+        batch_order.append("Learned-JAX-BATCH")
 
     print(f"\n{'='*80}")
     print(f"Sequential results — per-problem latency  (N={N_TARGETS}, timed={N_TIMED})")
@@ -603,8 +690,6 @@ def main() -> None:  # noqa: C901
     for label in seq_order:
         row, _ = _seq_row(label, seq_results[label])
         print(row)
-
-    
 
     print(f"\n{'='*80}")
     print(f"Batch results — effective per-problem time  (N={N_TARGETS_BATCH}, timed={N_TIMED})")
