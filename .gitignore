@@ -16,3 +16,4 @@ htmlcov
 .vite
 build
 HJCD-IK
+resources/learned_ik/*
