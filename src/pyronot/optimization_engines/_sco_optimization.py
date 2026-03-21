@@ -34,18 +34,12 @@ from typing import Sequence
 import jax
 import jax.numpy as jnp
 import jaxlie
+import optax
 from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
 from ..collision import CollGeom, RobotCollision, colldist_from_sdf
-
-# ---------------------------------------------------------------------------
-# Step-size candidates (same convention as IK solvers)
-# ---------------------------------------------------------------------------
-
-_LS_ALPHAS: Float[Array, "5"] = jnp.array([1.0, 0.5, 0.25, 0.1, 0.025])
-
 
 # ---------------------------------------------------------------------------
 # Configuration dataclass
@@ -57,14 +51,20 @@ class TrajOptConfig:
 
     # --- Iteration budget ---
     n_iters: int = 100
-    """Number of gradient-descent iterations."""
+    """Number of Adam iterations."""
 
-    # --- Learning rate ---
+    # --- Adam optimizer ---
     lr: float = 0.01
-    """Base learning rate (gradient step size)."""
+    """Adam learning rate."""
 
-    use_line_search: bool = True
-    """If True, run a parallel line-search at each step and keep the best alpha."""
+    adam_b1: float = 0.9
+    """Adam beta1 (first-moment decay)."""
+
+    adam_b2: float = 0.999
+    """Adam beta2 (second-moment decay)."""
+
+    adam_eps: float = 1e-8
+    """Adam epsilon for numerical stability."""
 
     # --- Cost weights ---
     w_smooth: float = 1.0
@@ -85,9 +85,6 @@ class TrajOptConfig:
     collision_margin: float = 0.01
     """Activation distance (margin) for colldist_from_sdf."""
 
-    w_goal: float = 5.0
-    """Weight for the goal cost (distance of last waypoint to target)."""
-
     w_limits: float = 1.0
     """Weight for joint-limit violation penalty."""
 
@@ -102,23 +99,36 @@ def _smoothness_cost(
     w_acc: float,
     w_jerk: float,
 ) -> Array:
-    """Sum of squared finite-difference norms (vel, acc, jerk)."""
-    vel  = traj[1:] - traj[:-1]                 # [T-1, DOF]
-    acc  = vel[1:] - vel[:-1]                   # [T-2, DOF]
-    jerk = acc[1:] - acc[:-1]                   # [T-3, DOF]
+    """Smoothness cost using 4th-order central-difference acceleration.
 
-    cost  = w_vel  * jnp.sum(vel  ** 2)
-    cost += w_acc  * jnp.sum(acc  ** 2)
+    Velocity and acceleration terms are replaced by the 4th-order central-difference
+    stencil for acceleration (valid for interior points t in [2, T-3]):
+
+        a[t] = -q[t-2] + 16·q[t-1] - 30·q[t] + 16·q[t+1] - q[t+2]
+
+    Jerk is the finite difference of consecutive central-difference accelerations.
+    w_vel is unused (no separate velocity term).
+    """
+    # 4th-order central-difference acceleration  [T-4, DOF]
+    # Stencil: (-q[t-2] + 16q[t-1] - 30q[t] + 16q[t+1] - q[t+2]) / (12h²)
+    # Source: Fornberg, B. (1988). "Generation of finite difference formulas on
+    #   arbitrarily spaced grids." Mathematics of Computation, 51(184), 699–706.
+    #   https://doi.org/10.1090/S0025-5718-1988-0935077-0  (Table 1, d=2, order=4)
+    # Divided by 12 to match the standard f''(x) ≈ stencil/(12h²) scaling (h=1),
+    # keeping gradient magnitudes comparable to the previous 2nd-order stencil.
+    acc = (
+        -      traj[:-4]
+        + 16.0 * traj[1:-3]
+        - 30.0 * traj[2:-2]
+        + 16.0 * traj[3:-1]
+        -      traj[4:]
+    ) / 12.0
+    jerk = acc[1:] - acc[:-1]                   # [T-5, DOF]
+
+    cost  = w_acc  * jnp.sum(acc  ** 2)
     cost += w_jerk * jnp.sum(jerk ** 2)
     return cost
 
-
-def _goal_cost(
-    traj: Float[Array, "T DOF"],
-    goal: Float[Array, "DOF"],
-) -> Array:
-    """Squared L2 distance between the final waypoint and the goal configuration."""
-    return jnp.sum((traj[-1] - goal) ** 2)
 
 
 def _limits_cost(
@@ -177,7 +187,6 @@ def _collision_cost_traj(
 
 def _total_cost(
     traj: Float[Array, "T DOF"],
-    goal: Float[Array, "DOF"],
     lower: Float[Array, "DOF"],
     upper: Float[Array, "DOF"],
     robot: Robot,
@@ -185,13 +194,16 @@ def _total_cost(
     world_geoms: tuple,
     cfg: TrajOptConfig,
 ) -> Array:
-    """Scalar cost for a single trajectory."""
+    """Scalar cost for a single trajectory.
+
+    Start and goal waypoints are pinned externally via gradient masking,
+    so no endpoint cost terms are needed here.
+    """
     cost = jnp.zeros(())
 
     cost += cfg.w_smooth * _smoothness_cost(
         traj, cfg.w_vel, cfg.w_acc, cfg.w_jerk
     )
-    cost += cfg.w_goal * _goal_cost(traj, goal)
     cost += cfg.w_limits * _limits_cost(traj, lower, upper)
     cost += cfg.w_collision * _collision_cost_traj(
         traj, robot, robot_coll, world_geoms, cfg.collision_margin
@@ -205,7 +217,6 @@ def _total_cost(
 # ---------------------------------------------------------------------------
 
 def _make_batched_fns(
-    goal: Float[Array, "DOF"],
     lower: Float[Array, "DOF"],
     upper: Float[Array, "DOF"],
     robot: Robot,
@@ -217,7 +228,7 @@ def _make_batched_fns(
 
     def single_cost(traj):
         return _total_cost(
-            traj, goal, lower, upper, robot, robot_coll, world_geoms, opt_cfg
+            traj, lower, upper, robot, robot_coll, world_geoms, opt_cfg
         )
 
     # [B, T, DOF] -> [B]
@@ -231,37 +242,25 @@ def _make_batched_fns(
 # Optimization step
 # ---------------------------------------------------------------------------
 
-def _make_step_fn(
-    batched_cost_fn,
-    batched_val_grad_fn,
-    lr: float,
-    use_line_search: bool,
-):
-    """Return a single lax.scan-compatible step function."""
+def _make_step_fn(batched_val_grad_fn, tx):
+    """Return a single lax.scan-compatible step function for Adam.
 
-    def step(trajs: Float[Array, "B T DOF"], _) -> tuple[Float[Array, "B T DOF"], None]:
-        # Single forward+backward pass to get gradients (value unused here)
+    Endpoints (traj[0] and traj[-1]) are pinned by zeroing their gradients
+    before the optimizer update, so start and goal never move.
+    """
+
+    def step(carry, _):
+        trajs, opt_state = carry          # [B, T, DOF], optax state
         _, grads = batched_val_grad_fn(trajs)   # [B, T, DOF]
 
-        if use_line_search:
-            A = _LS_ALPHAS.shape[0]
-            B = trajs.shape[0]
-            # candidates: [A, B, T, DOF]
-            candidates = (
-                trajs[None, ...]
-                - _LS_ALPHAS[:, None, None, None] * lr * grads[None, ...]
-            )
-            # Flatten A*B into one batch so batched_cost_fn sees [A*B, T, DOF]
-            # This avoids a nested vmap (vmap over A wrapping a vmap over B).
-            cands_flat = candidates.reshape(A * B, *trajs.shape[1:])  # [A*B, T, DOF]
-            costs_flat = batched_cost_fn(cands_flat)                   # [A*B]
-            costs_ls = costs_flat.reshape(A, B)                        # [A, B]
-            best_alpha_idx = jnp.argmin(costs_ls, axis=0)              # [B]
-            new_trajs = candidates[best_alpha_idx, jnp.arange(B)]
-        else:
-            new_trajs = trajs - lr * grads
+        # Pin start and goal: zero out gradients at first and last waypoints
+        grads = grads.at[:, 0, :].set(0.0)
+        grads = grads.at[:, -1, :].set(0.0)
 
-        return new_trajs, None
+        updates, new_opt_state = tx.update(grads, opt_state, trajs)
+        new_trajs = optax.apply_updates(trajs, updates)
+
+        return (new_trajs, new_opt_state), None
 
     return step
 
@@ -276,19 +275,22 @@ def _make_step_fn(
 )
 def sco_trajopt(
     init_trajs: Float[Array, "B T DOF"],
+    start: Float[Array, "DOF"],
     goal: Float[Array, "DOF"],
     robot: Robot,
     robot_coll: RobotCollision,
     world_geoms: tuple,
     opt_cfg: TrajOptConfig = TrajOptConfig(),
 ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"]]:
-    """Batched SCO-style trajectory optimization.
+    """Batched SCO-style trajectory optimization using Adam.
 
-    Optimizes all B candidate trajectories in parallel and returns the best one.
+    Start and goal waypoints are pinned: ``init_trajs[:, 0, :]`` and
+    ``init_trajs[:, -1, :]`` are never modified by the optimizer.
 
     Args:
         init_trajs:  Initial trajectory batch.  Shape ``[B, T, DOF]``.
-        goal:        Target joint configuration for the final waypoint.  Shape ``[DOF]``.
+        start:       Start joint configuration (used to pin ``traj[:, 0, :]``).
+        goal:        Goal joint configuration (used to pin ``traj[:, -1, :]``).
         robot:       Robot kinematics pytree.
         robot_coll:  Robot collision model pytree.
         world_geoms: Tuple of world collision geometry objects (one per obstacle type).
@@ -303,15 +305,22 @@ def sco_trajopt(
     lower = robot.joints.lower_limits   # [DOF]
     upper = robot.joints.upper_limits   # [DOF]
 
+    # Pin endpoints in init_trajs so every trajectory starts and ends correctly
+    init_trajs = init_trajs.at[:, 0, :].set(start)
+    init_trajs = init_trajs.at[:, -1, :].set(goal)
+
     batched_cost_fn, batched_val_grad_fn = _make_batched_fns(
-        goal, lower, upper, robot, robot_coll, world_geoms, opt_cfg
+        lower, upper, robot, robot_coll, world_geoms, opt_cfg
     )
 
-    step_fn = _make_step_fn(
-        batched_cost_fn, batched_val_grad_fn, opt_cfg.lr, opt_cfg.use_line_search
-    )
+    tx = optax.adam(opt_cfg.lr, opt_cfg.adam_b1, opt_cfg.adam_b2, opt_cfg.adam_eps)
+    opt_state = tx.init(init_trajs)
 
-    final_trajs, _ = jax.lax.scan(step_fn, init_trajs, None, length=opt_cfg.n_iters)
+    step_fn = _make_step_fn(batched_val_grad_fn, tx)
+
+    (final_trajs, _), _ = jax.lax.scan(
+        step_fn, (init_trajs, opt_state), None, length=opt_cfg.n_iters
+    )
 
     costs = batched_cost_fn(final_trajs)       # [B]
     best_idx = jnp.argmin(costs)

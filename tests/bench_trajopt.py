@@ -27,6 +27,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import jaxlie
 import numpy as np
 import yourdfpy
 
@@ -37,9 +38,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import pyronot as pk
 from pyronot._robot import Robot
-from pyronot._splines import make_spline_init_trajs
+from pyronot.collision import colldist_from_sdf
 from pyronot.collision._obstacles import create_collision_environment, stack_obstacles
 from pyronot.collision._robot_collision import RobotCollisionSpherized
+from pyronot.optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
 from pyronot.optimization_engines._sco_optimization import TrajOptConfig, sco_trajopt
 
 # ---------------------------------------------------------------------------
@@ -49,11 +51,13 @@ from pyronot.optimization_engines._sco_optimization import TrajOptConfig, sco_tr
 BATCH_SIZE   = 25
 N_TIMESTEPS  = 64
 NOISE_SCALE  = 0.05   # std of per-seed perturbation
+EE_LINK_NAME = "panda_hand"
 GOAL_TOL     = 0.05   # rad — final waypoint must be within this of goal
 COLL_TOL     = 0.0    # signed-distance threshold to count as collision-free
 
 RESOURCES    = Path(__file__).parent.parent / "resources"
 PANDA_URDF   = RESOURCES / "panda" / "panda_spherized.urdf"
+PANDA_SRDF   = RESOURCES / "panda" / "panda.srdf"
 PROBLEMS_PKL = RESOURCES / "panda" / "problems.pkl"
 
 # ---------------------------------------------------------------------------
@@ -80,8 +84,91 @@ def load_robot(urdf_path: Path) -> tuple[Robot, RobotCollisionSpherized, yourdfp
         mesh_dir=urdf_path.parent.as_posix(),
     )
     robot      = Robot.from_urdf(urdf)
-    robot_coll = RobotCollisionSpherized.from_urdf(urdf)
+    robot_coll = RobotCollisionSpherized.from_urdf(urdf, srdf_path=PANDA_SRDF.as_posix())
     return robot, robot_coll, urdf
+
+
+def make_cartesian_ik_init_trajs(
+    start:       jnp.ndarray,
+    goal:        jnp.ndarray,
+    n_batch:     int,
+    n_timesteps: int,
+    key:         jnp.ndarray,
+    robot:       Robot,
+    robot_coll:  RobotCollisionSpherized,
+    world_geoms: tuple,
+    noise_scale: float = 0.05,
+) -> jnp.ndarray:
+    """Initialize trajectories via Cartesian interpolation + batched MPPI IK.
+
+    Steps:
+      1. FK at start/goal to get end-effector SE(3) poses.
+      2. Interpolate n_timesteps poses in Cartesian space (position lerp +
+         SO(3) log/exp SLERP).
+      3. Solve all T IK problems in one MPPI CUDA batch call, warm-started
+         from linear joint-space interpolation, with self + world collision
+         penalty as a constraint.
+      4. Tile the resulting base trajectory to [B, T, DOF] and add noise.
+    """
+    ee_idx = robot.links.names.index(EE_LINK_NAME)
+
+    # Step 1 — FK
+    start_pose = jaxlie.SE3(robot.forward_kinematics(start)[ee_idx])
+    goal_pose  = jaxlie.SE3(robot.forward_kinematics(goal)[ee_idx])
+
+    # Step 2 — Cartesian interpolation
+    start_rot = start_pose.rotation()
+    goal_rot  = goal_pose.rotation()
+    rel_log   = (start_rot.inverse() @ goal_rot).log()   # SO(3) tangent [3]
+    start_t   = start_pose.translation()
+    goal_t    = goal_pose.translation()
+
+    alphas = jnp.linspace(0.0, 1.0, n_timesteps)
+
+    def _interp(alpha):
+        rot = start_rot @ jaxlie.SO3.exp(alpha * rel_log)
+        pos = start_t + alpha * (goal_t - start_t)
+        return jaxlie.SE3.from_rotation_and_translation(rot, pos)
+
+    interp_poses = jax.vmap(_interp)(alphas)   # SE3 batch of shape (T,)
+
+    # Warm-start: linear joint-space interpolation
+    t_grid    = jnp.linspace(0.0, 1.0, n_timesteps)[:, None]
+    prev_cfgs = start[None] * (1.0 - t_grid) + goal[None] * t_grid   # [T, DOF]
+
+    # Step 3 — Collision-free IK
+    # Capture robot_coll and world_geoms as a closure; only the dummy arg is
+    # traced by JAX so no retracing occurs when obstacle geometry is unchanged.
+    def _collision_penalty(cfg, robot, _):
+        cost = jnp.zeros(())
+        self_dists = robot_coll.compute_self_collision_distance(robot, cfg)
+        cost += jnp.sum(-jnp.minimum(colldist_from_sdf(self_dists, 0.01), 0.0))
+        for wg in world_geoms:
+            wd = robot_coll.compute_world_collision_distance(robot, cfg, wg)
+            cost += jnp.sum(-jnp.minimum(colldist_from_sdf(wd, 0.01), 0.0))
+        return cost
+
+    key, subkey = jax.random.split(key)
+    base_traj = mppi_ik_solve_cuda_batch(
+        robot               = robot,
+        target_link_indices = ee_idx,
+        target_poses        = interp_poses,
+        rng_key             = subkey,
+        previous_cfgs       = prev_cfgs,
+        num_seeds           = 8,
+        n_particles         = 64,
+        n_mppi_iters        = 20,
+        n_lbfgs_iters       = 25,
+        m_lbfgs             = 5,
+        constraints         = [_collision_penalty],
+        constraint_args     = [jnp.zeros(())],   # dummy; fn closes over geoms
+        constraint_weights  = [1e4],
+    )   # [T, DOF]
+
+    # Step 4 — Tile + noise → [B, T, DOF]
+    trajs = jnp.broadcast_to(base_traj[None], (n_batch, n_timesteps, base_traj.shape[-1]))
+    noise = jax.random.normal(key, trajs.shape) * noise_scale
+    return trajs + noise
 
 
 def compute_smoothness(traj: jnp.ndarray) -> float:
@@ -173,35 +260,33 @@ def main(problem_name: str, index: int) -> None:
 
     # Pass all geometry types to sco_trajopt so the optimizer sees all obstacles.
 
-    # --- Build B-spline initial trajectories --------------------------------
-    print(f"\nBuilding B-spline initial trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
+    # --- Build Cartesian-space IK initial trajectories ----------------------
+    print(f"\nBuilding Cartesian IK initial trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
     key = jax.random.PRNGKey(0)
 
-    # Two control points: straight line from start to goal
-    control_points = jnp.stack([start, goal], axis=0)   # [2, DOF]
-
-    init_trajs = make_spline_init_trajs(
-        control_points=control_points,
-        n_batch=BATCH_SIZE,
-        n_points=N_TIMESTEPS,
-        key=key,
-        mode="linear",
-        noise_scale=NOISE_SCALE,
+    init_trajs = make_cartesian_ik_init_trajs(
+        start       = start,
+        goal        = goal,
+        n_batch     = BATCH_SIZE,
+        n_timesteps = N_TIMESTEPS,
+        key         = key,
+        robot       = robot,
+        robot_coll  = robot_coll,
+        world_geoms = world_geoms,
+        noise_scale = NOISE_SCALE,
     )                                    # [B, T, DOF]
     print(f"  init_trajs shape : {init_trajs.shape}")
 
     # --- TrajOpt configuration -----------------------------------------------
     opt_cfg = TrajOptConfig(
         n_iters=100,
-        lr=5e-3,
-        use_line_search=True,
+        lr=1e-2,
         w_smooth=1.0,
         w_vel=1.0,
         w_acc=0.5,
         w_jerk=0.1,
         w_collision=10.0,
         collision_margin=0.02,
-        w_goal=5.0,
         w_limits=1.0,
     )
 
@@ -209,7 +294,7 @@ def main(problem_name: str, index: int) -> None:
     print("\nWarm-up / JIT compilation (first call)...")
     t0 = time.perf_counter()
     best_traj_warmup, costs_warmup, final_trajs_warmup = sco_trajopt(
-        init_trajs, goal, robot, robot_coll, world_geoms, opt_cfg
+        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
     )
     best_traj_warmup.block_until_ready()
     compile_time = time.perf_counter() - t0
@@ -219,7 +304,7 @@ def main(problem_name: str, index: int) -> None:
     print("\nTimed benchmark run (second call)...")
     t0 = time.perf_counter()
     best_traj, costs, final_trajs = sco_trajopt(
-        init_trajs, goal, robot, robot_coll, world_geoms, opt_cfg
+        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
     )
     best_traj.block_until_ready()
     elapsed = time.perf_counter() - t0
