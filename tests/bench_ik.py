@@ -133,7 +133,7 @@ TARGET_LINK_NAME = "panda_hand"
 FIXED_JOINT_NAMES = ("panda_finger_joint1", "panda_finger_joint2")
 
 N_TARGETS = 10    # number of random target poses to evaluate
-N_TARGETS_BATCH = 2048
+N_TARGETS_BATCH = 256
 N_WARMUP  = 3      # JIT / kernel warm-up calls (discarded from timing)
 N_TIMED   = 5      # timed repetitions (sequential: per pose; batch: per full call)
 

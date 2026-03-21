@@ -136,18 +136,18 @@ def _collision_cost_single_cfg(
     cfg: Float[Array, "DOF"],
     robot: Robot,
     robot_coll: RobotCollision,
-    world_geom: CollGeom | None,
+    world_geoms: tuple,
     margin: float,
 ) -> Array:
-    """Collision cost for a single configuration (self + world)."""
+    """Collision cost for a single configuration (self + all world geometry types)."""
     cost = jnp.zeros(())
 
     # Self-collision
     self_dists = robot_coll.compute_self_collision_distance(robot, cfg)
     cost += jnp.sum(-jnp.minimum(colldist_from_sdf(self_dists, margin), 0.0))
 
-    # World collision
-    if world_geom is not None:
+    # World collision — one geometry type at a time (Python loop, unrolled at trace time)
+    for world_geom in world_geoms:
         world_dists = robot_coll.compute_world_collision_distance(
             robot, cfg, world_geom
         )
@@ -160,14 +160,14 @@ def _collision_cost_traj(
     traj: Float[Array, "T DOF"],
     robot: Robot,
     robot_coll: RobotCollision,
-    world_geom: CollGeom | None,
+    world_geoms: tuple,
     margin: float,
 ) -> Array:
     """Sum of collision costs over all T timesteps."""
     per_step = jax.vmap(
         _collision_cost_single_cfg,
         in_axes=(0, None, None, None, None),
-    )(traj, robot, robot_coll, world_geom, margin)
+    )(traj, robot, robot_coll, world_geoms, margin)
     return jnp.sum(per_step)
 
 
@@ -182,7 +182,7 @@ def _total_cost(
     upper: Float[Array, "DOF"],
     robot: Robot,
     robot_coll: RobotCollision,
-    world_geom: CollGeom | None,
+    world_geoms: tuple,
     cfg: TrajOptConfig,
 ) -> Array:
     """Scalar cost for a single trajectory."""
@@ -194,7 +194,7 @@ def _total_cost(
     cost += cfg.w_goal * _goal_cost(traj, goal)
     cost += cfg.w_limits * _limits_cost(traj, lower, upper)
     cost += cfg.w_collision * _collision_cost_traj(
-        traj, robot, robot_coll, world_geom, cfg.collision_margin
+        traj, robot, robot_coll, world_geoms, cfg.collision_margin
     )
 
     return cost
@@ -210,19 +210,21 @@ def _make_batched_fns(
     upper: Float[Array, "DOF"],
     robot: Robot,
     robot_coll: RobotCollision,
-    world_geom: CollGeom | None,
+    world_geoms: tuple,
     opt_cfg: TrajOptConfig,
 ):
-    """Return (batched_cost_fn, batched_grad_fn) closed over all static data."""
+    """Return (batched_cost_fn, batched_val_grad_fn) closed over all static data."""
 
     def single_cost(traj):
         return _total_cost(
-            traj, goal, lower, upper, robot, robot_coll, world_geom, opt_cfg
+            traj, goal, lower, upper, robot, robot_coll, world_geoms, opt_cfg
         )
 
-    batched_cost_fn = jax.vmap(single_cost, in_axes=0)    # [B, T, DOF] -> [B]
-    batched_grad_fn = jax.vmap(jax.grad(single_cost), in_axes=0)  # [B, T, DOF] -> [B, T, DOF]
-    return batched_cost_fn, batched_grad_fn
+    # [B, T, DOF] -> [B]
+    batched_cost_fn = jax.vmap(single_cost, in_axes=0)
+    # [B, T, DOF] -> ([B], [B, T, DOF])  — one forward+backward pass for both
+    batched_val_grad_fn = jax.vmap(jax.value_and_grad(single_cost), in_axes=0)
+    return batched_cost_fn, batched_val_grad_fn
 
 
 # ---------------------------------------------------------------------------
@@ -231,28 +233,31 @@ def _make_batched_fns(
 
 def _make_step_fn(
     batched_cost_fn,
-    batched_grad_fn,
+    batched_val_grad_fn,
     lr: float,
     use_line_search: bool,
 ):
     """Return a single lax.scan-compatible step function."""
 
     def step(trajs: Float[Array, "B T DOF"], _) -> tuple[Float[Array, "B T DOF"], None]:
-        grads = batched_grad_fn(trajs)          # [B, T, DOF]
+        # Single forward+backward pass to get gradients (value unused here)
+        _, grads = batched_val_grad_fn(trajs)   # [B, T, DOF]
 
         if use_line_search:
-            # Evaluate each alpha in parallel: alphas shape [A]
-            # candidates shape [A, B, T, DOF]
+            A = _LS_ALPHAS.shape[0]
+            B = trajs.shape[0]
+            # candidates: [A, B, T, DOF]
             candidates = (
                 trajs[None, ...]
                 - _LS_ALPHAS[:, None, None, None] * lr * grads[None, ...]
             )
-            # costs shape [A, B]
-            costs = jax.vmap(batched_cost_fn)(candidates)
-            # best alpha index per trajectory: [B]
-            best_alpha_idx = jnp.argmin(costs, axis=0)
-            # Gather: for each trajectory pick the best candidate
-            new_trajs = candidates[best_alpha_idx, jnp.arange(trajs.shape[0])]
+            # Flatten A*B into one batch so batched_cost_fn sees [A*B, T, DOF]
+            # This avoids a nested vmap (vmap over A wrapping a vmap over B).
+            cands_flat = candidates.reshape(A * B, *trajs.shape[1:])  # [A*B, T, DOF]
+            costs_flat = batched_cost_fn(cands_flat)                   # [A*B]
+            costs_ls = costs_flat.reshape(A, B)                        # [A, B]
+            best_alpha_idx = jnp.argmin(costs_ls, axis=0)              # [B]
+            new_trajs = candidates[best_alpha_idx, jnp.arange(B)]
         else:
             new_trajs = trajs - lr * grads
 
@@ -274,7 +279,7 @@ def sco_trajopt(
     goal: Float[Array, "DOF"],
     robot: Robot,
     robot_coll: RobotCollision,
-    world_geom: CollGeom | None,
+    world_geoms: tuple,
     opt_cfg: TrajOptConfig = TrajOptConfig(),
 ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"]]:
     """Batched SCO-style trajectory optimization.
@@ -286,7 +291,8 @@ def sco_trajopt(
         goal:        Target joint configuration for the final waypoint.  Shape ``[DOF]``.
         robot:       Robot kinematics pytree.
         robot_coll:  Robot collision model pytree.
-        world_geom:  World collision geometry (or ``None`` to skip world collisions).
+        world_geoms: Tuple of world collision geometry objects (one per obstacle type).
+                     Pass an empty tuple ``()`` to skip world collisions.
         opt_cfg:     Hyper-parameters (static — changing them triggers recompilation).
 
     Returns:
@@ -297,12 +303,12 @@ def sco_trajopt(
     lower = robot.joints.lower_limits   # [DOF]
     upper = robot.joints.upper_limits   # [DOF]
 
-    batched_cost_fn, batched_grad_fn = _make_batched_fns(
-        goal, lower, upper, robot, robot_coll, world_geom, opt_cfg
+    batched_cost_fn, batched_val_grad_fn = _make_batched_fns(
+        goal, lower, upper, robot, robot_coll, world_geoms, opt_cfg
     )
 
     step_fn = _make_step_fn(
-        batched_cost_fn, batched_grad_fn, opt_cfg.lr, opt_cfg.use_line_search
+        batched_cost_fn, batched_val_grad_fn, opt_cfg.lr, opt_cfg.use_line_search
     )
 
     final_trajs, _ = jax.lax.scan(step_fn, init_trajs, None, length=opt_cfg.n_iters)

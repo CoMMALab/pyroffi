@@ -171,11 +171,7 @@ def main(problem_name: str, index: int) -> None:
     for wg in world_geoms:
         print(f"    {type(wg).__name__}  batch={wg.get_batch_axes()}")
 
-    # For sco_trajopt we pass only one geometry at a time (per type). Wrap to
-    # a list so the cost function can iterate; we benchmark with the first
-    # non-empty group to keep the JIT-static shape requirement satisfied.
-    # Full multi-type collision is handled in check_solved via Python loops.
-    primary_world_geom = world_geoms[0] if world_geoms else None
+    # Pass all geometry types to sco_trajopt so the optimizer sees all obstacles.
 
     # --- Build B-spline initial trajectories --------------------------------
     print(f"\nBuilding B-spline initial trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
@@ -189,9 +185,8 @@ def main(problem_name: str, index: int) -> None:
         n_batch=BATCH_SIZE,
         n_points=N_TIMESTEPS,
         key=key,
-        mode="bspline",
+        mode="linear",
         noise_scale=NOISE_SCALE,
-        bspline_degree=1,                # degree-1 B-spline with 2 CPs = linear interpolation
     )                                    # [B, T, DOF]
     print(f"  init_trajs shape : {init_trajs.shape}")
 
@@ -214,7 +209,7 @@ def main(problem_name: str, index: int) -> None:
     print("\nWarm-up / JIT compilation (first call)...")
     t0 = time.perf_counter()
     best_traj_warmup, costs_warmup, final_trajs_warmup = sco_trajopt(
-        init_trajs, goal, robot, robot_coll, primary_world_geom, opt_cfg
+        init_trajs, goal, robot, robot_coll, world_geoms, opt_cfg
     )
     best_traj_warmup.block_until_ready()
     compile_time = time.perf_counter() - t0
@@ -224,7 +219,7 @@ def main(problem_name: str, index: int) -> None:
     print("\nTimed benchmark run (second call)...")
     t0 = time.perf_counter()
     best_traj, costs, final_trajs = sco_trajopt(
-        init_trajs, goal, robot, robot_coll, primary_world_geom, opt_cfg
+        init_trajs, goal, robot, robot_coll, world_geoms, opt_cfg
     )
     best_traj.block_until_ready()
     elapsed = time.perf_counter() - t0

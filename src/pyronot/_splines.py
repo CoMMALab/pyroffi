@@ -177,10 +177,13 @@ def _uniform_bspline_basis(
     n_ctrl: int,
     degree: int,
 ) -> Float[Array, "T n_ctrl"]:
-    """Evaluate the uniform B-spline basis matrix.
+    """Evaluate the uniform B-spline basis matrix via Cox–de Boor recursion.
 
-    Uses the Cox–de Boor recursion via ``jax.lax.fori_loop`` so the function
-    stays JIT-compilable for fixed ``degree``.
+    The recursion is unrolled with a Python for-loop (``degree`` is static),
+    which avoids the dynamic-slice issue that arises when ``p`` is a traced
+    value inside ``lax.scan``.  Each iteration reduces the column count by 1,
+    so the array shapes differ across iterations — another reason ``lax.scan``
+    is unsuitable here.
 
     Knot vector: clamped uniform — ``degree`` repeated knots at each end,
     uniform in the interior.
@@ -188,54 +191,63 @@ def _uniform_bspline_basis(
     Args:
         t:       Query parameters in ``[0, 1]``.  Shape ``[T]``.
         n_ctrl:  Number of control points.
-        degree:  Polynomial degree (≥ 1).
+        degree:  Polynomial degree (≥ 1).  Must be a Python int (static).
 
     Returns:
         Basis matrix of shape ``[T, n_ctrl]``.
     """
-    n_spans  = n_ctrl - degree        # number of interior spans
-    n_knots  = n_ctrl + degree + 1
+    n_spans = n_ctrl - degree          # number of interior spans
+    n_knots = n_ctrl + degree + 1      # total knots
 
-    # Build clamped uniform knot vector
-    # [0]*degree, linspace(0,1, n_spans+1), [1]*degree
+    # Clamped uniform knot vector: degree zeros, uniform interior, degree ones.
     interior = jnp.linspace(0.0, 1.0, n_spans + 1)
     knots = jnp.concatenate([
         jnp.zeros(degree),
         interior,
         jnp.ones(degree),
-    ])  # [n_knots]
+    ])  # [n_knots]  — all sizes are static Python ints
 
-    # Clamp t to avoid boundary issues
+    # Clamp t slightly below 1 so the last span is included.
     t = jnp.clip(t, 0.0, 1.0 - 1e-7)
+    t_col = t[:, None]   # [T, 1]
 
-    # Initial (degree-0) basis: indicator for which span each t falls in
-    # N[i, j] = 1 if knots[j] <= t[i] < knots[j+1]
-    t_col   = t[:, None]             # [T, 1]
-    k_left  = knots[None, :-1]       # [1, n_knots-1]
-    k_right = knots[None, 1:]        # [1, n_knots-1]
-    N = jnp.where((t_col >= k_left) & (t_col < k_right), 1.0, 0.0)  # [T, n_knots-1]
+    # --- Degree-0 basis -------------------------------------------------------
+    # N[:, j] = 1  iff  knots[j] <= t < knots[j+1]
+    # Shape: [T, n_knots-1]
+    N = jnp.where(
+        (t_col >= knots[None, :-1]) & (t_col < knots[None, 1:]),
+        1.0,
+        0.0,
+    )
 
-    # Cox–de Boor recursion: build up from degree 0 to `degree`
-    def _boor_step(N_prev, p):
-        # N_prev: [T, n_knots - p]
-        left_num  = t_col - knots[None, : -p - 1]       # [T, n_knots-p-1] numerator left
-        left_den  = knots[None, p:-1] - knots[None, :-p - 1]
+    # --- Cox–de Boor recursion (Python loop — p is a static int) -------------
+    # After iteration p the shape is [T, n_knots-1-p].
+    # Final shape after `degree` iterations: [T, n_knots-1-degree] = [T, n_ctrl].
+    for p in range(1, degree + 1):
+        # Static slice endpoints computed from the Python int p.
+        # knots[:-(p)]     has length  n_knots - p
+        # knots[p:-1]      has length  n_knots - p - 1
+        # knots[p+1:]      has length  n_knots - p - 1
+        # knots[1:-(p)]    has length  n_knots - p - 1
+        left_num  = t_col        - knots[None, :-(p)]       # [T, n_knots-p]
+        left_den  = knots[None, p:-1]   - knots[None, :-(p)]   # [T, n_knots-p-1] — trim right col
         right_num = knots[None, p + 1:] - t_col
-        right_den = knots[None, p + 1:] - knots[None, 1: -p]
+        right_den = knots[None, p + 1:] - knots[None, 1:-(p)]
 
-        # Safe division (denominator=0 → coefficient=0)
-        safe_ld = jnp.where(left_den == 0, 1.0, left_den)
-        safe_rd = jnp.where(right_den == 0, 1.0, right_den)
+        # Trim left_num to match the (n_knots-p-1) width after the recurrence.
+        left_num = left_num[:, :-1]
 
-        left_coef  = jnp.where(left_den  == 0, 0.0, left_num  / safe_ld)
-        right_coef = jnp.where(right_den == 0, 0.0, right_num / safe_rd)
+        safe_ld = jnp.where(left_den  == 0.0, 1.0, left_den)
+        safe_rd = jnp.where(right_den == 0.0, 1.0, right_den)
 
-        N_next = left_coef * N_prev[:, :-1] + right_coef * N_prev[:, 1:]
-        return N_next, None
+        left_coef  = jnp.where(left_den  == 0.0, 0.0, left_num  / safe_ld)
+        right_coef = jnp.where(right_den == 0.0, 0.0, right_num / safe_rd)
 
-    N_final, _ = jax.lax.scan(_boor_step, N, jnp.arange(1, degree + 1))
-    # N_final: [T, n_ctrl]
-    return N_final
+        N = left_coef * N[:, :-1] + right_coef * N[:, 1:]
+        # N shape is now [T, n_knots-1-p]
+
+    # After `degree` iterations: N shape is [T, n_ctrl]
+    return N
 
 
 def bspline_interpolate(
