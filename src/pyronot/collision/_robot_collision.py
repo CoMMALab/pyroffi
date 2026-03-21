@@ -489,29 +489,30 @@ class RobotCollisionSpherized:
             ]
             sphere_list_per_link.append(per_link_spheres)
 
-        ############ Weihang: Please check this part #############
-        # Add padding to the spheres list to make it a batched sphere object
+        # Pad each link's sphere list to max_spheres so we can stack into a
+        # uniform [N, S] array. Padding uses a degenerate sphere (radius=-1e9)
+        # which colldist_from_sdf will never activate.
         max_spheres = max(len(spheres) for spheres in sphere_list_per_link)
-        padded_sphere_list: list[Sphere] = []
-        for per_link_spheres in sphere_list_per_link:
-            if len(per_link_spheres) < max_spheres:
-                # Create dummy/invalid spheres for padding (e.g., zero radius)
-                dummy_sphere = Sphere.from_center_and_radius(
-                    # center=jnp.array([1e9,1e9,1e9]),
-                    center = jnp.array([0.0, 0.0, 0.0]),
-                    radius=jnp.array(-1e9),  # or negative to mark as invalid
-                )
-                padded = per_link_spheres + [dummy_sphere] * (
-                    max_spheres - len(per_link_spheres)
-                )
-                padded_sphere_list.append(padded)
-            else:
-                padded_sphere_list.append(per_link_spheres)
-        spheres_2d = cast(
-            Sphere, jax.tree.map(lambda *args: jnp.stack(args), *padded_sphere_list)
+        dummy_sphere = Sphere.from_center_and_radius(
+            center=jnp.array([0.0, 0.0, 0.0]),
+            radius=jnp.array(-1e9),
         )
+        padded_sphere_list: list[list[Sphere]] = []
+        for per_link_spheres in sphere_list_per_link:
+            n_pad = max_spheres - len(per_link_spheres)
+            padded_sphere_list.append(per_link_spheres + [dummy_sphere] * n_pad)
 
-        ##########################################################
+        # Stack into a single Sphere pytree with batch_axes (N, S):
+        #   Step 1: for each link, stack its S scalar Spheres → Sphere(batch_axes=(S,))
+        #   Step 2: stack the N per-link Spheres          → Sphere(batch_axes=(N, S))
+        per_link_batched = [
+            cast(Sphere, jax.tree.map(lambda *args: jnp.stack(args, axis=0), *link_spheres))
+            for link_spheres in padded_sphere_list
+        ]  # list of N Spheres, each batch_axes=(S,)
+        spheres_2d = cast(
+            Sphere,
+            jax.tree.map(lambda *args: jnp.stack(args, axis=0), *per_link_batched),
+        )  # Sphere with batch_axes=(N, S)
 
         # Directly compute active pair indices
         # Weihang: Have not checked this part yet!!!
@@ -544,7 +545,7 @@ class RobotCollisionSpherized:
             link_names=link_name_list,
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
-            coll=spheres_2d,  # now stores lists of Sphere objects per link
+            coll=spheres_2d,  # Sphere pytree with batch_axes (N, S)
         )
 
     @staticmethod
@@ -766,16 +767,31 @@ class RobotCollisionSpherized:
         # TODO: Override with passed in result of fk so i don't have to recompute
         Ts_link_world_wxyz_xyz = robot.forward_kinematics(cfg)
         Ts_link_world = jaxlie.SE3(Ts_link_world_wxyz_xyz)
-        ############ Weihang: Please check this part #############
-        coll_transformed = []
-        for link in range(len(self.coll)):
-            coll_transformed.append(self.coll[link].transform(Ts_link_world))
-        coll_transformed = cast(
-            CollGeom, jax.tree.map(lambda *args: jnp.stack(args), *coll_transformed)
-        )
-        ##########################################################
-        return coll_transformed
-        # return self.coll.transform(Ts_link_world)
+        # self.coll has batch_axes (N, S).  Ts_link_world has batch_axes (*batch_cfg, N).
+        #
+        # We cannot call self.coll.transform(Ts_link_world) directly because jaxlie
+        # broadcasts from the right: (N, 7) vs (N, S, 7) would align the N-dim of
+        # Ts against the S-dim of self.coll instead of the N-dim.
+        #
+        # Instead we vmap over N: for each link n, apply Ts_link_world[..., n]
+        # (a (*batch_cfg,) SE3) to self.coll[n, :] (an (S,) Sphere).
+        #
+        # in_axes:
+        #   Ts_link_world leaves shape (*batch_cfg, N, leaf_dim) → axis -2 = N axis
+        #   self.coll      leaves shape (N, S, leaf_dim)         → axis  0 = N axis
+        # out_axes=0: stack N results at axis 0 → (N, *batch_cfg, S) batch_axes
+        coll_n_s = jax.vmap(
+            lambda ts, c: c.transform(ts),
+            in_axes=(-2, 0),
+            out_axes=0,
+        )(Ts_link_world, self.coll)
+        # coll_n_s.batch_axes = (N, S) for single cfg.
+        # Downstream code expects (S, N): swap the two batch dims in every leaf.
+        # Leaves have shape (N, S, leaf_dim); swapaxes(0,1) → (S, N, leaf_dim).
+        return cast(CollGeom, jax.tree.map(
+            lambda x: jnp.swapaxes(x, 0, 1),
+            coll_n_s,
+        ))
 
     def compute_self_collision_distance(
         self,
