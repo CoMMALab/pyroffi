@@ -239,27 +239,22 @@ def sco_trajopt_cuda(
     init_pinned = init_pinned.at[:, -1, :].set(goal_f)
 
     # ── Workspace allocation ───────────────────────────────────────────────
-    # Per-thread workspace layout (floats) — must match sco_trajopt_kernel:
-    #   10 * T*n_act  (traj, q_k, g, g_prev, dir, best_x, cur_g, x_trial, g_trial, g_dummy)
-    #   T * 5         (d_k,  G=5 groups)
-    #   T * 5 * n_act (J_k)
-    #   2 * m * T * n_act  (s_buf + y_buf)
-    #   2 * 8         (rho_buf + alpha_b, SCO_MAX_M=8)
-    #   64 * 7        (T_world, SCO_MAX_N=64)
-    #   n_act         (q_tmp)
+    # Per-block workspace layout (floats) — must match sco_trajopt_kernel:
+    #   4 * T*n_act             (grad, dir, best_x, g_prev)
+    #   T * G * n_act           (J_k, G=5)
+    #   2 * m * T * n_act       (s_lbfgs + y_lbfgs)
+    #   2 * 8                   (rho_buf + alpha_hist, SCO_MAX_M=8)
+    #   T * n_joints * 7        (T_world_pool, one FK workspace per timestep)
     _SCO_MAX_G = 5
     _SCO_MAX_M = 8
-    _SCO_MAX_N = 64
     m = opt_cfg.m_lbfgs
     n = T * n_act
     workspace_stride = (
-        10 * n
-        + T * _SCO_MAX_G
+        4 * n
         + T * _SCO_MAX_G * n_act
         + 2 * m * n
         + 2 * _SCO_MAX_M
-        + _SCO_MAX_N * 7
-        + n_act
+        + T * n_joints * 7
     )
 
     # ── FFI call ───────────────────────────────────────────────────────────
