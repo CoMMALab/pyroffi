@@ -144,13 +144,19 @@ def cubic_spline_interpolate(
     conditions at both ends.
 
     Args:
-        control_points: Ordered waypoints.  Shape ``[K, DOF]``.  K ≥ 3.
+        control_points: Ordered waypoints.  Shape ``[K, DOF]``.  K ≥ 2.
+            Falls back to linear interpolation when K = 2.
         n_points:       Number of output samples ``T``.
 
     Returns:
         Dense trajectory of shape ``[T, DOF]``.
     """
     k = control_points.shape[0]
+
+    # K=2: cubic spline degenerates to linear — avoid empty tridiagonal system.
+    if k < 3:
+        return linear_interpolate(control_points, n_points)
+
     a, b, c, d = _build_natural_cubic_spline_coeffs(control_points)
 
     # Query parameter in [0, K-1]
@@ -224,18 +230,14 @@ def _uniform_bspline_basis(
     # After iteration p the shape is [T, n_knots-1-p].
     # Final shape after `degree` iterations: [T, n_knots-1-degree] = [T, n_ctrl].
     for p in range(1, degree + 1):
-        # Static slice endpoints computed from the Python int p.
-        # knots[:-(p)]     has length  n_knots - p
-        # knots[p:-1]      has length  n_knots - p - 1
-        # knots[p+1:]      has length  n_knots - p - 1
-        # knots[1:-(p)]    has length  n_knots - p - 1
-        left_num  = t_col        - knots[None, :-(p)]       # [T, n_knots-p]
-        left_den  = knots[None, p:-1]   - knots[None, :-(p)]   # [T, n_knots-p-1] — trim right col
-        right_num = knots[None, p + 1:] - t_col
-        right_den = knots[None, p + 1:] - knots[None, 1:-(p)]
+        # N_{i,p} needs knots[i], knots[i+p], knots[i+p+1], knots[i+1]
+        # for i = 0 … n_knots-2-p  →  (n_knots-1-p) basis functions at level p.
+        n_basis = N.shape[1] - 1          # number of output basis functions
 
-        # Trim left_num to match the (n_knots-p-1) width after the recurrence.
-        left_num = left_num[:, :-1]
+        left_num  = t_col        - knots[None, :n_basis]           # [T, n_basis]
+        left_den  = knots[None, p:p + n_basis] - knots[None, :n_basis]  # [T, n_basis]
+        right_num = knots[None, p + 1:p + 1 + n_basis] - t_col    # [T, n_basis]
+        right_den = knots[None, p + 1:p + 1 + n_basis] - knots[None, 1:1 + n_basis]  # [T, n_basis]
 
         safe_ld = jnp.where(left_den  == 0.0, 1.0, left_den)
         safe_rd = jnp.where(right_den == 0.0, 1.0, right_den)
@@ -318,6 +320,8 @@ def make_spline_init_trajs(
     elif mode == "cubic":
         base = cubic_spline_interpolate(control_points, n_points)
     elif mode == "bspline":
+        # Clamp degree so it's always < number of control points.
+        bspline_degree = min(bspline_degree, control_points.shape[0] - 1)
         base = bspline_interpolate(control_points, n_points, degree=bspline_degree)
     else:
         raise ValueError(f"Unknown spline mode: {mode!r}. Choose 'linear', 'cubic', or 'bspline'.")

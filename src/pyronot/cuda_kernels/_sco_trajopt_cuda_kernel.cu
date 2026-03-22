@@ -216,9 +216,11 @@ __device__ void sco_compute_coll_dists(
     SmoothMinAcc acc[SCO_MAX_G];
     for (int g = 0; g < SCO_MAX_G; g++) acc[g].init();
 
-    // Group 0: self-collision — smooth-min over ALL sphere-sphere distances
+    // Group 0: self-collision — hard min over spheres per link pair,
+    // then smooth-min over link pairs (matches JAX's compute_self_collision_distance)
     for (int p = 0; p < P; p++) {
         int li = s_pair_i[p], lj = s_pair_j[p];
+        float min_d = 1e10f;
         for (int si = 0; si < S; si++) {
             float ri = s_sphere_rad[li*S+si];
             if (ri < 0.0f) continue;
@@ -235,49 +237,84 @@ __device__ void sco_compute_coll_dists(
                 float cj[3]; sco_apply_se3(T_world + lj*7, lcj, cj);
                 float d = sco_sphere_sphere_dist(ci[0],ci[1],ci[2],ri,
                                                   cj[0],cj[1],cj[2],rj);
-                acc[0].update(d, temperature);
+                if (d < min_d) min_d = d;
             }
         }
+        if (min_d < 1e9f) acc[0].update(min_d, temperature);
     }
 
-    // Groups 1-4: world obstacles
+    // Groups 1-4: world obstacles — hard min over spheres per (link, obstacle)
+    // pair, then smooth-min over all pairs (matches JAX's compute_world_collision_distance)
     for (int j = 0; j < N; j++) {
-        for (int s = 0; s < S; s++) {
-            float r = s_sphere_rad[j*S+s];
-            if (r < 0.0f) continue;
-            float lc[3] = {s_sphere_off[(j*S+s)*3],
-                           s_sphere_off[(j*S+s)*3+1],
-                           s_sphere_off[(j*S+s)*3+2]};
-            float wc[3]; sco_apply_se3(T_world + j*7, lc, wc);
-
-            for (int m = 0; m < Ms; m++) {
+        for (int m = 0; m < Ms; m++) {
+            float min_d = 1e10f;
+            for (int s = 0; s < S; s++) {
+                float r = s_sphere_rad[j*S+s];
+                if (r < 0.0f) continue;
+                float lc[3] = {s_sphere_off[(j*S+s)*3],
+                               s_sphere_off[(j*S+s)*3+1],
+                               s_sphere_off[(j*S+s)*3+2]};
+                float wc[3]; sco_apply_se3(T_world + j*7, lc, wc);
                 float d = sco_sphere_sphere_dist(
                     wc[0],wc[1],wc[2],r,
                     world_spheres[m*4],world_spheres[m*4+1],
                     world_spheres[m*4+2],world_spheres[m*4+3]);
-                acc[1].update(d, temperature);
+                if (d < min_d) min_d = d;
             }
-            for (int m = 0; m < Mc; m++) {
-                const float* cap = world_capsules + m*7;
-                acc[2].update(sco_sphere_capsule_dist(
+            if (min_d < 1e9f) acc[1].update(min_d, temperature);
+        }
+        for (int m = 0; m < Mc; m++) {
+            float min_d = 1e10f;
+            const float* cap = world_capsules + m*7;
+            for (int s = 0; s < S; s++) {
+                float r = s_sphere_rad[j*S+s];
+                if (r < 0.0f) continue;
+                float lc[3] = {s_sphere_off[(j*S+s)*3],
+                               s_sphere_off[(j*S+s)*3+1],
+                               s_sphere_off[(j*S+s)*3+2]};
+                float wc[3]; sco_apply_se3(T_world + j*7, lc, wc);
+                float d = sco_sphere_capsule_dist(
                     wc[0],wc[1],wc[2],r,
-                    cap[0],cap[1],cap[2],cap[3],cap[4],cap[5],cap[6]),
-                    temperature);
+                    cap[0],cap[1],cap[2],cap[3],cap[4],cap[5],cap[6]);
+                if (d < min_d) min_d = d;
             }
-            for (int m = 0; m < Mb; m++) {
-                const float* bx = world_boxes + m*15;
-                acc[3].update(sco_sphere_box_dist(
+            if (min_d < 1e9f) acc[2].update(min_d, temperature);
+        }
+        for (int m = 0; m < Mb; m++) {
+            float min_d = 1e10f;
+            const float* bx = world_boxes + m*15;
+            for (int s = 0; s < S; s++) {
+                float r = s_sphere_rad[j*S+s];
+                if (r < 0.0f) continue;
+                float lc[3] = {s_sphere_off[(j*S+s)*3],
+                               s_sphere_off[(j*S+s)*3+1],
+                               s_sphere_off[(j*S+s)*3+2]};
+                float wc[3]; sco_apply_se3(T_world + j*7, lc, wc);
+                float d = sco_sphere_box_dist(
                     wc[0],wc[1],wc[2],r,
                     bx[0],bx[1],bx[2], bx[3],bx[4],bx[5],
                     bx[6],bx[7],bx[8], bx[9],bx[10],bx[11],
-                    bx[12],bx[13],bx[14]), temperature);
+                    bx[12],bx[13],bx[14]);
+                if (d < min_d) min_d = d;
             }
-            for (int m = 0; m < Mh; m++) {
-                const float* hs = world_halfspaces + m*6;
-                acc[4].update(sco_sphere_halfspace_dist(
+            if (min_d < 1e9f) acc[3].update(min_d, temperature);
+        }
+        for (int m = 0; m < Mh; m++) {
+            float min_d = 1e10f;
+            const float* hs = world_halfspaces + m*6;
+            for (int s = 0; s < S; s++) {
+                float r = s_sphere_rad[j*S+s];
+                if (r < 0.0f) continue;
+                float lc[3] = {s_sphere_off[(j*S+s)*3],
+                               s_sphere_off[(j*S+s)*3+1],
+                               s_sphere_off[(j*S+s)*3+2]};
+                float wc[3]; sco_apply_se3(T_world + j*7, lc, wc);
+                float d = sco_sphere_halfspace_dist(
                     wc[0],wc[1],wc[2],r,
-                    hs[0],hs[1],hs[2],hs[3],hs[4],hs[5]), temperature);
+                    hs[0],hs[1],hs[2],hs[3],hs[4],hs[5]);
+                if (d < min_d) min_d = d;
             }
+            if (min_d < 1e9f) acc[4].update(min_d, temperature);
         }
     }
 
@@ -894,50 +931,89 @@ void sco_trajopt_kernel(
                            * w_collision_max;
         }
 
-        // World collision
+        // World collision — hard min over S spheres per (link, obstacle) pair,
+        // then apply colldist_from_sdf once (matches JAX's compute_world_collision_distance
+        // which calls collide_link_vs_world → dist_spheres.min(axis=0)).
+        // Compute sphere positions on the fly (no local cache array) to avoid
+        // CUDA local memory addressing issues with 2D arrays in nested loops.
         for (int j = 0; j < N; j++) {
-            for (int si = 0; si < S; si++) {
-                float r = s_sphere_rad[j*S+si];
-                if (r < 0.0f) continue;
-                float lc[3] = {s_sphere_off[(j*S+si)*3],
-                               s_sphere_off[(j*S+si)*3+1],
-                               s_sphere_off[(j*S+si)*3+2]};
-                float wc[3]; sco_apply_se3(my_Tw + j*7, lc, wc);
-
-                for (int m = 0; m < Ms; m++) {
+            for (int m = 0; m < Ms; m++) {
+                float min_d = 1e10f;
+                for (int s = 0; s < S; s++) {
+                    float r = s_sphere_rad[j*S+s];
+                    if (r < 0.0f) continue;
+                    float lc[3] = {s_sphere_off[(j*S+s)*3],
+                                   s_sphere_off[(j*S+s)*3+1],
+                                   s_sphere_off[(j*S+s)*3+2]};
+                    float wc[3]; sco_apply_se3(my_Tw + j*7, lc, wc);
                     float d = sco_sphere_sphere_dist(
                         wc[0],wc[1],wc[2],r,
                         world_spheres[m*4],world_spheres[m*4+1],
                         world_spheres[m*4+2],world_spheres[m*4+3]);
-                    nl_cost -= fminf(sco_colldist_from_sdf(d, collision_margin), 0.0f)
-                               * w_collision_max;
+                    if (d < min_d) min_d = d;
                 }
-                for (int m = 0; m < Mc; m++) {
-                    const float* cap = world_capsules + m*7;
+                if (min_d < 1e9f)
+                    nl_cost -= fminf(sco_colldist_from_sdf(min_d, collision_margin), 0.0f)
+                               * w_collision_max;
+            }
+            for (int m = 0; m < Mc; m++) {
+                const float* cap = world_capsules + m*7;
+                float min_d = 1e10f;
+                for (int s = 0; s < S; s++) {
+                    float r = s_sphere_rad[j*S+s];
+                    if (r < 0.0f) continue;
+                    float lc[3] = {s_sphere_off[(j*S+s)*3],
+                                   s_sphere_off[(j*S+s)*3+1],
+                                   s_sphere_off[(j*S+s)*3+2]};
+                    float wc[3]; sco_apply_se3(my_Tw + j*7, lc, wc);
                     float d = sco_sphere_capsule_dist(
                         wc[0],wc[1],wc[2],r,
                         cap[0],cap[1],cap[2],cap[3],cap[4],cap[5],cap[6]);
-                    nl_cost -= fminf(sco_colldist_from_sdf(d, collision_margin), 0.0f)
-                               * w_collision_max;
+                    if (d < min_d) min_d = d;
                 }
-                for (int m = 0; m < Mb; m++) {
-                    const float* bx = world_boxes + m*15;
+                if (min_d < 1e9f)
+                    nl_cost -= fminf(sco_colldist_from_sdf(min_d, collision_margin), 0.0f)
+                               * w_collision_max;
+            }
+            for (int m = 0; m < Mb; m++) {
+                const float* bx = world_boxes + m*15;
+                float min_d = 1e10f;
+                for (int s = 0; s < S; s++) {
+                    float r = s_sphere_rad[j*S+s];
+                    if (r < 0.0f) continue;
+                    float lc[3] = {s_sphere_off[(j*S+s)*3],
+                                   s_sphere_off[(j*S+s)*3+1],
+                                   s_sphere_off[(j*S+s)*3+2]};
+                    float wc[3]; sco_apply_se3(my_Tw + j*7, lc, wc);
                     float d = sco_sphere_box_dist(
                         wc[0],wc[1],wc[2],r,
                         bx[0],bx[1],bx[2], bx[3],bx[4],bx[5],
                         bx[6],bx[7],bx[8], bx[9],bx[10],bx[11],
                         bx[12],bx[13],bx[14]);
-                    nl_cost -= fminf(sco_colldist_from_sdf(d, collision_margin), 0.0f)
-                               * w_collision_max;
+                    if (d < min_d) min_d = d;
                 }
-                for (int m = 0; m < Mh; m++) {
-                    const float* hs = world_halfspaces + m*6;
+                if (min_d < 1e9f)
+                    nl_cost -= fminf(sco_colldist_from_sdf(min_d, collision_margin), 0.0f)
+                               * w_collision_max;
+            }
+            for (int m = 0; m < Mh; m++) {
+                const float* hs = world_halfspaces + m*6;
+                float min_d = 1e10f;
+                for (int s = 0; s < S; s++) {
+                    float r = s_sphere_rad[j*S+s];
+                    if (r < 0.0f) continue;
+                    float lc[3] = {s_sphere_off[(j*S+s)*3],
+                                   s_sphere_off[(j*S+s)*3+1],
+                                   s_sphere_off[(j*S+s)*3+2]};
+                    float wc[3]; sco_apply_se3(my_Tw + j*7, lc, wc);
                     float d = sco_sphere_halfspace_dist(
                         wc[0],wc[1],wc[2],r,
                         hs[0],hs[1],hs[2],hs[3],hs[4],hs[5]);
-                    nl_cost -= fminf(sco_colldist_from_sdf(d, collision_margin), 0.0f)
-                               * w_collision_max;
+                    if (d < min_d) min_d = d;
                 }
+                if (min_d < 1e9f)
+                    nl_cost -= fminf(sco_colldist_from_sdf(min_d, collision_margin), 0.0f)
+                               * w_collision_max;
             }
         }
 

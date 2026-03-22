@@ -18,7 +18,8 @@ This document explains the theory behind the SCO trajectory optimizer, its imple
 8. [Dimensionality Reduction via Smooth-Min](#8-dimensionality-reduction-via-smooth-min)
 9. [Batched Optimization and Initialization](#9-batched-optimization-and-initialization)
 10. [JAX Implementation Details](#10-jax-implementation-details)
-11. [Configuration Reference](#11-configuration-reference)
+11. [CUDA Implementation and Differences from JAX](#11-cuda-implementation-and-differences-from-jax)
+12. [Configuration Reference](#12-configuration-reference)
 
 ---
 
@@ -262,7 +263,7 @@ where $\tau$ is `smooth_min_temperature` (default 0.05). As $\tau \to 0$ this ap
 - One group for all self-collision pairs
 - One group per world geometry type (e.g. boxes, spheres)
 
-This reduces the Jacobian shape from $[P, n]$ (e.g. $[252, 7]$) to $[G, n]$ (e.g. $[3, 7]$), a **50–100x reduction** in Jacobian memory and compile time.
+This reduces the Jacobian shape from $[P, n]$ (e.g. $[252, 7]$) to $[G, n]$ (e.g. $[3, 7]$), a **50–100× reduction** in Jacobian memory and compile time.
 
 The smooth-min is differentiable everywhere and provides a conservative approximation: it always returns a value $\leq$ the true minimum, so the optimizer is never over-optimistic about safety margins.
 
@@ -331,7 +332,95 @@ outer_step:
 
 ---
 
-## 11. Configuration Reference
+## 11. CUDA Implementation and Differences from JAX
+
+The CUDA backend (`sco_trajopt_cuda`, in `_sco_trajopt_cuda_kernel.cu`) implements the same SCO algorithm but runs entirely on-device with no Python-side iteration between outer steps. Both backends share the same `TrajOptConfig` and produce trajectories that are compared against the same cost function, but several implementation choices differ.
+
+### 11.1 Architecture
+
+The CUDA kernel launches **one block per trajectory** (`B` blocks total). Within each block, threads cooperate over the `T` timestep dimension:
+
+| Phase | Parallelism |
+|---|---|
+| FK + FD Jacobians | 1 thread per timestep (parallel) |
+| Inner cost + gradient | 1 thread per timestep + block reduction |
+| L-BFGS two-loop dot products | Parallel block reductions |
+| Line search (5 alphas) | Parallel cost eval over T threads |
+
+The trajectory, linearization point, and collision distances live in **shared memory** for fast intra-block access. Robot parameters (FK twists, sphere offsets, collision pairs) are loaded cooperatively into shared memory once at kernel launch.
+
+### 11.2 Collision Jacobians: Finite Differences vs. Automatic Differentiation
+
+This is the most significant algorithmic difference.
+
+**JAX:** uses `jax.jacfwd` to compute exact analytical Jacobians $J_d \in \mathbb{R}^{G \times n}$ via forward-mode AD through the full FK → sphere placement → smooth-min chain. The result is exact up to floating-point precision.
+
+**CUDA:** uses **central finite differences** with step size `fd_eps` (default $10^{-4}$ rad):
+
+$$J_d^{(g, i)} \approx \frac{d^g(q + \epsilon e_i) - d^g(q - \epsilon e_i)}{2\epsilon}$$
+
+This requires $2n$ FK + collision evaluations per timestep (14 for a 7-DOF arm). The Jacobians have $O(\epsilon^2)$ truncation error, but float32 cancellation limits accuracy to roughly $O(\epsilon_\text{machine} / \epsilon) \approx 10^{-3}$ relative error.
+
+**Effect:** The less accurate Jacobians cause the SCO loop to linearize collision constraints less precisely. In practice the optimizer still converges to collision-free solutions (25/25 solved), but tends to find trajectories that are closer to obstacles (smaller clearance within the activation margin). This results in trajectories with **lower smoothness cost** (the optimizer has more freedom to be smooth since it avoids obstacles less conservatively) but **higher collision cost** at evaluation time, as more sphere-obstacle pairs fall within the activation margin.
+
+Benchmarked on a 7-DOF Panda with bookshelf_tall (B=25, T=64, 10 outer iters, 30 inner iters):
+
+| Metric | JAX | CUDA |
+|---|---|---|
+| Time | ~2.0 s | ~0.45 s (~**4.5× faster**) |
+| Velocity smoothness | 0.0165 | **0.0110** |
+| Best cost | **3.73** | 11.2 |
+| Solved (collision-free) | 25/25 | 25/25 |
+
+### 11.3 Smooth-Min Aggregation for Jacobians
+
+**JAX:** `_collision_dists_reduced` calls `compute_self_collision_distance` (which returns one distance per active link pair, already taking the hard min over all sphere–sphere combinations within that pair) and `compute_world_collision_distance` (which returns one distance per link–obstacle pair, taking the hard min over the link's spheres). Smooth-min then aggregates over these per-pair distances:
+
+$$d^g_\text{self} = \text{smooth\_min}\bigl(\min_{s_i, s_j} d(s_i, s_j) \text{ for each active link pair}\bigr)$$
+
+**CUDA:** `sco_compute_coll_dists` applies the same two-level reduction:
+1. **Hard min over spheres** — for each link pair (self) or each (link, obstacle) pair (world), find the minimum sphere-level distance.
+2. **Smooth-min over pairs** — aggregate the per-pair hard-min distances into one scalar per group.
+
+This two-level structure is essential for matching JAX's behavior. A naive single-level smooth-min over all individual sphere distances would produce biased (lower) distance estimates and diffuse Jacobian weights, degrading optimization quality.
+
+### 11.4 Final Nonlinear Cost Evaluation
+
+Both backends apply `colldist_from_sdf` at the **pair level** (not sphere level) when evaluating the final ranking cost:
+
+- **Self-collision:** one distance per active link pair = hard min over all sphere–sphere combinations within the pair.
+- **World collision:** one distance per (robot link, world obstacle) pair = hard min over the link's $S$ spheres.
+
+This matches the semantics of `compute_self_collision_distance` and `compute_world_collision_distance`, which are used in JAX's `_eval_cost`.
+
+> **Note:** applying `colldist_from_sdf` to individual sphere distances instead of per-pair distances inflates the cost by approximately $S\times$ (the number of spheres per link), because every sphere within the activation margin contributes a separate term instead of only the closest one.
+
+### 11.5 Inner L-BFGS: Manual Implementation vs. JAX AD
+
+**JAX:** the inner cost function is defined in Python and JAX's `value_and_grad` produces exact analytical gradients of the smoothness, linearized collision, limits, and trust-region terms. No manual gradient code is needed.
+
+**CUDA:** all cost and gradient computations are written explicitly by hand in `sco_inner_costgrad_timestep`. Each thread computes its own timestep's contribution; gradients are accumulated across threads via `block_reduce_sum`. The smoothness gradient uses the closed-form expression derived from the 4th-order stencil (accumulated-acceleration and jerk terms over overlapping windows); the collision, trust-region, and limits gradients follow standard analytical forms.
+
+The L-BFGS two-loop recursion is implemented cooperatively: each thread owns the elements of the $[T \times n]$ vectors corresponding to its timestep ($n = T \times \text{DOF}$), dot products are computed via block reductions, and the search direction is written back to each thread's owned slice.
+
+### 11.6 Endpoint Pinning
+
+Both backends zero the gradient at the first and last waypoints to pin start/goal, and re-pin the actual trajectory values after each outer iteration to prevent floating-point drift. In CUDA this is done at the thread level: threads 0 and $T-1$ zero their gradient slice, and `s_start`/`s_goal` (in shared memory) are written back to shared `s_traj` after the inner solve.
+
+### 11.7 When to Use Each Backend
+
+| Situation | Recommended |
+|---|---|
+| Highest solution quality | JAX (exact Jacobians) |
+| Real-time / low-latency planning | CUDA (~4.5× faster) |
+| Debugging / prototyping | JAX (readable Python, easy inspection) |
+| Large batches ($B \gg 25$) | CUDA (linear scaling per block, no Python overhead) |
+
+Both backends accept the same `TrajOptConfig` and can be selected via `use_cuda=True/False` in `sco_trajopt`.
+
+---
+
+## 12. Configuration Reference
 
 | Parameter | Default | Description |
 |---|---|---|

@@ -41,6 +41,7 @@ from pyronot._robot import Robot
 from pyronot.collision import colldist_from_sdf
 from pyronot.collision._obstacles import create_collision_environment, stack_obstacles
 from pyronot.collision._robot_collision import RobotCollisionSpherized
+from pyronot._splines import make_spline_init_trajs
 from pyronot.optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
 from pyronot.optimization_engines._sco_optimization import TrajOptConfig, sco_trajopt
 
@@ -223,7 +224,50 @@ def check_solved(
 
 
 def _fmt_row(name: str, elapsed: float, smoothness: float, solved: int) -> str:
-    return f"  {name:<26s}  {elapsed:>10.3f}  {smoothness:>12.4f}  {solved:>6d}/{BATCH_SIZE}"
+    return f"  {name:<36s}  {elapsed:>10.3f}  {smoothness:>12.4f}  {solved:>6d}/{BATCH_SIZE}"
+
+
+def _run_trajopt(
+    name: str,
+    init_trajs: jnp.ndarray,
+    start: jnp.ndarray,
+    goal: jnp.ndarray,
+    robot: Robot,
+    robot_coll: RobotCollisionSpherized,
+    world_geoms: tuple,
+    opt_cfg: TrajOptConfig,
+    use_cuda: bool = False,
+) -> dict:
+    """Run warm-up + timed sco_trajopt and return metrics dict."""
+    # Warm-up / JIT compile
+    best_wu, _, _ = sco_trajopt(
+        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+        use_cuda=use_cuda,
+    )
+    best_wu.block_until_ready()
+
+    # Timed run
+    t0 = time.perf_counter()
+    best_traj, costs, final_trajs = sco_trajopt(
+        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+        use_cuda=use_cuda,
+    )
+    best_traj.block_until_ready()
+    elapsed = time.perf_counter() - t0
+
+    smoothness = float(jnp.mean(
+        jnp.array([compute_smoothness(final_trajs[b]) for b in range(BATCH_SIZE)])
+    ))
+    n_solved = check_solved(final_trajs, goal, robot, robot_coll, list(world_geoms))
+    best_cost = float(jnp.min(costs))
+
+    return {
+        "name": name,
+        "elapsed": elapsed,
+        "smoothness": smoothness,
+        "n_solved": n_solved,
+        "best_cost": best_cost,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -258,25 +302,6 @@ def main(problem_name: str, index: int) -> None:
     for wg in world_geoms:
         print(f"    {type(wg).__name__}  batch={wg.get_batch_axes()}")
 
-    # Pass all geometry types to sco_trajopt so the optimizer sees all obstacles.
-
-    # --- Build Cartesian-space IK initial trajectories ----------------------
-    print(f"\nBuilding Cartesian IK initial trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
-    key = jax.random.PRNGKey(0)
-
-    init_trajs = make_cartesian_ik_init_trajs(
-        start       = start,
-        goal        = goal,
-        n_batch     = BATCH_SIZE,
-        n_timesteps = N_TIMESTEPS,
-        key         = key,
-        robot       = robot,
-        robot_coll  = robot_coll,
-        world_geoms = world_geoms,
-        noise_scale = NOISE_SCALE,
-    )                                    # [B, T, DOF]
-    print(f"  init_trajs shape : {init_trajs.shape}")
-
     # --- TrajOpt configuration -----------------------------------------------
     opt_cfg = TrajOptConfig(
         n_outer_iters=10,
@@ -294,90 +319,93 @@ def main(problem_name: str, index: int) -> None:
         w_limits=1.0,
     )
 
-    # --- Warm-up JIT compile (JAX) -------------------------------------------
-    print("\n[JAX] Warm-up / JIT compilation (first call)...")
-    t0 = time.perf_counter()
-    best_traj_warmup, costs_warmup, final_trajs_warmup = sco_trajopt(
-        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
+    key = jax.random.PRNGKey(0)
+    results = []
+
+    # --- Spline-based initialisations (linear, cubic, bspline) ---------------
+    # Control points: start → midpoint → goal (K=3 so cubic spline works).
+    midpoint = (start + goal) / 2.0
+    control_points = jnp.stack([start, midpoint, goal], axis=0)   # [3, DOF]
+
+    for mode in ("linear", "cubic", "bspline"):
+        print(f"\nBuilding {mode} spline init trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
+        key, subkey = jax.random.split(key)
+        init_trajs = make_spline_init_trajs(
+            control_points,
+            n_batch=BATCH_SIZE,
+            n_points=N_TIMESTEPS,
+            key=subkey,
+            mode=mode,
+            noise_scale=NOISE_SCALE,
+        )
+        print(f"  init_trajs shape : {init_trajs.shape}")
+
+        print(f"\n[JAX] {mode} — warm-up + timed run...")
+        res = _run_trajopt(
+            f"JAX  {mode:>8s} spline",
+            init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+        )
+        results.append(res)
+
+        try:
+            print(f"[CUDA] {mode} — warm-up + timed run...")
+            res_cu = _run_trajopt(
+                f"CUDA {mode:>8s} spline",
+                init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+                use_cuda=True,
+            )
+            results.append(res_cu)
+        except Exception as exc:
+            print(f"  CUDA benchmark skipped: {exc}")
+
+    # --- Cartesian IK initialisation -----------------------------------------
+    print(f"\nBuilding Cartesian IK initial trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
+    key, subkey = jax.random.split(key)
+    init_trajs_ik = make_cartesian_ik_init_trajs(
+        start       = start,
+        goal        = goal,
+        n_batch     = BATCH_SIZE,
+        n_timesteps = N_TIMESTEPS,
+        key         = subkey,
+        robot       = robot,
+        robot_coll  = robot_coll,
+        world_geoms = world_geoms,
+        noise_scale = NOISE_SCALE,
     )
-    best_traj_warmup.block_until_ready()
-    jax_compile_time = time.perf_counter() - t0
-    print(f"  Compile + first run : {jax_compile_time:.3f} s")
+    print(f"  init_trajs shape : {init_trajs_ik.shape}")
 
-    # --- Timed benchmark run (JAX) -------------------------------------------
-    print("\n[JAX] Timed benchmark run (second call)...")
-    t0 = time.perf_counter()
-    best_traj, costs, final_trajs = sco_trajopt(
-        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
+    print("\n[JAX] Cartesian IK — warm-up + timed run...")
+    res = _run_trajopt(
+        "JAX      Cartesian IK",
+        init_trajs_ik, start, goal, robot, robot_coll, world_geoms, opt_cfg,
     )
-    best_traj.block_until_ready()
-    jax_elapsed = time.perf_counter() - t0
+    results.append(res)
 
-    # --- JAX metrics ---------------------------------------------------------
-    jax_smoothness = float(jnp.mean(
-        jnp.array([compute_smoothness(final_trajs[b]) for b in range(BATCH_SIZE)])
-    ))
-    jax_n_solved = check_solved(final_trajs, goal, robot, robot_coll, list(world_geoms))
-    jax_best_cost = float(jnp.min(costs))
-
-    # --- Warm-up CUDA kernel (first call loads .so + runs kernel) ------------
-    print("\n[CUDA] Warm-up / kernel load (first call)...")
-    cuda_compile_time = None
-    cuda_elapsed      = None
-    cuda_smoothness   = None
-    cuda_n_solved     = None
-    cuda_best_cost    = None
     try:
-        t0 = time.perf_counter()
-        best_traj_cu_wu, _, _ = sco_trajopt(
-            init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+        print("[CUDA] Cartesian IK — warm-up + timed run...")
+        res_cu = _run_trajopt(
+            "CUDA     Cartesian IK",
+            init_trajs_ik, start, goal, robot, robot_coll, world_geoms, opt_cfg,
             use_cuda=True,
         )
-        best_traj_cu_wu.block_until_ready()
-        cuda_compile_time = time.perf_counter() - t0
-        print(f"  First run (kernel load) : {cuda_compile_time:.3f} s")
-
-        # --- Timed benchmark run (CUDA) --------------------------------------
-        print("\n[CUDA] Timed benchmark run (second call)...")
-        t0 = time.perf_counter()
-        best_traj_cu, costs_cu, final_trajs_cu = sco_trajopt(
-            init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
-            use_cuda=True,
-        )
-        best_traj_cu.block_until_ready()
-        cuda_elapsed = time.perf_counter() - t0
-
-        cuda_smoothness = float(jnp.mean(
-            jnp.array([compute_smoothness(final_trajs_cu[b]) for b in range(BATCH_SIZE)])
-        ))
-        cuda_n_solved = check_solved(
-            final_trajs_cu, goal, robot, robot_coll, list(world_geoms)
-        )
-        cuda_best_cost = float(jnp.min(costs_cu))
-
+        results.append(res_cu)
     except Exception as exc:
         print(f"  CUDA benchmark skipped: {exc}")
 
     # --- Results table -------------------------------------------------------
-    print("\nComputing metrics...")
+    print("\n" + "=" * 80)
     header = (
-        "\n"
-        f"  {'Method':<26s}  {'Time (s)':>10s}  {'Smoothness':>12s}  {'Solved':>8s}\n"
-        f"  {'-'*26}  {'-'*10}  {'-'*12}  {'-'*8}"
+        f"  {'Method':<36s}  {'Time (s)':>10s}  {'Smoothness':>12s}  {'Solved':>8s}\n"
+        f"  {'-'*36}  {'-'*10}  {'-'*12}  {'-'*8}"
     )
     print(header)
-    print(_fmt_row("JAX SCO-TrajOpt (JIT)", jax_elapsed, jax_smoothness, jax_n_solved))
-    if cuda_elapsed is not None:
-        print(_fmt_row("CUDA SCO-TrajOpt", cuda_elapsed, cuda_smoothness, cuda_n_solved))
+    for r in results:
+        print(_fmt_row(r["name"], r["elapsed"], r["smoothness"], r["n_solved"]))
 
-    print(f"\n  JAX  best trajectory cost      : {jax_best_cost:.4f}")
-    if cuda_best_cost is not None:
-        print(f"  CUDA best trajectory cost      : {cuda_best_cost:.4f}")
-        speedup = jax_elapsed / cuda_elapsed if cuda_elapsed > 0 else float("nan")
-        print(f"  CUDA speedup (timed runs)      : {speedup:.2f}x")
-    print(f"\n  JAX  compile + first-run time  : {jax_compile_time:.3f} s")
-    if cuda_compile_time is not None:
-        print(f"  CUDA kernel load + first run   : {cuda_compile_time:.3f} s")
+    print()
+    for r in results:
+        print(f"  {r['name']:<36s}  best_cost = {r['best_cost']:.4f}")
+
     print(f"\n  Batch size (B)                 : {BATCH_SIZE}")
     print(f"  Timesteps (T)                  : {N_TIMESTEPS}")
     print(f"  DOF                            : {dof}")
