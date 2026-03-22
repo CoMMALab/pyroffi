@@ -145,8 +145,8 @@ def check_solved(
     return n_solved
 
 
-def _fmt_row(name: str, warmup: float, elapsed: float, trajopt_time: float, smoothness: float, solved: int) -> str:
-    return f"  {name:<36s}  {warmup:>10.3f}  {elapsed:>10.3f}  {trajopt_time:>12.3f}  {smoothness:>12.4f}  {solved:>6d}/{BATCH_SIZE}"
+def _fmt_row(name: str, warmup: float, elapsed: float, ik_time: float, trajopt_time: float, smoothness: float, solved: int) -> str:
+    return f"  {name:<36s}  {warmup:>10.3f}  {elapsed:>10.3f}  {ik_time:>12.3f}  {trajopt_time:>12.3f}  {smoothness:>12.4f}  {solved:>6d}/{BATCH_SIZE}"
 
 
 def _run_motion_generator(
@@ -161,7 +161,7 @@ def _run_motion_generator(
     # Warm-up / JIT compile
     key, wu_key = jax.random.split(key)
     t0_wu = time.perf_counter()
-    best_wu, _, _, _ = motion_gen.generate(
+    best_wu, _, _, _, _ = motion_gen.generate(
         start_pose, goal_pose, wu_key, waypoint_poses=waypoint_poses,
     )
     best_wu.block_until_ready()
@@ -170,7 +170,7 @@ def _run_motion_generator(
     # Timed run
     key, run_key = jax.random.split(key)
     t0 = time.perf_counter()
-    best_traj, costs, final_trajs, trajopt_time = motion_gen.generate(
+    best_traj, costs, final_trajs, trajopt_time, ik_time = motion_gen.generate(
         start_pose, goal_pose, run_key, waypoint_poses=waypoint_poses,
     )
     best_traj.block_until_ready()
@@ -190,6 +190,7 @@ def _run_motion_generator(
         "name": name,
         "warmup": warmup_elapsed,
         "elapsed": elapsed,
+        "ik_time": ik_time,
         "trajopt_time": trajopt_time,
         "smoothness": smoothness,
         "n_solved": n_solved,
@@ -323,12 +324,12 @@ def main(problem_name: str, index: int) -> None:
     # --- Results table -------------------------------------------------------
     print("\n" + "=" * 80)
     header = (
-        f"  {'Method':<36s}  {'Warmup (s)':>10s}  {'Run (s)':>10s}  {'TrajOpt (s)':>12s}  {'Smoothness':>12s}  {'Solved':>8s}\n"
-        f"  {'-'*36}  {'-'*10}  {'-'*10}  {'-'*12}  {'-'*12}  {'-'*8}"
+        f"  {'Method':<36s}  {'Warmup (s)':>10s}  {'Run (s)':>10s}  {'IK Seed (s)':>12s}  {'TrajOpt (s)':>12s}  {'Smoothness':>12s}  {'Solved':>8s}\n"
+        f"  {'-'*36}  {'-'*10}  {'-'*10}  {'-'*12}  {'-'*12}  {'-'*12}  {'-'*8}"
     )
     print(header)
     for r in results:
-        print(_fmt_row(r["name"], r["warmup"], r["elapsed"], r["trajopt_time"], r["smoothness"], r["n_solved"]))
+        print(_fmt_row(r["name"], r["warmup"], r["elapsed"], r["ik_time"], r["trajopt_time"], r["smoothness"], r["n_solved"]))
 
     print()
     for r in results:

@@ -1,9 +1,9 @@
-"""TrajoptMotionGenerator: Cartesian spline seeding + collision-free IK + SCO trajopt.
+"""TrajoptMotionGenerator: Cartesian spline seeding + IK + SCO trajopt.
 
 Full pipeline:
   1. Cartesian spline interpolation between control SE(3) poses (configurable
      mode: linear, cubic, bspline).
-  2. Batched collision-free IK via MPPI to convert waypoint poses to joint configs.
+  2. Batched IK via MPPI to convert waypoint poses to joint configs.
   3. SCO trajectory optimization on the resulting batch.
 """
 
@@ -25,36 +25,40 @@ from .._splines import (
     cubic_spline_interpolate,
     linear_interpolate,
 )
-from ..collision import RobotCollision, colldist_from_sdf
+from ..collision import RobotCollision
 from ..optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
 from ..optimization_engines._sco_optimization import TrajOptConfig, sco_trajopt
 
 
 @dataclass(frozen=True)
 class IKSeedConfig:
-    """Configuration for the collision-free IK seeding stage."""
+    """Configuration for the IK seeding stage."""
 
-    num_seeds: int = 8
-    n_particles: int = 64
-    n_mppi_iters: int = 20
+    num_seeds: int = 32
+    n_particles: int = 16
+    n_mppi_iters: int = 5
     n_lbfgs_iters: int = 25
     m_lbfgs: int = 5
-    collision_weight: float = 1e4
-    collision_margin: float = 0.01
+    pos_weight: float = 50.0
+    ori_weight: float = 10.0
+    sigma: float = 0.3
+    mppi_temperature: float = 0.05
+    eps_pos: float = 1e-8
+    eps_ori: float = 1e-8
+    continuity_weight: float = 0.0
 
 
 @dataclass
 class TrajoptMotionGenerator:
-    """Motion generator that plans in Cartesian space, seeds via collision-free
-    IK, and refines with SCO trajectory optimization.
+    """Motion generator that plans in Cartesian space, seeds via IK, and
+    refines with SCO trajectory optimization.
 
     Pipeline:
       1. Build Cartesian control poses: ``[start_pose, *waypoint_poses, goal_pose]``.
       2. Spline-interpolate the position and orientation components to produce
          ``n_timesteps`` SE(3) waypoint poses.  The ``cartesian_spline_mode``
          parameter selects the interpolation method (linear, cubic, bspline).
-      3. Batched MPPI CUDA IK with self + world collision penalties to solve
-         all T IK problems in one kernel launch.
+      3. Batched MPPI CUDA IK to solve all T IK problems in one kernel launch.
       4. Tile the base trajectory to ``[B, T, DOF]`` and add noise.
       5. Run ``sco_trajopt`` on the batch.
 
@@ -68,7 +72,7 @@ class TrajoptMotionGenerator:
         noise_scale: Std of per-seed Gaussian perturbation.
         cartesian_spline_mode: Spline mode for Cartesian interpolation.
         trajopt_cfg: SCO trajectory optimization configuration.
-        ik_cfg:      Collision-free IK seeding configuration.
+        ik_cfg:      IK seeding configuration.
         use_cuda:    Whether to use the CUDA backend for trajopt.
     """
 
@@ -134,29 +138,14 @@ class TrajoptMotionGenerator:
 
         return jaxlie.SE3.from_rotation_and_translation(interp_rot, interp_pos)
 
-    def _collision_free_ik(
+    def _batch_ik(
         self,
         interp_poses: jaxlie.SE3,
         prev_cfgs: Float[Array, "T DOF"],
         key: Array,
     ) -> Float[Array, "T DOF"]:
-        """Solve T IK problems with collision avoidance via batched MPPI."""
-        robot_coll = self.robot_coll
-        world_geoms = self.world_geoms
+        """Solve T IK problems via batched MPPI (no collision avoidance)."""
         ik_cfg = self.ik_cfg
-
-        def _collision_penalty(cfg, robot, _):
-            cost = jnp.zeros(())
-            self_dists = robot_coll.compute_self_collision_distance(robot, cfg)
-            cost += jnp.sum(
-                -jnp.minimum(colldist_from_sdf(self_dists, ik_cfg.collision_margin), 0.0)
-            )
-            for wg in world_geoms:
-                wd = robot_coll.compute_world_collision_distance(robot, cfg, wg)
-                cost += jnp.sum(
-                    -jnp.minimum(colldist_from_sdf(wd, ik_cfg.collision_margin), 0.0)
-                )
-            return cost
 
         return mppi_ik_solve_cuda_batch(
             robot=self.robot,
@@ -169,9 +158,13 @@ class TrajoptMotionGenerator:
             n_mppi_iters=ik_cfg.n_mppi_iters,
             n_lbfgs_iters=ik_cfg.n_lbfgs_iters,
             m_lbfgs=ik_cfg.m_lbfgs,
-            constraints=[_collision_penalty],
-            constraint_args=[jnp.zeros(())],
-            constraint_weights=[ik_cfg.collision_weight],
+            pos_weight=ik_cfg.pos_weight,
+            ori_weight=ik_cfg.ori_weight,
+            sigma=ik_cfg.sigma,
+            mppi_temperature=ik_cfg.mppi_temperature,
+            eps_pos=ik_cfg.eps_pos,
+            eps_ori=ik_cfg.eps_ori,
+            continuity_weight=ik_cfg.continuity_weight,
         )
 
     def _seed_trajectories(
@@ -198,7 +191,7 @@ class TrajoptMotionGenerator:
                 mid_cfg[None], (self.n_timesteps, mid_cfg.shape[0])
             )
 
-        base_traj = self._collision_free_ik(interp_poses, prev_cfgs, ik_key)
+        base_traj = self._batch_ik(interp_poses, prev_cfgs, ik_key)
 
         # Extract start/goal joint configs from the IK solutions
         start_cfg = base_traj[0]
@@ -217,7 +210,7 @@ class TrajoptMotionGenerator:
         key: Array,
         waypoint_poses: jaxlie.SE3 | None = None,
         prev_cfgs: Float[Array, "T DOF"] | None = None,
-    ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"], float]:
+    ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"], float, float]:
         """Run the full pipeline: Cartesian spline → IK seeding → SCO trajopt.
 
         Args:
@@ -235,6 +228,7 @@ class TrajoptMotionGenerator:
             costs:          Final cost per trajectory.          Shape [B].
             final_trajs:    All optimized trajectories.         Shape [B, T, DOF].
             trajopt_time:   Wall-clock time for the SCO trajopt step (seconds).
+            ik_time:        Wall-clock time for the IK seeding step (seconds).
         """
         # Build control poses sequence: [start, *waypoints, goal]
         start_wxyz_xyz = start_pose.wxyz_xyz[None]  # [1, 7]
@@ -254,9 +248,11 @@ class TrajoptMotionGenerator:
 
         control_poses = jaxlie.SE3(all_wxyz_xyz)
 
+        t0_ik = time.perf_counter()
         init_trajs, start_cfg, goal_cfg = self._seed_trajectories(
             control_poses, key, prev_cfgs=prev_cfgs,
         )
+        ik_time = time.perf_counter() - t0_ik
         t0 = time.perf_counter()
         best_traj, costs, final_trajs = sco_trajopt(
             init_trajs,
@@ -270,4 +266,4 @@ class TrajoptMotionGenerator:
         )
         best_traj.block_until_ready()
         trajopt_time = time.perf_counter() - t0
-        return best_traj, costs, final_trajs, trajopt_time
+        return best_traj, costs, final_trajs, trajopt_time, ik_time
