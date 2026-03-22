@@ -22,6 +22,81 @@
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
+#include <cuda_runtime.h>
+
+// ---------------------------------------------------------------------------
+// CUDA graph cache for the SCO TrajOpt kernel
+// ---------------------------------------------------------------------------
+// Amortises CPU-side kernel-launch overhead (driver API call, argument
+// marshalling) to a single cudaGraphLaunch per FFI call.  The graph is
+// recaptured only when the problem shape changes.
+
+struct ScoTrajoptGraphCache {
+    cudaGraphExec_t  exec           = nullptr;
+    cudaGraphNode_t  kernel_node    = nullptr;
+    cudaGraph_t      graph          = nullptr;
+    cudaStream_t     capture_stream = nullptr;
+
+    void*        func_ptr   = nullptr;
+    dim3         grid_dim   = {1, 1, 1};
+    dim3         block_dim  = {1, 1, 1};
+    unsigned int shared_mem = 0;
+
+    // Shape fingerprint — invalidated whenever any dimension changes.
+    int fp_B = -1, fp_T = -1, fp_n_act = -1, fp_n_joints = -1;
+    int fp_N = -1, fp_S = -1, fp_P = -1;
+    int fp_Ms = -1, fp_Mc = -1, fp_Mb = -1, fp_Mh = -1;
+
+    bool shape_matches(int B, int T, int n_act, int n_joints,
+                       int N, int S, int P,
+                       int Ms, int Mc, int Mb, int Mh) const noexcept {
+        return B == fp_B && T == fp_T && n_act == fp_n_act &&
+               n_joints == fp_n_joints && N == fp_N && S == fp_S &&
+               P == fp_P && Ms == fp_Ms && Mc == fp_Mc &&
+               Mb == fp_Mb && Mh == fp_Mh;
+    }
+
+    cudaError_t ensure_capture_stream() noexcept {
+        if (capture_stream) return cudaSuccess;
+        return cudaStreamCreateWithFlags(&capture_stream,
+                                         cudaStreamNonBlocking);
+    }
+
+    void invalidate() noexcept {
+        if (exec)  { cudaGraphExecDestroy(exec);  exec  = nullptr; }
+        if (graph) { cudaGraphDestroy(graph);      graph = nullptr; }
+        kernel_node = nullptr;
+        func_ptr    = nullptr;
+        fp_B = fp_T = fp_n_act = fp_n_joints = -1;
+        fp_N = fp_S = fp_P = -1;
+        fp_Ms = fp_Mc = fp_Mb = fp_Mh = -1;
+    }
+
+    cudaError_t finalize_capture(int B, int T, int n_act, int n_joints,
+                                  int N, int S, int P,
+                                  int Ms, int Mc, int Mb, int Mh) noexcept {
+        size_t n_nodes = 1;
+        cudaError_t e = cudaGraphGetNodes(graph, &kernel_node, &n_nodes);
+        if (e != cudaSuccess) return e;
+        if (n_nodes == 0)     return cudaErrorUnknown;
+
+        cudaKernelNodeParams kp = {};
+        e = cudaGraphKernelNodeGetParams(kernel_node, &kp);
+        if (e != cudaSuccess) return e;
+        func_ptr   = kp.func;
+        grid_dim   = kp.gridDim;
+        block_dim  = kp.blockDim;
+        shared_mem = kp.sharedMemBytes;
+
+        e = cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+        if (e != cudaSuccess) return e;
+
+        fp_B = B; fp_T = T; fp_n_act = n_act; fp_n_joints = n_joints;
+        fp_N = N; fp_S = S; fp_P = P;
+        fp_Ms = Ms; fp_Mc = Mc; fp_Mb = Mb; fp_Mh = Mh;
+        return cudaSuccess;
+    }
+};
 
 namespace ffi = xla::ffi;
 
@@ -1056,8 +1131,10 @@ void sco_trajopt_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// XLA FFI handler
+// XLA FFI handler — with CUDA graph caching
 // ---------------------------------------------------------------------------
+
+static ScoTrajoptGraphCache s_trajopt_cache;
 
 static ffi::Error ScoTrajoptCudaImpl(
     cudaStream_t stream,
@@ -1135,45 +1212,122 @@ static ffi::Error ScoTrajoptCudaImpl(
     const int dyn_smem_bytes =
         (2 * n + T * SCO_MAX_G + block_dim) * static_cast<int>(sizeof(float));
 
-    sco_trajopt_kernel<<<B, block_dim, dyn_smem_bytes, stream>>>(
-        init_trajs.typed_data(),
-        twists.typed_data(),
-        parent_tf.typed_data(),
-        parent_idx.typed_data(),
-        act_idx.typed_data(),
-        mimic_mul.typed_data(),
-        mimic_off.typed_data(),
-        mimic_act_idx.typed_data(),
-        topo_inv.typed_data(),
-        sphere_offsets.typed_data(),
-        sphere_radii.typed_data(),
-        pair_i_buf.typed_data(),
-        pair_j_buf.typed_data(),
-        world_spheres.typed_data(),
-        world_capsules.typed_data(),
-        world_boxes.typed_data(),
-        world_halfspaces.typed_data(),
-        lower.typed_data(),
-        upper.typed_data(),
-        start.typed_data(),
-        goal.typed_data(),
-        out_trajs->typed_data(),
-        out_costs->typed_data(),
-        out_workspace->typed_data(),
-        workspace_stride,
-        B, T, n_joints, n_act,
-        N, static_cast<int>(S), P, Ms, Mc, Mb, Mh,
-        static_cast<int>(n_outer_iters),
-        static_cast<int>(n_inner_iters),
-        static_cast<int>(m_lbfgs),
-        w_smooth, w_acc, w_jerk,
-        w_limits, w_trust,
-        w_collision, w_collision_max, penalty_scale,
-        collision_margin, smooth_min_temperature, fd_eps);
+    // Build the kernel argument array (pointers to each argument).
+    const float* p_init_trajs      = init_trajs.typed_data();
+    const float* p_twists          = twists.typed_data();
+    const float* p_parent_tf       = parent_tf.typed_data();
+    const int*   p_parent_idx      = parent_idx.typed_data();
+    const int*   p_act_idx         = act_idx.typed_data();
+    const float* p_mimic_mul       = mimic_mul.typed_data();
+    const float* p_mimic_off       = mimic_off.typed_data();
+    const int*   p_mimic_act_idx   = mimic_act_idx.typed_data();
+    const int*   p_topo_inv        = topo_inv.typed_data();
+    const float* p_sphere_offsets  = sphere_offsets.typed_data();
+    const float* p_sphere_radii    = sphere_radii.typed_data();
+    const int*   p_pair_i          = pair_i_buf.typed_data();
+    const int*   p_pair_j          = pair_j_buf.typed_data();
+    const float* p_world_spheres   = world_spheres.typed_data();
+    const float* p_world_capsules  = world_capsules.typed_data();
+    const float* p_world_boxes     = world_boxes.typed_data();
+    const float* p_world_halfspaces= world_halfspaces.typed_data();
+    const float* p_lower           = lower.typed_data();
+    const float* p_upper           = upper.typed_data();
+    const float* p_start           = start.typed_data();
+    const float* p_goal            = goal.typed_data();
+    float*       p_out_trajs       = out_trajs->typed_data();
+    float*       p_out_costs       = out_costs->typed_data();
+    float*       p_out_workspace   = out_workspace->typed_data();
+    int          k_workspace_stride= workspace_stride;
+    int          k_B = B, k_T = T, k_n_joints = n_joints, k_n_act = n_act;
+    int          k_N = N, k_S = static_cast<int>(S), k_P = P;
+    int          k_Ms = Ms, k_Mc = Mc, k_Mb = Mb, k_Mh = Mh;
+    int          k_n_outer = static_cast<int>(n_outer_iters);
+    int          k_n_inner = static_cast<int>(n_inner_iters);
+    int          k_m_lbfgs = static_cast<int>(m_lbfgs);
 
-    const cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess)
-        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+    void* kargs[] = {
+        &p_init_trajs, &p_twists, &p_parent_tf, &p_parent_idx, &p_act_idx,
+        &p_mimic_mul, &p_mimic_off, &p_mimic_act_idx, &p_topo_inv,
+        &p_sphere_offsets, &p_sphere_radii,
+        &p_pair_i, &p_pair_j,
+        &p_world_spheres, &p_world_capsules, &p_world_boxes, &p_world_halfspaces,
+        &p_lower, &p_upper, &p_start, &p_goal,
+        &p_out_trajs, &p_out_costs, &p_out_workspace,
+        &k_workspace_stride,
+        &k_B, &k_T, &k_n_joints, &k_n_act,
+        &k_N, &k_S, &k_P, &k_Ms, &k_Mc, &k_Mb, &k_Mh,
+        &k_n_outer, &k_n_inner, &k_m_lbfgs,
+        &w_smooth, &w_acc, &w_jerk,
+        &w_limits, &w_trust,
+        &w_collision, &w_collision_max, &penalty_scale,
+        &collision_margin, &smooth_min_temperature, &fd_eps,
+    };
+
+    if (!s_trajopt_cache.shape_matches(B, T, n_act, n_joints, N, k_S, P,
+                                        Ms, Mc, Mb, Mh)) {
+        // Shape changed — recapture the graph.
+        s_trajopt_cache.invalidate();
+        cudaError_t e = s_trajopt_cache.ensure_capture_stream();
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
+        e = cudaStreamBeginCapture(s_trajopt_cache.capture_stream,
+                                   cudaStreamCaptureModeThreadLocal);
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
+        sco_trajopt_kernel<<<B, block_dim, dyn_smem_bytes,
+                             s_trajopt_cache.capture_stream>>>(
+            p_init_trajs, p_twists, p_parent_tf, p_parent_idx, p_act_idx,
+            p_mimic_mul, p_mimic_off, p_mimic_act_idx, p_topo_inv,
+            p_sphere_offsets, p_sphere_radii,
+            p_pair_i, p_pair_j,
+            p_world_spheres, p_world_capsules, p_world_boxes, p_world_halfspaces,
+            p_lower, p_upper, p_start, p_goal,
+            p_out_trajs, p_out_costs, p_out_workspace,
+            k_workspace_stride,
+            k_B, k_T, k_n_joints, k_n_act,
+            k_N, k_S, k_P, k_Ms, k_Mc, k_Mb, k_Mh,
+            k_n_outer, k_n_inner, k_m_lbfgs,
+            w_smooth, w_acc, w_jerk,
+            w_limits, w_trust,
+            w_collision, w_collision_max, penalty_scale,
+            collision_margin, smooth_min_temperature, fd_eps);
+
+        e = cudaStreamEndCapture(s_trajopt_cache.capture_stream,
+                                 &s_trajopt_cache.graph);
+        if (e != cudaSuccess) {
+            s_trajopt_cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        e = s_trajopt_cache.finalize_capture(B, T, n_act, n_joints,
+                                              N, k_S, P, Ms, Mc, Mb, Mh);
+        if (e != cudaSuccess) {
+            s_trajopt_cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+    } else {
+        // Shape unchanged — update kernel node params (new buffer pointers / scalars).
+        cudaKernelNodeParams kp = {};
+        kp.func           = s_trajopt_cache.func_ptr;
+        kp.gridDim        = s_trajopt_cache.grid_dim;
+        kp.blockDim       = s_trajopt_cache.block_dim;
+        kp.sharedMemBytes = s_trajopt_cache.shared_mem;
+        kp.kernelParams   = kargs;
+        kp.extra          = nullptr;
+
+        cudaError_t e = cudaGraphExecKernelNodeSetParams(
+            s_trajopt_cache.exec, s_trajopt_cache.kernel_node, &kp);
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+    }
+
+    // Launch the cached graph on the XLA stream.
+    cudaError_t e = cudaGraphLaunch(s_trajopt_cache.exec, stream);
+    if (e != cudaSuccess)
+        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
     return ffi::Error::Success();
 }
 

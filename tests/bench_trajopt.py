@@ -1,8 +1,8 @@
 """Benchmark: SCO TrajOpt on a VAMP problem instance.
 
-Loads a planning problem from the VAMP dataset (panda/problems.pkl), builds a
-batch of B=25 Cartesian-IK-initialised trajectories with T=64 waypoints, runs
-``sco_trajopt`` and reports timing, smoothness, and solve-rate.
+Loads a planning problem from the VAMP dataset (panda/problems.pkl), runs FK
+to obtain Cartesian start/goal poses, then benchmarks ``TrajoptMotionGenerator``
+with each Cartesian spline mode (linear, cubic, bspline).
 
 Usage
 -----
@@ -36,14 +36,11 @@ import yourdfpy
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-import pyronot as pk
 from pyronot._robot import Robot
-from pyronot.collision import colldist_from_sdf
 from pyronot.collision._obstacles import create_collision_environment, stack_obstacles
 from pyronot.collision._robot_collision import RobotCollisionSpherized
-from pyronot._splines import make_spline_init_trajs
-from pyronot.optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
-from pyronot.optimization_engines._sco_optimization import TrajOptConfig, sco_trajopt
+from pyronot.motion_generators import TrajoptMotionGenerator
+from pyronot.optimization_engines._sco_optimization import TrajOptConfig
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,7 +50,8 @@ BATCH_SIZE   = 25
 N_TIMESTEPS  = 64
 NOISE_SCALE  = 0.05   # std of per-seed perturbation
 EE_LINK_NAME = "panda_hand"
-GOAL_TOL     = 0.05   # rad — final waypoint must be within this of goal
+GOAL_POS_TOL = 0.01   # m — EE position must be within this of goal pose
+GOAL_ORI_TOL = 0.05   # rad — EE orientation must be within this of goal pose
 COLL_TOL     = 0.0    # signed-distance threshold to count as collision-free
 
 RESOURCES    = Path(__file__).parent.parent / "resources"
@@ -89,89 +87,6 @@ def load_robot(urdf_path: Path) -> tuple[Robot, RobotCollisionSpherized, yourdfp
     return robot, robot_coll, urdf
 
 
-def make_cartesian_ik_init_trajs(
-    start:       jnp.ndarray,
-    goal:        jnp.ndarray,
-    n_batch:     int,
-    n_timesteps: int,
-    key:         jnp.ndarray,
-    robot:       Robot,
-    robot_coll:  RobotCollisionSpherized,
-    world_geoms: tuple,
-    noise_scale: float = 0.05,
-) -> jnp.ndarray:
-    """Initialize trajectories via Cartesian interpolation + batched MPPI IK.
-
-    Steps:
-      1. FK at start/goal to get end-effector SE(3) poses.
-      2. Interpolate n_timesteps poses in Cartesian space (position lerp +
-         SO(3) log/exp SLERP).
-      3. Solve all T IK problems in one MPPI CUDA batch call, warm-started
-         from linear joint-space interpolation, with self + world collision
-         penalty as a constraint.
-      4. Tile the resulting base trajectory to [B, T, DOF] and add noise.
-    """
-    ee_idx = robot.links.names.index(EE_LINK_NAME)
-
-    # Step 1 — FK
-    start_pose = jaxlie.SE3(robot.forward_kinematics(start)[ee_idx])
-    goal_pose  = jaxlie.SE3(robot.forward_kinematics(goal)[ee_idx])
-
-    # Step 2 — Cartesian interpolation
-    start_rot = start_pose.rotation()
-    goal_rot  = goal_pose.rotation()
-    rel_log   = (start_rot.inverse() @ goal_rot).log()   # SO(3) tangent [3]
-    start_t   = start_pose.translation()
-    goal_t    = goal_pose.translation()
-
-    alphas = jnp.linspace(0.0, 1.0, n_timesteps)
-
-    def _interp(alpha):
-        rot = start_rot @ jaxlie.SO3.exp(alpha * rel_log)
-        pos = start_t + alpha * (goal_t - start_t)
-        return jaxlie.SE3.from_rotation_and_translation(rot, pos)
-
-    interp_poses = jax.vmap(_interp)(alphas)   # SE3 batch of shape (T,)
-
-    # Warm-start: linear joint-space interpolation
-    t_grid    = jnp.linspace(0.0, 1.0, n_timesteps)[:, None]
-    prev_cfgs = start[None] * (1.0 - t_grid) + goal[None] * t_grid   # [T, DOF]
-
-    # Step 3 — Collision-free IK
-    # Capture robot_coll and world_geoms as a closure; only the dummy arg is
-    # traced by JAX so no retracing occurs when obstacle geometry is unchanged.
-    def _collision_penalty(cfg, robot, _):
-        cost = jnp.zeros(())
-        self_dists = robot_coll.compute_self_collision_distance(robot, cfg)
-        cost += jnp.sum(-jnp.minimum(colldist_from_sdf(self_dists, 0.01), 0.0))
-        for wg in world_geoms:
-            wd = robot_coll.compute_world_collision_distance(robot, cfg, wg)
-            cost += jnp.sum(-jnp.minimum(colldist_from_sdf(wd, 0.01), 0.0))
-        return cost
-
-    key, subkey = jax.random.split(key)
-    base_traj = mppi_ik_solve_cuda_batch(
-        robot               = robot,
-        target_link_indices = ee_idx,
-        target_poses        = interp_poses,
-        rng_key             = subkey,
-        previous_cfgs       = prev_cfgs,
-        num_seeds           = 8,
-        n_particles         = 64,
-        n_mppi_iters        = 20,
-        n_lbfgs_iters       = 25,
-        m_lbfgs             = 5,
-        constraints         = [_collision_penalty],
-        constraint_args     = [jnp.zeros(())],   # dummy; fn closes over geoms
-        constraint_weights  = [1e4],
-    )   # [T, DOF]
-
-    # Step 4 — Tile + noise → [B, T, DOF]
-    trajs = jnp.broadcast_to(base_traj[None], (n_batch, n_timesteps, base_traj.shape[-1]))
-    noise = jax.random.normal(key, trajs.shape) * noise_scale
-    return trajs + noise
-
-
 def compute_smoothness(traj: jnp.ndarray) -> float:
     """Mean squared velocity norm over the trajectory."""
     vel = traj[1:] - traj[:-1]           # [T-1, DOF]
@@ -180,19 +95,26 @@ def compute_smoothness(traj: jnp.ndarray) -> float:
 
 def check_solved(
     trajs: jnp.ndarray,           # [B, T, DOF]
-    goal: jnp.ndarray,            # [DOF]
+    goal_pose: jaxlie.SE3,
+    ee_idx: int,
     robot: Robot,
     robot_coll: RobotCollisionSpherized,
     world_geoms: list,
 ) -> int:
-    """Count trajectories that reach the goal without collisions."""
+    """Count trajectories that reach the goal pose without collisions.
+
+    Goal-reaching is evaluated in Cartesian space: the EE pose at the final
+    waypoint is compared to ``goal_pose`` in both position and orientation.
+    """
     n_solved = 0
     for b in range(trajs.shape[0]):
         traj = trajs[b]                   # [T, DOF]
 
-        # Goal condition: final waypoint close to goal
-        goal_err = float(jnp.linalg.norm(traj[-1] - goal))
-        if goal_err > GOAL_TOL:
+        # Goal condition: EE pose at final waypoint close to goal pose
+        final_pose = jaxlie.SE3(robot.forward_kinematics(traj[-1])[ee_idx])
+        pos_err = float(jnp.linalg.norm(final_pose.translation() - goal_pose.translation()))
+        ori_err = float(jnp.linalg.norm((final_pose.rotation().inverse() @ goal_pose.rotation()).log()))
+        if pos_err > GOAL_POS_TOL or ori_err > GOAL_ORI_TOL:
             continue
 
         # Collision condition: check every timestep
@@ -227,38 +149,39 @@ def _fmt_row(name: str, elapsed: float, smoothness: float, solved: int) -> str:
     return f"  {name:<36s}  {elapsed:>10.3f}  {smoothness:>12.4f}  {solved:>6d}/{BATCH_SIZE}"
 
 
-def _run_trajopt(
+def _run_motion_generator(
     name: str,
-    init_trajs: jnp.ndarray,
-    start: jnp.ndarray,
-    goal: jnp.ndarray,
-    robot: Robot,
-    robot_coll: RobotCollisionSpherized,
-    world_geoms: tuple,
-    opt_cfg: TrajOptConfig,
-    use_cuda: bool = False,
+    motion_gen: TrajoptMotionGenerator,
+    start_pose: jaxlie.SE3,
+    goal_pose: jaxlie.SE3,
+    key: jnp.ndarray,
+    waypoint_poses: jaxlie.SE3 | None = None,
 ) -> dict:
-    """Run warm-up + timed sco_trajopt and return metrics dict."""
+    """Run warm-up + timed TrajoptMotionGenerator and return metrics dict."""
     # Warm-up / JIT compile
-    best_wu, _, _ = sco_trajopt(
-        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
-        use_cuda=use_cuda,
+    key, wu_key = jax.random.split(key)
+    best_wu, _, _ = motion_gen.generate(
+        start_pose, goal_pose, wu_key, waypoint_poses=waypoint_poses,
     )
     best_wu.block_until_ready()
 
     # Timed run
+    key, run_key = jax.random.split(key)
     t0 = time.perf_counter()
-    best_traj, costs, final_trajs = sco_trajopt(
-        init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
-        use_cuda=use_cuda,
+    best_traj, costs, final_trajs = motion_gen.generate(
+        start_pose, goal_pose, run_key, waypoint_poses=waypoint_poses,
     )
     best_traj.block_until_ready()
     elapsed = time.perf_counter() - t0
 
+    ee_idx = motion_gen.robot.links.names.index(motion_gen.ee_link_name)
     smoothness = float(jnp.mean(
         jnp.array([compute_smoothness(final_trajs[b]) for b in range(BATCH_SIZE)])
     ))
-    n_solved = check_solved(final_trajs, goal, robot, robot_coll, list(world_geoms))
+    n_solved = check_solved(
+        final_trajs, goal_pose, ee_idx, motion_gen.robot, motion_gen.robot_coll,
+        list(motion_gen.world_geoms),
+    )
     best_cost = float(jnp.min(costs))
 
     return {
@@ -280,19 +203,34 @@ def main(problem_name: str, index: int) -> None:
     # --- Load problem data ---------------------------------------------------
     print("Loading problem...")
     problem_data = load_problem(problem_name, index)
-    start = jnp.array(problem_data["start"], dtype=jnp.float32)
+    start_cfg = jnp.array(problem_data["start"], dtype=jnp.float32)
     goals = jnp.array(problem_data["goals"], dtype=jnp.float32)
-    goal  = goals[0]                     # use the first goal configuration
+    goal_cfg  = goals[0]
     valid = problem_data.get("valid", True)
-    print(f"  Start : {np.array(start)}")
-    print(f"  Goal  : {np.array(goal)}")
-    print(f"  Valid : {valid}")
+    print(f"  Start cfg : {np.array(start_cfg)}")
+    print(f"  Goal  cfg : {np.array(goal_cfg)}")
+    print(f"  Valid     : {valid}")
 
     # --- Load robot ----------------------------------------------------------
     print("\nLoading robot...")
     robot, robot_coll, urdf = load_robot(PANDA_URDF)
     dof = robot.joints.num_actuated_joints
+    ee_idx = robot.links.names.index(EE_LINK_NAME)
     print(f"  DOF   : {dof}")
+
+    # --- FK to get Cartesian start/goal poses ---------------------------------
+    print("\nRunning FK for start/goal Cartesian poses...")
+    start_pose = jaxlie.SE3(robot.forward_kinematics(start_cfg)[ee_idx])
+    goal_pose  = jaxlie.SE3(robot.forward_kinematics(goal_cfg)[ee_idx])
+    print(f"  Start pos : {np.array(start_pose.translation())}")
+    print(f"  Goal  pos : {np.array(goal_pose.translation())}")
+
+    # Cartesian midpoint for K=3 spline control poses
+    mid_pos = (start_pose.translation() + goal_pose.translation()) / 2.0
+    mid_rot = start_pose.rotation() @ jaxlie.SO3.exp(
+        0.5 * (start_pose.rotation().inverse() @ goal_pose.rotation()).log()
+    )
+    mid_pose = jaxlie.SE3.from_rotation_and_translation(mid_rot, mid_pos)
 
     # --- Build collision environment ----------------------------------------
     print("\nBuilding collision environment...")
@@ -322,75 +260,61 @@ def main(problem_name: str, index: int) -> None:
     key = jax.random.PRNGKey(0)
     results = []
 
-    # --- Spline-based initialisations (linear, cubic, bspline) ---------------
-    # Control points: start → midpoint → goal (K=3 so cubic spline works).
-    midpoint = (start + goal) / 2.0
-    control_points = jnp.stack([start, midpoint, goal], axis=0)   # [3, DOF]
-
+    # --- Benchmark each Cartesian spline mode --------------------------------
     for mode in ("linear", "cubic", "bspline"):
-        print(f"\nBuilding {mode} spline init trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
-        key, subkey = jax.random.split(key)
-        init_trajs = make_spline_init_trajs(
-            control_points,
-            n_batch=BATCH_SIZE,
-            n_points=N_TIMESTEPS,
-            key=subkey,
-            mode=mode,
-            noise_scale=NOISE_SCALE,
-        )
-        print(f"  init_trajs shape : {init_trajs.shape}")
+        # For linear mode, K=2 is fine. For cubic/bspline, use K=3 with midpoint.
+        if mode == "linear":
+            wp = None
+            label_suffix = "(K=2)"
+        else:
+            wp = mid_pose
+            label_suffix = "(K=3)"
 
-        print(f"\n[JAX] {mode} — warm-up + timed run...")
-        res = _run_trajopt(
-            f"JAX  {mode:>8s} spline",
-            init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+        motion_gen = TrajoptMotionGenerator(
+            robot=robot,
+            robot_coll=robot_coll,
+            world_geoms=world_geoms,
+            ee_link_name=EE_LINK_NAME,
+            n_timesteps=N_TIMESTEPS,
+            n_batch=BATCH_SIZE,
+            noise_scale=NOISE_SCALE,
+            cartesian_spline_mode=mode,
+            trajopt_cfg=opt_cfg,
+            use_cuda=False,
+        )
+
+        key, subkey = jax.random.split(key)
+        print(f"\n[JAX] {mode} {label_suffix} — warm-up + timed run...")
+        res = _run_motion_generator(
+            f"JAX  {mode:>8s} {label_suffix}",
+            motion_gen, start_pose, goal_pose, subkey,
+            waypoint_poses=wp,
         )
         results.append(res)
 
         try:
-            print(f"[CUDA] {mode} — warm-up + timed run...")
-            res_cu = _run_trajopt(
-                f"CUDA {mode:>8s} spline",
-                init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
+            motion_gen_cuda = TrajoptMotionGenerator(
+                robot=robot,
+                robot_coll=robot_coll,
+                world_geoms=world_geoms,
+                ee_link_name=EE_LINK_NAME,
+                n_timesteps=N_TIMESTEPS,
+                n_batch=BATCH_SIZE,
+                noise_scale=NOISE_SCALE,
+                cartesian_spline_mode=mode,
+                trajopt_cfg=opt_cfg,
                 use_cuda=True,
+            )
+            key, subkey = jax.random.split(key)
+            print(f"[CUDA] {mode} {label_suffix} — warm-up + timed run...")
+            res_cu = _run_motion_generator(
+                f"CUDA {mode:>8s} {label_suffix}",
+                motion_gen_cuda, start_pose, goal_pose, subkey,
+                waypoint_poses=wp,
             )
             results.append(res_cu)
         except Exception as exc:
             print(f"  CUDA benchmark skipped: {exc}")
-
-    # --- Cartesian IK initialisation -----------------------------------------
-    print(f"\nBuilding Cartesian IK initial trajectories (B={BATCH_SIZE}, T={N_TIMESTEPS})...")
-    key, subkey = jax.random.split(key)
-    init_trajs_ik = make_cartesian_ik_init_trajs(
-        start       = start,
-        goal        = goal,
-        n_batch     = BATCH_SIZE,
-        n_timesteps = N_TIMESTEPS,
-        key         = subkey,
-        robot       = robot,
-        robot_coll  = robot_coll,
-        world_geoms = world_geoms,
-        noise_scale = NOISE_SCALE,
-    )
-    print(f"  init_trajs shape : {init_trajs_ik.shape}")
-
-    print("\n[JAX] Cartesian IK — warm-up + timed run...")
-    res = _run_trajopt(
-        "JAX      Cartesian IK",
-        init_trajs_ik, start, goal, robot, robot_coll, world_geoms, opt_cfg,
-    )
-    results.append(res)
-
-    try:
-        print("[CUDA] Cartesian IK — warm-up + timed run...")
-        res_cu = _run_trajopt(
-            "CUDA     Cartesian IK",
-            init_trajs_ik, start, goal, robot, robot_coll, world_geoms, opt_cfg,
-            use_cuda=True,
-        )
-        results.append(res_cu)
-    except Exception as exc:
-        print(f"  CUDA benchmark skipped: {exc}")
 
     # --- Results table -------------------------------------------------------
     print("\n" + "=" * 80)

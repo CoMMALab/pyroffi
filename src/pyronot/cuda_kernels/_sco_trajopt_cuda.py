@@ -98,6 +98,10 @@ def _extract_world_arrays(
             wg = wg.broadcast_to((1,))
             axes = (1,)
 
+        # Flatten multi-dimensional batch shapes to (N,) for the CUDA kernel.
+        if len(axes) > 1:
+            wg = wg.reshape((-1,))
+
         if isinstance(wg, Sphere):
             centers = np.asarray(wg.pose.translation(), dtype=np.float32)  # (M, 3)
             radii   = np.asarray(wg.radius,             dtype=np.float32)  # (M,)
