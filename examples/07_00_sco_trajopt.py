@@ -22,7 +22,7 @@ import yourdfpy
 from viser.extras import ViserUrdf
 
 from pyronot.motion_generators import TrajoptMotionGenerator
-from pyronot.optimization_engines import TrajOptConfig
+from pyronot.optimization_engines import ScoTrajOptConfig
 
 
 def main():
@@ -78,7 +78,7 @@ def main():
         ee_link_name=ee_link_name,
         n_timesteps=n_timesteps,
         cartesian_spline_mode="cubic",
-        trajopt_cfg=TrajOptConfig(
+        trajopt_cfg=ScoTrajOptConfig(
             n_outer_iters=50,
             n_inner_iters=100,
             m_lbfgs=6,

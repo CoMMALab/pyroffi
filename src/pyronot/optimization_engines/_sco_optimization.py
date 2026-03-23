@@ -47,7 +47,7 @@ _LS_ALPHAS = jnp.array([1.0, 0.5, 0.25, 0.1, 0.025])
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class TrajOptConfig:
+class ScoTrajOptConfig:
     """Hyper-parameters for the SCO TrajOpt solver."""
 
     # --- Outer SCO loop ---
@@ -106,6 +106,10 @@ class TrajOptConfig:
 
     Smaller temperature → closer to the true minimum but steeper gradients.
     """
+
+
+# Backward-compatible alias.
+TrajOptConfig = ScoTrajOptConfig
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +293,7 @@ def _lbfgs_inner_solve(
     J_k:     Float[Array, "T P DOF"],
     lower:   Float[Array, "DOF"],
     upper:   Float[Array, "DOF"],
-    cfg:     TrajOptConfig,
+    cfg:     ScoTrajOptConfig,
     w_coll:  Array,                    # traced scalar from outer carry
 ) -> Float[Array, "T DOF"]:
     """Solve the convex inner subproblem for a single trajectory with L-BFGS.
@@ -419,7 +423,7 @@ def _eval_cost(
     robot:      Robot,
     robot_coll: RobotCollision,
     world_geoms: tuple,
-    cfg:        TrajOptConfig,
+    cfg:        ScoTrajOptConfig,
 ) -> Array:
     """Full nonlinear cost at the final w_collision_max weight."""
     cost = cfg.w_smooth * _smoothness_cost(traj, cfg.w_vel, cfg.w_acc, cfg.w_jerk)
@@ -448,7 +452,7 @@ def _sco_trajopt_jax(
     robot:       Robot,
     robot_coll:  RobotCollision,
     world_geoms: tuple,
-    opt_cfg:     TrajOptConfig = TrajOptConfig(),
+    opt_cfg:     ScoTrajOptConfig = ScoTrajOptConfig(),
 ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"]]:
     lower = robot.joints.lower_limits
     upper = robot.joints.upper_limits
@@ -503,7 +507,7 @@ def sco_trajopt(
     robot:       Robot,
     robot_coll:  RobotCollision,
     world_geoms: tuple,
-    opt_cfg:     TrajOptConfig = TrajOptConfig(),
+    opt_cfg:     ScoTrajOptConfig = ScoTrajOptConfig(),
     *,
     use_cuda:    bool = False,
 ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"]]:

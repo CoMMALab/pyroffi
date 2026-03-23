@@ -27,7 +27,7 @@ from .._splines import (
 )
 from ..collision import RobotCollision
 from ..optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
-from ..optimization_engines._sco_optimization import TrajOptConfig, sco_trajopt
+from ..optimization_engines._sco_optimization import ScoTrajOptConfig, sco_trajopt
 
 
 @dataclass(frozen=True)
@@ -86,7 +86,7 @@ class TrajoptMotionGenerator:
     noise_scale: float = 0.05
     cartesian_spline_mode: SplineMode = "linear"
 
-    trajopt_cfg: TrajOptConfig = field(default_factory=TrajOptConfig)
+    trajopt_cfg: ScoTrajOptConfig = field(default_factory=ScoTrajOptConfig)
     ik_cfg: IKSeedConfig = field(default_factory=IKSeedConfig)
     use_cuda: bool = False
 

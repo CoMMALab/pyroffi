@@ -36,7 +36,7 @@ from jaxtyping import Float, Int
 if TYPE_CHECKING:
     from pyronot._robot import Robot
     from pyronot.collision._robot_collision import RobotCollisionSpherized
-    from pyronot.optimization_engines._sco_optimization import TrajOptConfig
+    from pyronot.optimization_engines._sco_optimization import ScoTrajOptConfig
 
 _LIB_NAME = "_sco_trajopt_cuda_lib.so"
 
@@ -156,7 +156,7 @@ def sco_trajopt_cuda(
     robot:       "Robot",
     robot_coll:  "RobotCollisionSpherized",
     world_geoms: tuple,
-    opt_cfg:     "TrajOptConfig",
+    opt_cfg:     "ScoTrajOptConfig",
     *,
     fd_eps: float = 1e-4,
 ) -> tuple[Float[Array, "T n_act"], Float[Array, "B"], Float[Array, "B T n_act"]]:
@@ -173,7 +173,7 @@ def sco_trajopt_cuda(
         robot:       Robot kinematics pytree (``Robot``).
         robot_coll:  Sphere-based collision model (``RobotCollisionSpherized``).
         world_geoms: Tuple of world collision geometry objects.
-        opt_cfg:     SCO hyperparameters (``TrajOptConfig``).
+        opt_cfg:     SCO hyperparameters (``ScoTrajOptConfig``).
         fd_eps:      Finite-difference step size for Jacobian (radians).
 
     Returns:
