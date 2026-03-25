@@ -25,16 +25,6 @@ namespace ffi = xla::ffi;
 // Increase if your robot has more joints.
 #define FK_MAX_JOINTS 64
 
-template <int THREADS>
-__device__ __forceinline__
-void fk_level_barrier() {
-    if constexpr (THREADS == 32) {
-        __syncwarp();
-    } else {
-        __syncthreads();
-    }
-}
-
 __device__ __forceinline__
 void fk_eval_joint(
     int j,
@@ -80,8 +70,10 @@ void fk_eval_joint(
 // ---------------------------------------------------------------------------
 
 /**
- * One CUDA block handles one batch element.
- * Threads in the block process joints in parallel, grouped by depth level.
+ * Warp-specialized FK:
+ *   - One warp handles one configuration.
+ *   - One block contains multiple warps -> multiple configurations in flight.
+ *   - Joints in each level are processed in parallel by warp lanes.
  *
  * @param cfg            (batch, n_act)        float32  actuated config
  * @param twists         (n_joints, 6)         float32  Lie-algebra twist / joint
@@ -112,12 +104,16 @@ void fk_kernel(const float* __restrict__ cfg,
                float*       __restrict__ out,
                int batch, int n_joints, int n_act, int n_levels)
 {
+    static_assert(THREADS % 32 == 0, "THREADS must be a multiple of warp size");
+    constexpr int WARP = 32;
+    constexpr int WARPS_PER_BLOCK = THREADS / WARP;
+    const int warp_id = threadIdx.x / WARP;
+    const int lane_id = threadIdx.x & (WARP - 1);
+    const unsigned FULL_MASK = 0xffffffffu;
+
     // ── Shared memory: robot parameters loaded once per block ───────────────
-    // With n_joints ≤ FK_MAX_JOINTS=64 the footprint is ~3.7 KB/block, well
-    // within the 48 KB limit.  All threads in the block collaborate on
-    // the initial load so every FK call reads from L1-backed shared memory
-    // instead of global DRAM.  The early-exit guard comes AFTER __syncthreads
-    // so out-of-range threads still contribute to the cooperative load.
+    // With n_joints ≤ FK_MAX_JOINTS=64 the footprint is small. Data is loaded
+    // once per block and amortized across WARPS_PER_BLOCK configurations.
     __shared__ float s_twists       [FK_MAX_JOINTS * 6];
     __shared__ float s_parent_tf    [FK_MAX_JOINTS * 7];
     __shared__ int   s_parent_idx   [FK_MAX_JOINTS];
@@ -144,8 +140,8 @@ void fk_kernel(const float* __restrict__ cfg,
         s_fk_level_starts[i] = fk_level_starts[i];
     __syncthreads();  // Ensure all robot data is visible before FK begins.
 
-    const int start_b = blockIdx.x;
-    const int stride_b = gridDim.x;
+    const int start_b = blockIdx.x * WARPS_PER_BLOCK + warp_id;
+    const int stride_b = gridDim.x * WARPS_PER_BLOCK;
 
     for (int b = start_b; b < batch; b += stride_b) {
         const float* cfg_b = cfg + (long long)b * n_act;
@@ -156,24 +152,24 @@ void fk_kernel(const float* __restrict__ cfg,
             const int end   = s_fk_level_starts[lvl + 1];
             const int width = end - begin;
 
-            // Fast path: one thread maps to one joint in this level.
-            if (width <= THREADS) {
-                if (threadIdx.x < width) {
-                    const int j = s_fk_level_joints[begin + threadIdx.x];
+            // Fast path: one lane maps to one joint in this level.
+            if (width <= WARP) {
+                if (lane_id < width) {
+                    const int j = s_fk_level_joints[begin + lane_id];
                     fk_eval_joint(
                         j, cfg_b, s_twists, s_parent_tf, s_parent_idx, s_act_idx,
                         s_mimic_mul, s_mimic_off, s_mimic_act_idx, out_b);
                 }
             } else {
                 // Fallback for unusually wide levels.
-                for (int idx = begin + threadIdx.x; idx < end; idx += THREADS) {
+                for (int idx = begin + lane_id; idx < end; idx += WARP) {
                     const int j = s_fk_level_joints[idx];
                     fk_eval_joint(
                         j, cfg_b, s_twists, s_parent_tf, s_parent_idx, s_act_idx,
                         s_mimic_mul, s_mimic_off, s_mimic_act_idx, out_b);
                 }
             }
-            fk_level_barrier<THREADS>();
+            __syncwarp(FULL_MASK);
         }
     }
 }
@@ -198,7 +194,10 @@ static inline ffi::Error launch_fk_kernel(
     int n_act,
     int n_levels)
 {
-    const int blocks = (batch < 65535) ? batch : 65535;
+    constexpr int WARP = 32;
+    constexpr int WARPS_PER_BLOCK = THREADS / WARP;
+    const int logical_blocks = (batch + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    const int blocks = (logical_blocks < 65535) ? logical_blocks : 65535;
     fk_kernel<THREADS><<<blocks, THREADS, 0, stream>>>(
         cfg,
         twists,
@@ -257,28 +256,8 @@ static ffi::Error FkCudaImpl(
         );
     }
 
-    // Select a compact launch width for FK_MAX_JOINTS <= 64.
-    if (n_joints <= 32) {
-        return launch_fk_kernel<32>(
-            stream,
-            cfg.typed_data(),
-            twists.typed_data(),
-            parent_tf.typed_data(),
-            parent_idx.typed_data(),
-            act_idx.typed_data(),
-            mimic_mul.typed_data(),
-            mimic_off.typed_data(),
-            mimic_act_idx.typed_data(),
-            topo_inv.typed_data(),
-            fk_level_starts.typed_data(),
-            fk_level_joints.typed_data(),
-            out->typed_data(),
-            batch,
-            n_joints,
-            n_act,
-            n_levels);
-    }
-    return launch_fk_kernel<64>(
+    // Throughput-oriented launch: 4 warps/block, one configuration per warp.
+    return launch_fk_kernel<128>(
         stream,
         cfg.typed_data(),
         twists.typed_data(),
