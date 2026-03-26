@@ -13,6 +13,15 @@ Correctness
     For each solver the median position / rotation errors across all target
     poses are reported.  JAX vs CUDA agreement is checked at batch level.
 
+Collision-free IK
+    When COLLISION_FREE=True a static obstacle scene is created (or loaded from
+    ENV_FILE) and each solver is re-run with a differentiable collision penalty.
+    Results include a coll_free column showing how many solutions are actually
+    collision-free (min signed distance > 0).
+
+    The scene is saved to ENV_FILE as JSON with a ``curobo_world_model`` key
+    that can be fed directly into a CuRobo WorldConfig for fair comparison.
+
 Learned-IK
     The Learned-IK solver requires a pre-trained Flax model.  Train one with:
         python train_learned_ik.py --robot panda
@@ -39,7 +48,11 @@ Prerequisites:
 from __future__ import annotations
 
 import contextlib
+import csv
+import datetime
 import functools
+import json
+import pathlib
 import threading
 import time
 from dataclasses import dataclass
@@ -50,6 +63,8 @@ import jaxlie
 import numpy as np
 import pyronot as pk
 from robot_descriptions.loaders.yourdfpy import load_robot_description
+
+from pyronot.collision import Box, HalfSpace, RobotCollision, Sphere, collide
 
 # Optional NVML for GPU monitoring (nvidia-ml-py / pynvml).
 try:
@@ -225,6 +240,27 @@ POS_THR_M   = 1e-3
 ROT_THR_RAD = 0.05
 
 # ---------------------------------------------------------------------------
+# Collision-free IK configuration
+# ---------------------------------------------------------------------------
+
+# Set to False to skip the collision-free IK section entirely.
+COLLISION_FREE = True
+
+# Where to persist the obstacle scene.  Reuse this file in curobo / pyroki
+# benchmarks by loading the ``curobo_world_model`` key.
+ENV_FILE = pathlib.Path(__file__).resolve().parent.parent / "resources" / "bench_env.json"
+
+# CSV output path.  Results are appended (not overwritten) so multiple runs
+# accumulate.  Set to None to disable CSV output.
+CSV_FILE = pathlib.Path(__file__).resolve().parent.parent / "resources" / "bench_ik_results.csv"
+
+# Smoothing radius [m] for the soft collision penalty (softplus approximation).
+_COLL_EPS = 0.005
+
+# Penalty weight applied to the collision cost inside the IK objective.
+COLL_WEIGHT = 1e8
+
+# ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
 
@@ -372,6 +408,28 @@ def _seq_row(label: str, results: list[SolveResult]) -> tuple[str, dict]:
     return _table_row(label, vals), {"t_med": float(np.median(t))}
 
 
+def _seq_row_coll(
+    label: str, results: list[SolveResult], coll_free: int,
+) -> tuple[str, dict]:
+    """Like _seq_row but with an extra coll_free column."""
+    pos    = np.array([r.pos_err * 1e3 for r in results])
+    rot    = np.array([r.rot_err       for r in results])
+    t      = np.array([r.time_ms       for r in results])
+    solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
+    n      = len(results)
+    vals = [
+        f"{np.median(t):.3f}",
+        f"{np.percentile(t, 95):.3f}",
+        f"{np.median(pos):.4f}",
+        f"{np.percentile(pos, 95):.4f}",
+        f"{np.median(rot):.4f}",
+        f"{np.percentile(rot, 95):.4f}",
+        f"{solved}/{n}",
+        f"{coll_free}/{n}",
+    ]
+    return _table_row(label, vals), {"t_med": float(np.median(t))}
+
+
 def _batch_row(label: str, result: BatchResult) -> tuple[str, dict]:
     pos    = result.pos_errs * 1e3
     rot    = result.rot_errs
@@ -398,6 +456,36 @@ def _batch_row(label: str, result: BatchResult) -> tuple[str, dict]:
     return _table_row(label, vals), {}
 
 
+def _batch_row_coll(
+    label: str, result: BatchResult, coll_free: int,
+) -> tuple[str, dict]:
+    """Like _batch_row but with an extra coll_free column."""
+    pos    = result.pos_errs * 1e3
+    rot    = result.rot_errs
+    solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
+    n      = len(pos)
+
+    def _fmt_pct(v: float) -> str:
+        return f"{v:.0f}%" if not np.isnan(v) else "n/a"
+
+    def _fmt_mb(v: float) -> str:
+        return f"{v:.0f}" if not np.isnan(v) else "n/a"
+
+    vals = [
+        f"{result.time_ms:.3f}",
+        f"{np.median(pos):.4f}",
+        f"{np.percentile(pos, 95):.4f}",
+        f"{np.median(rot):.4f}",
+        f"{np.percentile(rot, 95):.4f}",
+        f"{solved}/{n}",
+        f"{coll_free}/{n}",
+        _fmt_pct(result.peak_gpu_util),
+        _fmt_pct(result.avg_gpu_util),
+        _fmt_mb(result.peak_vram_mb),
+    ]
+    return _table_row(label, vals), {}
+
+
 def _make_batched_jax_solver(base_fn, ik_kwargs):
     """Create a JITted batched JAX solver (vmap over targets)."""
     def _solve_batch(
@@ -416,6 +504,250 @@ def _make_batched_jax_solver(base_fn, ik_kwargs):
         return jax.vmap(_single, in_axes=(0, 0, 0))(target_poses, rng_keys, previous_cfgs)
 
     return jax.jit(_solve_batch, static_argnames=("target_link_indices",))
+
+
+# ---------------------------------------------------------------------------
+# Collision environment helpers
+# ---------------------------------------------------------------------------
+
+def _build_and_save_env(path: pathlib.Path) -> dict:
+    """Define a static Panda obstacle scene, persist it as JSON, and return it.
+
+    The JSON includes a ``curobo_world_model`` section (x,y,z,qw,qx,qy,qz
+    pose convention) that can be loaded directly into a CuRobo WorldConfig::
+
+        from curobo.geom.types import WorldConfig
+        import json
+        env = json.load(open("resources/bench_env.json"))
+        world_cfg = WorldConfig.from_dict(env["curobo_world_model"])
+    """
+    env = {
+        "description": (
+            "Static collision benchmark environment for Panda robot. "
+            "Load in curobo via WorldConfig.from_dict(env['curobo_world_model'])."
+        ),
+        # Floor half-space.
+        "floor": {"point": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0]},
+        # Sphere obstacles scattered through the Panda workspace.
+        "spheres": [
+            {"name": "center_obs", "center": [0.40,  0.00, 0.50], "radius": 0.10},
+            {"name": "left_obs",   "center": [0.20,  0.40, 0.40], "radius": 0.08},
+            {"name": "right_obs",  "center": [0.30, -0.30, 0.60], "radius": 0.08},
+        ],
+        # Box obstacles (table pedestal in front of the robot).
+        "cuboids": [
+            {
+                "name":   "table",
+                "center": [0.50, 0.00, 0.20],
+                "dims":   [0.40, 0.60, 0.40],   # length × width × height
+                "wxyz":   [1.0, 0.0, 0.0, 0.0],
+            },
+        ],
+        # CuRobo-compatible world model (pose: x,y,z,qw,qx,qy,qz).
+        "curobo_world_model": {
+            "cuboid": {
+                "table": {
+                    "dims": [0.40, 0.60, 0.40],
+                    "pose": [0.50, 0.00, 0.20, 1.0, 0.0, 0.0, 0.0],
+                },
+            },
+            "sphere": {
+                "center_obs": {"radius": 0.10, "pose": [0.40,  0.00, 0.50, 1, 0, 0, 0]},
+                "left_obs":   {"radius": 0.08, "pose": [0.20,  0.40, 0.40, 1, 0, 0, 0]},
+                "right_obs":  {"radius": 0.08, "pose": [0.30, -0.30, 0.60, 1, 0, 0, 0]},
+            },
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(env, indent=2))
+    return env
+
+
+def _env_to_geoms(env: dict):
+    """Build pyronot CollGeom objects from an env dict.
+
+    Returns:
+        floor_geom: HalfSpace
+        obs_geoms:  list of Sphere / Box
+    """
+    f = env["floor"]
+    floor_geom = HalfSpace.from_point_and_normal(
+        np.array(f["point"],  dtype=np.float32),
+        np.array(f["normal"], dtype=np.float32),
+    )
+    obs_geoms: list = []
+    for s in env.get("spheres", []):
+        obs_geoms.append(
+            Sphere.from_center_and_radius(
+                np.array(s["center"], dtype=np.float32),
+                np.array([s["radius"]], dtype=np.float32),
+            )
+        )
+    for b in env.get("cuboids", []):
+        d = b["dims"]
+        obs_geoms.append(
+            Box.from_center_and_dimensions(
+                np.array(b["center"], dtype=np.float32),
+                float(d[0]), float(d[1]), float(d[2]),
+                wxyz=np.array(b["wxyz"], dtype=np.float32),
+            )
+        )
+    return floor_geom, obs_geoms
+
+
+# ---------------------------------------------------------------------------
+# CSV output
+# ---------------------------------------------------------------------------
+
+_CSV_FIELDS = [
+    "timestamp", "robot", "mode", "solver", "collision_free",
+    "n_problems", "n_timed",
+    "t_med_ms", "t_p95_ms",
+    "pos_med_mm", "pos_p95_mm",
+    "rot_med_rad", "rot_p95_rad",
+    "success_n", "success_total",
+    "coll_free_n",
+    "peak_gpu_pct", "avg_gpu_pct", "peak_vram_mb",
+]
+
+
+def _write_csv(
+    path: pathlib.Path,
+    timestamp: str,
+    seq_results: dict[str, list[SolveResult]],
+    batch_results: dict[str, BatchResult],
+    seq_coll_results: dict[str, list[SolveResult]],
+    batch_coll_results: dict[str, BatchResult],
+    seq_coll_free: dict[str, int],
+    batch_coll_free: dict[str, int],
+) -> None:
+    """Append all benchmark results to *path* as CSV rows."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+
+    rows: list[dict] = []
+
+    # -- Sequential (no collision) ------------------------------------------
+    for solver, results in seq_results.items():
+        pos = np.array([r.pos_err * 1e3 for r in results])
+        rot = np.array([r.rot_err       for r in results])
+        t   = np.array([r.time_ms       for r in results])
+        solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
+        rows.append({
+            "timestamp":      timestamp,
+            "robot":          ROBOT_NAME,
+            "mode":           "sequential",
+            "solver":         solver,
+            "collision_free": False,
+            "n_problems":     len(results),
+            "n_timed":        N_TIMED,
+            "t_med_ms":       round(float(np.median(t)),        6),
+            "t_p95_ms":       round(float(np.percentile(t, 95)), 6),
+            "pos_med_mm":     round(float(np.median(pos)),       6),
+            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
+            "rot_med_rad":    round(float(np.median(rot)),       6),
+            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
+            "success_n":      solved,
+            "success_total":  len(results),
+            "coll_free_n":    "",
+            "peak_gpu_pct":   "",
+            "avg_gpu_pct":    "",
+            "peak_vram_mb":   "",
+        })
+
+    # -- Batch (no collision) ------------------------------------------------
+    for solver, result in batch_results.items():
+        pos    = result.pos_errs * 1e3
+        rot    = result.rot_errs
+        solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
+
+        def _fmtf(v): return round(float(v), 6) if not np.isnan(v) else ""
+
+        rows.append({
+            "timestamp":      timestamp,
+            "robot":          ROBOT_NAME,
+            "mode":           "batch",
+            "solver":         solver,
+            "collision_free": False,
+            "n_problems":     len(pos),
+            "n_timed":        N_TIMED,
+            "t_med_ms":       round(result.time_ms, 6),
+            "t_p95_ms":       "",
+            "pos_med_mm":     round(float(np.median(pos)),        6),
+            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
+            "rot_med_rad":    round(float(np.median(rot)),         6),
+            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
+            "success_n":      solved,
+            "success_total":  len(pos),
+            "coll_free_n":    "",
+            "peak_gpu_pct":   _fmtf(result.peak_gpu_util),
+            "avg_gpu_pct":    _fmtf(result.avg_gpu_util),
+            "peak_vram_mb":   _fmtf(result.peak_vram_mb),
+        })
+
+    # -- Sequential (collision-free) -----------------------------------------
+    for solver, results in seq_coll_results.items():
+        pos = np.array([r.pos_err * 1e3 for r in results])
+        rot = np.array([r.rot_err       for r in results])
+        t   = np.array([r.time_ms       for r in results])
+        solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
+        rows.append({
+            "timestamp":      timestamp,
+            "robot":          ROBOT_NAME,
+            "mode":           "sequential",
+            "solver":         solver,
+            "collision_free": True,
+            "n_problems":     len(results),
+            "n_timed":        N_TIMED,
+            "t_med_ms":       round(float(np.median(t)),          6),
+            "t_p95_ms":       round(float(np.percentile(t, 95)),  6),
+            "pos_med_mm":     round(float(np.median(pos)),         6),
+            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
+            "rot_med_rad":    round(float(np.median(rot)),         6),
+            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
+            "success_n":      solved,
+            "success_total":  len(results),
+            "coll_free_n":    seq_coll_free.get(solver, ""),
+            "peak_gpu_pct":   "",
+            "avg_gpu_pct":    "",
+            "peak_vram_mb":   "",
+        })
+
+    # -- Batch (collision-free) ----------------------------------------------
+    for solver, result in batch_coll_results.items():
+        pos    = result.pos_errs * 1e3
+        rot    = result.rot_errs
+        solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
+
+        def _fmtf(v): return round(float(v), 6) if not np.isnan(v) else ""  # noqa: F811
+
+        rows.append({
+            "timestamp":      timestamp,
+            "robot":          ROBOT_NAME,
+            "mode":           "batch",
+            "solver":         solver,
+            "collision_free": True,
+            "n_problems":     len(pos),
+            "n_timed":        N_TIMED,
+            "t_med_ms":       round(result.time_ms, 6),
+            "t_p95_ms":       "",
+            "pos_med_mm":     round(float(np.median(pos)),         6),
+            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
+            "rot_med_rad":    round(float(np.median(rot)),         6),
+            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
+            "success_n":      solved,
+            "success_total":  len(pos),
+            "coll_free_n":    batch_coll_free.get(solver, ""),
+            "peak_gpu_pct":   _fmtf(result.peak_gpu_util),
+            "avg_gpu_pct":    _fmtf(result.avg_gpu_util),
+            "peak_vram_mb":   _fmtf(result.peak_vram_mb),
+        })
+
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +777,71 @@ def main() -> None:  # noqa: C901
     )
     print(f"  {n_act} actuated joints, target link: '{TARGET_LINK_NAME}'")
     print(f"  Fixed joints: {[n for n in FIXED_JOINT_NAMES if n in robot.joints.actuated_names]}")
+
+    # ------------------------------------------------------------------
+    # Collision setup
+    # ------------------------------------------------------------------
+    robot_coll     = None
+    _floor_geom    = None
+    _obs_geoms: list = []
+    _collision_penalty = None
+    coll_kwargs_jax  = {}
+    coll_kwargs_cuda = {}
+
+    if COLLISION_FREE:
+        print("\nSetting up collision environment ...")
+        robot_coll = RobotCollision.from_urdf(urdf)
+
+        if ENV_FILE.exists():
+            env_dict = json.loads(ENV_FILE.read_text())
+            print(f"  Loaded environment from {ENV_FILE}")
+        else:
+            env_dict = _build_and_save_env(ENV_FILE)
+            print(f"  Created and saved environment to {ENV_FILE}")
+
+        _floor_geom, _obs_geoms = _env_to_geoms(env_dict)
+        print(f"  Floor plane + {len([s for s in env_dict.get('spheres',[])])} spheres"
+              f" + {len(env_dict.get('cuboids',[]))} cuboids")
+
+        # vmap collide over the link axis of the robot's capsule representation.
+        _coll_vs_world = jax.vmap(collide, in_axes=(-2, None), out_axes=-2)
+
+        # All obstacles are captured in the closure — no dynamic arg needed.
+        def _collision_penalty(cfg, robot_arg, _dummy):
+            coll_geom = robot_coll.at_config(robot_arg, cfg)
+            penalty   = jnp.zeros(())
+            d = _coll_vs_world(coll_geom, _floor_geom.broadcast_to((1,)))
+            penalty = penalty + jnp.sum(jax.nn.softplus(-d / _COLL_EPS) * _COLL_EPS)
+            for obs in _obs_geoms:
+                d = _coll_vs_world(coll_geom, obs.broadcast_to((1,)))
+                penalty = penalty + jnp.sum(jax.nn.softplus(-d / _COLL_EPS) * _COLL_EPS)
+            return penalty
+
+        _dummy = jnp.zeros(())
+
+        # JAX solvers use ``constraint_fns`` (tuple of callables).
+        coll_kwargs_jax = dict(
+            constraint_fns    = (_collision_penalty,),
+            constraint_args   = (_dummy,),
+            constraint_weights = jnp.array([COLL_WEIGHT]),
+        )
+        # CUDA wrappers use ``constraints`` (Sequence[Callable]).
+        coll_kwargs_cuda = dict(
+            constraints        = [_collision_penalty],
+            constraint_args    = [_dummy],
+            constraint_weights = [COLL_WEIGHT],
+        )
+
+        # JIT a fast per-config collision checker for post-solve reporting.
+        def _min_coll_dist_single(cfg):
+            coll_geom = robot_coll.at_config(robot, cfg)
+            dists = [jnp.min(_coll_vs_world(coll_geom, _floor_geom.broadcast_to((1,))))]
+            for obs in _obs_geoms:
+                dists.append(jnp.min(_coll_vs_world(coll_geom, obs.broadcast_to((1,)))))
+            return jnp.min(jnp.stack(dists))
+
+        _check_coll_jit        = jax.jit(_min_coll_dist_single)
+        _check_coll_batch_jit  = jax.jit(jax.vmap(_min_coll_dist_single))
 
     # ------------------------------------------------------------------
     # Learned-IK: load pre-trained Flax model (optional)
@@ -564,6 +961,48 @@ def main() -> None:  # noqa: C901
     )
     jit_mppi_batch = _make_batched_jax_solver(mppi_ik_solve, IK_KWARGS_MPPI_JAX)
 
+    # Collision-aware JAX sequential solvers.
+    # ``constraint_fns`` must be in static_argnames (it's a tuple of callables).
+    if COLLISION_FREE:
+        jit_hjcd_coll = jax.jit(
+            functools.partial(hjcd_solve, **IK_KWARGS_HJCD_JAX),
+            static_argnames=(
+                "target_link_indices", "num_seeds", "coarse_max_iter",
+                "lm_max_iter", "constraint_fns",
+            ),
+        )
+        jit_ls_coll = jax.jit(
+            functools.partial(ls_ik_solve, **IK_KWARGS_LS_JAX),
+            static_argnames=("target_link_indices", "num_seeds", "max_iter", "constraint_fns"),
+        )
+        jit_sqp_coll = jax.jit(
+            functools.partial(sqp_ik_solve, **IK_KWARGS_SQP_JAX),
+            static_argnames=(
+                "target_link_indices", "num_seeds", "max_iter",
+                "n_inner_iters", "constraint_fns",
+            ),
+        )
+        jit_mppi_coll = jax.jit(
+            functools.partial(mppi_ik_solve, **IK_KWARGS_MPPI_JAX),
+            static_argnames=(
+                "target_link_indices", "num_seeds", "n_particles",
+                "n_mppi_iters", "n_lbfgs_iters", "m_lbfgs", "constraint_fns",
+            ),
+        )
+        # Collision-aware batch JAX solvers (collision baked into ik_kwargs).
+        jit_hjcd_coll_batch = _make_batched_jax_solver(
+            hjcd_solve, {**IK_KWARGS_HJCD_JAX, **coll_kwargs_jax}
+        )
+        jit_ls_coll_batch = _make_batched_jax_solver(
+            ls_ik_solve, {**IK_KWARGS_LS_JAX, **coll_kwargs_jax}
+        )
+        jit_sqp_coll_batch = _make_batched_jax_solver(
+            sqp_ik_solve, {**IK_KWARGS_SQP_JAX, **coll_kwargs_jax}
+        )
+        jit_mppi_coll_batch = _make_batched_jax_solver(
+            mppi_ik_solve, {**IK_KWARGS_MPPI_JAX, **coll_kwargs_jax}
+        )
+
     warmup_seq = [
         ("HJCD-JAX",   jit_hjcd,          {}),
         ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
@@ -576,6 +1015,17 @@ def main() -> None:  # noqa: C901
     ]
     if _learned_ik_available:
         warmup_seq.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
+    if COLLISION_FREE:
+        warmup_seq += [
+            ("HJCD-JAX-COLL",  jit_hjcd_coll,         coll_kwargs_jax),
+            ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("LS-JAX-COLL",    jit_ls_coll,            coll_kwargs_jax),
+            ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_cuda}),
+            ("SQP-JAX-COLL",   jit_sqp_coll,           coll_kwargs_jax),
+            ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
+            ("MPPI-JAX-COLL",  jit_mppi_coll,          coll_kwargs_jax),
+            ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+        ]
 
     warmup_batch_jax = [
         ("HJCD-JAX-BATCH",  jit_hjcd_batch,  {}),
@@ -585,12 +1035,27 @@ def main() -> None:  # noqa: C901
     ]
     if _learned_ik_available:
         warmup_batch_jax.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}))
+    if COLLISION_FREE:
+        warmup_batch_jax += [
+            ("HJCD-JAX-COLL-BATCH", jit_hjcd_coll_batch, {}),
+            ("LS-JAX-COLL-BATCH",   jit_ls_coll_batch,   {}),
+            ("SQP-JAX-COLL-BATCH",  jit_sqp_coll_batch,  {}),
+            ("MPPI-JAX-COLL-BATCH", jit_mppi_coll_batch, {}),
+        ]
+
     warmup_batch_cuda = [
         ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
         ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
         ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
         ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
     ]
+    if COLLISION_FREE:
+        warmup_batch_cuda += [
+            ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_cuda}),
+            ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
+            ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+        ]
 
     tli = (target_link_index,)
 
@@ -646,6 +1111,33 @@ def main() -> None:  # noqa: C901
             fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs,
         )
 
+    # ------------------------------------------------------------------
+    # Sequential evaluation — collision-free IK
+    # ------------------------------------------------------------------
+    seq_coll_results: dict[str, list[SolveResult]] = {}
+
+    if COLLISION_FREE:
+        print(f"\n{'─'*80}")
+        print("Sequential evaluation — collision-free IK ...")
+        print(f"{'─'*80}")
+
+        seq_coll_solvers = [
+            ("HJCD-JAX",  jit_hjcd_coll,        coll_kwargs_jax),
+            ("HJCD-CUDA", hjcd_solve_cuda,       {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("LS-JAX",    jit_ls_coll,           coll_kwargs_jax),
+            ("LS-CUDA",   ls_ik_solve_cuda,      {**IK_KWARGS_LS_CUDA,   **coll_kwargs_cuda}),
+            ("SQP-JAX",   jit_sqp_coll,          coll_kwargs_jax),
+            ("SQP-CUDA",  sqp_ik_solve_cuda,     {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
+            ("MPPI-JAX",  jit_mppi_coll,         coll_kwargs_jax),
+            ("MPPI-CUDA", mppi_ik_solve_cuda,    {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+        ]
+
+        for name, fn, kwargs in seq_coll_solvers:
+            print(f"  Running {name}-COLL ...")
+            seq_coll_results[name] = _run_solver_sequential(
+                fn, robot, target_link_index, target_poses,
+                fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs,
+            )
 
     # ------------------------------------------------------------------
     # Batch evaluation (JAX + CUDA batch solvers)
@@ -676,6 +1168,33 @@ def main() -> None:  # noqa: C901
             fixed_joint_mask, rng, previous_cfgs_batch, kwargs,
         )
 
+    # ------------------------------------------------------------------
+    # Batch evaluation — collision-free IK
+    # ------------------------------------------------------------------
+    batch_coll_results: dict[str, BatchResult] = {}
+
+    if COLLISION_FREE:
+        print(f"\n{'─'*80}")
+        print("Batch evaluation — collision-free IK ...")
+        print(f"{'─'*80}")
+
+        batch_coll_solvers = [
+            ("LS-JAX",    jit_ls_coll_batch,           {},                                     rng_keys_batch),
+            ("HJCD-JAX",  jit_hjcd_coll_batch,          {},                                     rng_keys_batch),
+            ("SQP-JAX",   jit_sqp_coll_batch,           {},                                     rng_keys_batch),
+            ("MPPI-JAX",  jit_mppi_coll_batch,          {},                                     rng_keys_batch),
+            ("LS-CUDA",   ls_ik_solve_cuda_batch,       {**IK_KWARGS_LS_CUDA,   **coll_kwargs_cuda}, rng0),
+            ("HJCD-CUDA", hjcd_solve_cuda_batch,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0),
+            ("SQP-CUDA",  sqp_ik_solve_cuda_batch,      {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0),
+            ("MPPI-CUDA", mppi_ik_solve_cuda_batch,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0),
+        ]
+
+        for name, fn, kwargs, rng in batch_coll_solvers:
+            print(f"  Running {name}-COLL-BATCH ...")
+            batch_coll_results[name] = _run_solver_batch(
+                fn, robot, target_link_index, target_poses_stacked,
+                fixed_joint_mask, rng, previous_cfgs_batch, kwargs,
+            )
 
     # ------------------------------------------------------------------
     # Results tables
@@ -685,6 +1204,11 @@ def main() -> None:  # noqa: C901
     batch_cols = ["ms/prob",   "pos_med(mm)", "pos_p95(mm)",
                   "rot_med(rad)", "rot_p95(rad)", "success",
                   "gpu_pk(%)", "gpu_avg(%)", "vram_pk(MB)"]
+
+    seq_coll_cols   = seq_cols   + ["coll_free"]
+    batch_coll_cols = ["ms/prob",   "pos_med(mm)", "pos_p95(mm)",
+                       "rot_med(rad)", "rot_p95(rad)", "success", "coll_free",
+                       "gpu_pk(%)", "gpu_avg(%)", "vram_pk(MB)"]
 
     seq_order = [
         "HJCD-JAX", "HJCD-CUDA",
@@ -704,6 +1228,19 @@ def main() -> None:  # noqa: C901
     if _learned_ik_available:
         batch_order.append("Learned-JAX-BATCH")
 
+    coll_seq_order = [
+        "HJCD-JAX", "HJCD-CUDA",
+        "LS-JAX",   "LS-CUDA",
+        "SQP-JAX",  "SQP-CUDA",
+        "MPPI-JAX", "MPPI-CUDA",
+    ]
+    coll_batch_order = [
+        "HJCD-JAX", "HJCD-CUDA",
+        "LS-JAX",   "LS-CUDA",
+        "SQP-JAX",  "SQP-CUDA",
+        "MPPI-JAX", "MPPI-CUDA",
+    ]
+
     print(f"\n{'='*80}")
     print(f"Sequential results — per-problem latency  (N={N_TARGETS}, timed={N_TIMED})")
     print(f"{'='*80}")
@@ -721,6 +1258,59 @@ def main() -> None:  # noqa: C901
     for label in batch_order:
         row, _ = _batch_row(label, batch_results[label])
         print(row)
+
+    if COLLISION_FREE:
+        # Compute coll_free counts for sequential results.
+        seq_coll_free: dict[str, int] = {}
+        for name, results in seq_coll_results.items():
+            count = sum(
+                float(_check_coll_jit(jnp.array(r.cfg))) > 0
+                for r in results
+            )
+            seq_coll_free[name] = count
+
+        # Compute coll_free counts for batch results.
+        batch_coll_free: dict[str, int] = {}
+        for name, result in batch_coll_results.items():
+            dists = np.array(_check_coll_batch_jit(jnp.array(result.cfgs)))
+            batch_coll_free[name] = int(np.sum(dists > 0))
+
+        print(f"\n{'='*80}")
+        print(f"Sequential results — COLLISION-FREE IK  (N={N_TARGETS}, timed={N_TIMED})")
+        print(f"  Scene: {ENV_FILE}")
+        print(f"  Obstacles: floor + {len([s for s in env_dict.get('spheres',[])])} spheres"
+              f" + {len(env_dict.get('cuboids',[]))} cuboids")
+        print(f"  coll_free: solutions with min signed dist > 0 (all links clear of all obstacles)")
+        print(f"{'='*80}")
+        print(_table_header(seq_coll_cols))
+        print(_table_sep(len(seq_coll_cols)))
+        for label in coll_seq_order:
+            row, _ = _seq_row_coll(label, seq_coll_results[label], seq_coll_free[label])
+            print(row)
+
+        print(f"\n{'='*80}")
+        print(f"Batch results — COLLISION-FREE IK  (N={N_TARGETS_BATCH}, timed={N_TIMED})")
+        print(f"{'='*80}")
+        print(_table_header(batch_coll_cols))
+        print(_table_sep(len(batch_coll_cols)))
+        for label in coll_batch_order:
+            row, _ = _batch_row_coll(label, batch_coll_results[label], batch_coll_free[label])
+            print(row)
+
+    # ------------------------------------------------------------------
+    # CSV output
+    # ------------------------------------------------------------------
+    if CSV_FILE is not None:
+        ts = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        _write_csv(
+            CSV_FILE, ts,
+            seq_results, batch_results,
+            seq_coll_results, batch_coll_results,
+            seq_coll_free if COLLISION_FREE else {},
+            batch_coll_free if COLLISION_FREE else {},
+        )
+        print(f"\nResults appended to {CSV_FILE}")
+
     print()
 
 

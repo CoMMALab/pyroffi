@@ -1,0 +1,123 @@
+{
+  "description": "Static collision benchmark environment for Panda robot. Load in curobo via WorldConfig.from_dict(env['curobo_world_model']).",
+  "floor": {
+    "point": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "normal": [
+      0.0,
+      0.0,
+      1.0
+    ]
+  },
+  "spheres": [
+    {
+      "name": "center_obs",
+      "center": [
+        0.4,
+        0.0,
+        0.5
+      ],
+      "radius": 0.1
+    },
+    {
+      "name": "left_obs",
+      "center": [
+        0.2,
+        0.4,
+        0.4
+      ],
+      "radius": 0.08
+    },
+    {
+      "name": "right_obs",
+      "center": [
+        0.3,
+        -0.3,
+        0.6
+      ],
+      "radius": 0.08
+    }
+  ],
+  "cuboids": [
+    {
+      "name": "table",
+      "center": [
+        0.5,
+        0.0,
+        0.2
+      ],
+      "dims": [
+        0.4,
+        0.6,
+        0.4
+      ],
+      "wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "curobo_world_model": {
+    "cuboid": {
+      "table": {
+        "dims": [
+          0.4,
+          0.6,
+          0.4
+        ],
+        "pose": [
+          0.5,
+          0.0,
+          0.2,
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "sphere": {
+      "center_obs": {
+        "radius": 0.1,
+        "pose": [
+          0.4,
+          0.0,
+          0.5,
+          1,
+          0,
+          0,
+          0
+        ]
+      },
+      "left_obs": {
+        "radius": 0.08,
+        "pose": [
+          0.2,
+          0.4,
+          0.4,
+          1,
+          0,
+          0,
+          0
+        ]
+      },
+      "right_obs": {
+        "radius": 0.08,
+        "pose": [
+          0.3,
+          -0.3,
+          0.6,
+          1,
+          0,
+          0,
+          0
+        ]
+      }
+    }
+  }
+}

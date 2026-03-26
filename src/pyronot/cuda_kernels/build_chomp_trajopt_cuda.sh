@@ -3,8 +3,16 @@
 #
 # Usage (from repo root):
 #   bash src/pyronot/cuda_kernels/build_chomp_trajopt_cuda.sh
+#   bash src/pyronot/cuda_kernels/build_chomp_trajopt_cuda.sh --debug
 
 set -euo pipefail
+
+DEBUG=0
+for arg in "$@"; do
+  case "$arg" in
+    --debug) DEBUG=1 ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/_chomp_trajopt_cuda_kernel.cu"
@@ -21,8 +29,14 @@ fi
 
 GPU_ARCH="${GPU_ARCH:--arch=native}"
 
+NVCC_OPT="-O3"
+if [ "${DEBUG}" -eq 1 ]; then
+  NVCC_OPT="-O0 -G -lineinfo"
+  echo "Building in DEBUG mode (with -G for Nsight Compute)..."
+fi
+
 nvcc \
-  -O3 \
+  ${NVCC_OPT} \
   -std=c++17 \
   ${GPU_ARCH} \
   --shared \

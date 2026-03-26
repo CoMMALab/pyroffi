@@ -3,6 +3,7 @@
 #
 # Usage (from repo root):
 #   bash src/pyronot/cuda_kernels/build_collision_cuda.sh
+#   bash src/pyronot/cuda_kernels/build_collision_cuda.sh --debug
 #
 # Requirements:
 #   - nvcc (CUDA toolkit)
@@ -13,6 +14,13 @@
 #   GPU_ARCH   override the target architecture, e.g. GPU_ARCH=-arch=sm_80
 
 set -euo pipefail
+
+DEBUG=0
+for arg in "$@"; do
+  case "$arg" in
+    --debug) DEBUG=1 ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/_collision_cuda_kernel.cu"
@@ -32,8 +40,14 @@ fi
 # -arch=native (CUDA 11.6+) targets the installed GPU automatically.
 GPU_ARCH="${GPU_ARCH:--arch=native}"
 
+NVCC_OPT="-O3"
+if [ "${DEBUG}" -eq 1 ]; then
+  NVCC_OPT="-O0 -G -lineinfo"
+  echo "Building in DEBUG mode (with -G for Nsight Compute)..."
+fi
+
 nvcc \
-  -O3 \
+  ${NVCC_OPT} \
   -std=c++17 \
   ${GPU_ARCH} \
   --shared \
