@@ -16,11 +16,39 @@
 set -euo pipefail
 
 DEBUG=0
-for arg in "$@"; do
-  case "$arg" in
-    --debug) DEBUG=1 ;;
+MAX_JOINTS_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --max-joints)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --max-joints requires an integer value"
+        exit 1
+      fi
+      MAX_JOINTS_OVERRIDE="$2"
+      shift 2
+      ;;
+    --max-joints=*)
+      MAX_JOINTS_OVERRIDE="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1"
+      exit 1
+      ;;
   esac
 done
+
+if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
+  if ! [[ "${MAX_JOINTS_OVERRIDE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --max-joints must be a positive integer, got '${MAX_JOINTS_OVERRIDE}'"
+    exit 1
+  fi
+  echo "Note: --max-joints=${MAX_JOINTS_OVERRIDE} ignored for collision kernel build"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/_collision_cuda_kernel.cu"

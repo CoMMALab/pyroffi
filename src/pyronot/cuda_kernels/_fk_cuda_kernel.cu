@@ -117,8 +117,10 @@ void fk_kernel_warp(const float* __restrict__ cfg,
     float* out_b = out + (long long)b * n_joints * 7;
 
     // Sub-group mask: only the lanes belonging to our batch item.
-    const unsigned sub_mask = ((1u << LANES_PER_ITEM) - 1u)
-                              << (sub_group * LANES_PER_ITEM);
+    const unsigned sub_mask = (LANES_PER_ITEM == 32)
+                              ? 0xffffffffu
+                              : (((1u << LANES_PER_ITEM) - 1u)
+                                 << (sub_group * LANES_PER_ITEM));
 
     for (int lvl = 0; lvl < n_levels; ++lvl) {
         const int begin = c_fk_level_starts[lvl];
@@ -167,6 +169,64 @@ static inline ffi::Error launch_fk_kernel_warp(
         return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
 
     return ffi::Error::Success();
+}
+
+struct FkGraphCache {
+    cudaGraphExec_t exec = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphNode_t kernel_node = nullptr;
+    int batch = -1;
+    int n_act = -1;
+    int n_joints = -1;
+    int n_levels = -1;
+    int items_per_warp = -1;
+
+    bool shape_matches(int b, int na, int nj, int nl, int ipw) const noexcept {
+        return b == batch && na == n_act && nj == n_joints && nl == n_levels && ipw == items_per_warp;
+    }
+
+    void invalidate() noexcept {
+        if (exec)  { cudaGraphExecDestroy(exec); exec = nullptr; }
+        if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+        kernel_node = nullptr;
+        batch = n_act = n_joints = n_levels = items_per_warp = -1;
+    }
+};
+
+static __host__ __forceinline__ int fk_pick_items_per_warp(int max_level_width) {
+    if (max_level_width <= 2)  return 16;
+    if (max_level_width <= 4)  return 8;
+    if (max_level_width <= 8)  return 4;
+    if (max_level_width <= 16) return 2;
+    return 1;
+}
+
+static __host__ __forceinline__ void* fk_kernel_func_ptr(int items_per_warp) {
+    switch (items_per_warp) {
+        case 16: return reinterpret_cast<void*>(fk_kernel_warp<256, 16>);
+        case 8:  return reinterpret_cast<void*>(fk_kernel_warp<256, 8>);
+        case 4:  return reinterpret_cast<void*>(fk_kernel_warp<256, 4>);
+        case 2:  return reinterpret_cast<void*>(fk_kernel_warp<256, 2>);
+        default: return reinterpret_cast<void*>(fk_kernel_warp<256, 1>);
+    }
+}
+
+static __host__ __forceinline__ void fk_launch_dims(
+    int items_per_warp,
+    int batch,
+    int n_joints,
+    dim3* grid,
+    dim3* block,
+    unsigned int* shared_mem)
+{
+    constexpr int THREADS = 256;
+    constexpr int WARPS_PER_BLOCK = THREADS / 32;
+    const int items_per_block = WARPS_PER_BLOCK * items_per_warp;
+    int blocks = (batch + items_per_block - 1) / items_per_block;
+    if (blocks < 1) blocks = 1;
+    *grid = dim3(static_cast<unsigned>(blocks), 1u, 1u);
+    *block = dim3(THREADS, 1u, 1u);
+    *shared_mem = static_cast<unsigned int>(items_per_block * n_joints * 7 * sizeof(float));
 }
 
 // ---------------------------------------------------------------------------
@@ -296,20 +356,101 @@ static ffi::Error FkCudaImpl(
 
     (void)topo_inv;
 
-    const int max_level_width = cache.max_level_width;
+    static FkGraphCache graph_cache;
 
-    // Select ITEMS_PER_WARP: pack as many batch items per warp as the widest
-    // level allows.  LANES_PER_ITEM = 32 / ITEMS_PER_WARP must be >= max_level_width.
-    if (max_level_width <= 2)
-        return launch_fk_kernel_warp<256, 16>(stream, cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
-    else if (max_level_width <= 4)
-        return launch_fk_kernel_warp<256,  8>(stream, cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
-    else if (max_level_width <= 8)
-        return launch_fk_kernel_warp<256,  4>(stream, cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
-    else if (max_level_width <= 16)
-        return launch_fk_kernel_warp<256,  2>(stream, cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
-    else
-        return launch_fk_kernel_warp<256,  1>(stream, cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
+    const int items_per_warp = fk_pick_items_per_warp(cache.max_level_width);
+    void* cfg_ptr = const_cast<float*>(cfg.typed_data());
+    void* out_ptr = out->typed_data();
+    int k_batch = batch;
+    int k_n_joints = n_joints;
+    int k_n_act = n_act;
+    int k_n_levels = n_levels;
+    void* kargs[] = {&cfg_ptr, &out_ptr, &k_batch, &k_n_joints, &k_n_act, &k_n_levels};
+
+    dim3 grid, block;
+    unsigned int shared_mem = 0;
+    fk_launch_dims(items_per_warp, batch, n_joints, &grid, &block, &shared_mem);
+
+    if (!graph_cache.shape_matches(batch, n_act, n_joints, n_levels, items_per_warp)) {
+        graph_cache.invalidate();
+
+        cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
+        switch (items_per_warp) {
+            case 16:
+                fk_kernel_warp<256, 16><<<grid, block, shared_mem, stream>>>(
+                    cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
+                break;
+            case 8:
+                fk_kernel_warp<256, 8><<<grid, block, shared_mem, stream>>>(
+                    cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
+                break;
+            case 4:
+                fk_kernel_warp<256, 4><<<grid, block, shared_mem, stream>>>(
+                    cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
+                break;
+            case 2:
+                fk_kernel_warp<256, 2><<<grid, block, shared_mem, stream>>>(
+                    cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
+                break;
+            default:
+                fk_kernel_warp<256, 1><<<grid, block, shared_mem, stream>>>(
+                    cfg.typed_data(), out->typed_data(), batch, n_joints, n_act, n_levels);
+                break;
+        }
+
+        e = cudaGetLastError();
+        if (e != cudaSuccess) {
+            cudaStreamEndCapture(stream, nullptr);
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        e = cudaStreamEndCapture(stream, &graph_cache.graph);
+        if (e != cudaSuccess) {
+            graph_cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        size_t n_nodes = 1;
+        e = cudaGraphGetNodes(graph_cache.graph, &graph_cache.kernel_node, &n_nodes);
+        if (e != cudaSuccess || n_nodes == 0) {
+            graph_cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal,
+                              (e != cudaSuccess) ? cudaGetErrorString(e) : "FK graph capture produced no kernel node.");
+        }
+
+        e = cudaGraphInstantiate(&graph_cache.exec, graph_cache.graph, nullptr, nullptr, 0);
+        if (e != cudaSuccess) {
+            graph_cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        graph_cache.batch = batch;
+        graph_cache.n_act = n_act;
+        graph_cache.n_joints = n_joints;
+        graph_cache.n_levels = n_levels;
+        graph_cache.items_per_warp = items_per_warp;
+    } else {
+        cudaKernelNodeParams kp = {};
+        kp.func = fk_kernel_func_ptr(items_per_warp);
+        kp.gridDim = grid;
+        kp.blockDim = block;
+        kp.sharedMemBytes = shared_mem;
+        kp.kernelParams = kargs;
+        kp.extra = nullptr;
+
+        cudaError_t e = cudaGraphExecKernelNodeSetParams(graph_cache.exec, graph_cache.kernel_node, &kp);
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+    }
+
+    cudaError_t launch_err = cudaGraphLaunch(graph_cache.exec, stream);
+    if (launch_err != cudaSuccess)
+        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
+
+    return ffi::Error::Success();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(

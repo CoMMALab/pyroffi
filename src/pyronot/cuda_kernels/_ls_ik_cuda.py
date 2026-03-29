@@ -86,6 +86,12 @@ def ls_ik_cuda(
     target_jnts:    Int[Array,   "n_ee"],             # NEW: (n_ee,) joint indices
     ancestor_masks: Int[Array,   "n_ee n_joints"],    # NEW: (n_ee, n_joints)
     target_T:       Float[Array, "n_problems n_ee 7"],  # changed shape
+    robot_spheres_local: Float[Array, "n_rs 4"],
+    robot_sphere_joint_idx: Int[Array, "n_rs"],
+    world_spheres: Float[Array, "n_ws 4"],
+    world_capsules: Float[Array, "n_wc 7"],
+    world_boxes: Float[Array, "n_wb 15"],
+    world_halfspaces: Float[Array, "n_wh 6"],
     lower:          Float[Array, " n_act"],
     upper:          Float[Array, " n_act"],
     fixed_mask:     Int[Array,   " n_act"],
@@ -96,6 +102,9 @@ def ls_ik_cuda(
     lambda_init: float,
     eps_pos:     float,
     eps_ori:     float,
+    enable_collision: bool = False,
+    collision_weight: float = 0.0,
+    collision_margin: float = 0.02,
 ) -> tuple[Float[Array, "n_problems n_seeds n_act"], Float[Array, "n_problems n_seeds"]]:
     """Run multi-seed Levenberg-Marquardt on the GPU with multi-EE support.
 
@@ -152,6 +161,12 @@ def ls_ik_cuda(
         target_jnts.astype(jnp.int32),
         ancestor_masks.astype(jnp.int32),
         target_T.astype(jnp.float32),
+        robot_spheres_local.astype(jnp.float32),
+        robot_sphere_joint_idx.astype(jnp.int32),
+        world_spheres.astype(jnp.float32),
+        world_capsules.astype(jnp.float32),
+        world_boxes.astype(jnp.float32),
+        world_halfspaces.astype(jnp.float32),
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),
@@ -161,5 +176,8 @@ def ls_ik_cuda(
         lambda_init = np.float32(lambda_init),
         eps_pos     = np.float32(eps_pos),
         eps_ori     = np.float32(eps_ori),
+        enable_collision = int(bool(enable_collision)),
+        collision_weight = np.float32(collision_weight),
+        collision_margin = np.float32(collision_margin),
     )
     return cfgs, errs

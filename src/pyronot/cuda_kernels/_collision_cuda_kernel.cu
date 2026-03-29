@@ -39,6 +39,7 @@
  */
 
 #include "xla/ffi/api/ffi.h"
+#include "_collision_cuda_helpers.cuh"
 
 namespace ffi = xla::ffi;
 
@@ -50,151 +51,7 @@ constexpr int BLOCK_K = 256;
 /// World obstacles loaded into shared memory per tile.
 constexpr int TILE_M  = 16;
 
-// ── Math helpers ──────────────────────────────────────────────────────────────
-
-__device__ __forceinline__ float sql2(
-    float ax, float ay, float az, float bx, float by, float bz)
-{
-    float dx = ax - bx, dy = ay - by, dz = az - bz;
-    return dx*dx + dy*dy + dz*dz;
-}
-
-// ── Primitive signed-distance functions ───────────────────────────────────────
-
-__device__ __forceinline__ float sphere_sphere_dist(
-    float ax, float ay, float az, float ar,
-    float bx, float by, float bz, float br)
-{
-    return sqrtf(sql2(ax, ay, az, bx, by, bz)) - (ar + br);
-}
-
-__device__ __forceinline__ float sphere_capsule_dist(
-    float sx, float sy, float sz, float sr,
-    float x1, float y1, float z1,
-    float x2, float y2, float z2, float cr)
-{
-    float vx = x2-x1, vy = y2-y1, vz = z2-z1;
-    float len2 = vx*vx + vy*vy + vz*vz;
-    float t = 0.0f;
-    if (len2 > 1e-12f) {
-        t = ((sx-x1)*vx + (sy-y1)*vy + (sz-z1)*vz) / len2;
-        t = fmaxf(0.0f, fminf(1.0f, t));
-    }
-    float cx = x1+t*vx, cy = y1+t*vy, cz = z1+t*vz;
-    return sqrtf(sql2(sx, sy, sz, cx, cy, cz)) - (sr + cr);
-}
-
-__device__ __forceinline__ float box_sdf_local(
-    float p1, float p2, float p3,
-    float hl1, float hl2, float hl3)
-{
-    float q1 = fabsf(p1)-hl1, q2 = fabsf(p2)-hl2, q3 = fabsf(p3)-hl3;
-    float mq1 = fmaxf(q1, 0.0f), mq2 = fmaxf(q2, 0.0f), mq3 = fmaxf(q3, 0.0f);
-    return sqrtf(mq1*mq1 + mq2*mq2 + mq3*mq3) + fminf(fmaxf(fmaxf(q1,q2),q3), 0.0f);
-}
-
-__device__ __forceinline__ float sphere_box_dist(
-    float sx, float sy, float sz, float sr,
-    float bcx, float bcy, float bcz,
-    float a1x, float a1y, float a1z,
-    float a2x, float a2y, float a2z,
-    float a3x, float a3y, float a3z,
-    float hl1, float hl2, float hl3)
-{
-    float dx = sx-bcx, dy = sy-bcy, dz = sz-bcz;
-    return box_sdf_local(dx*a1x+dy*a1y+dz*a1z,
-                         dx*a2x+dy*a2y+dz*a2z,
-                         dx*a3x+dy*a3y+dz*a3z,
-                         hl1, hl2, hl3) - sr;
-}
-
-__device__ __forceinline__ float capsule_box_dist(
-    float x1, float y1, float z1,
-    float x2, float y2, float z2, float cr,
-    float bcx, float bcy, float bcz,
-    float a1x, float a1y, float a1z,
-    float a2x, float a2y, float a2z,
-    float a3x, float a3y, float a3z,
-    float hl1, float hl2, float hl3)
-{
-    float d1x=x1-bcx, d1y=y1-bcy, d1z=z1-bcz;
-    float al1=d1x*a1x+d1y*a1y+d1z*a1z;
-    float al2=d1x*a2x+d1y*a2y+d1z*a2z;
-    float al3=d1x*a3x+d1y*a3y+d1z*a3z;
-    float d2x=x2-bcx, d2y=y2-bcy, d2z=z2-bcz;
-    float bl1=d2x*a1x+d2y*a1y+d2z*a1z;
-    float bl2=d2x*a2x+d2y*a2y+d2z*a2z;
-    float bl3=d2x*a3x+d2y*a3y+d2z*a3z;
-    float ab1=bl1-al1, ab2=bl2-al2, ab3=bl3-al3;
-    float ab_len2 = ab1*ab1 + ab2*ab2 + ab3*ab3;
-    float t = 0.0f;
-    if (ab_len2 > 1e-12f) {
-        t = (-al1*ab1 - al2*ab2 - al3*ab3) / ab_len2;
-        t = fmaxf(0.0f, fminf(1.0f, t));
-    }
-    return box_sdf_local(al1+t*ab1, al2+t*ab2, al3+t*ab3, hl1, hl2, hl3) - cr;
-}
-
-__device__ __forceinline__ float capsule_capsule_dist(
-    float ax1, float ay1, float az1,
-    float ax2, float ay2, float az2, float ar,
-    float bx1, float by1, float bz1,
-    float bx2, float by2, float bz2, float br)
-{
-    float d1x=ax2-ax1, d1y=ay2-ay1, d1z=az2-az1;
-    float d2x=bx2-bx1, d2y=by2-by1, d2z=bz2-bz1;
-    float rx=ax1-bx1,  ry=ay1-by1,  rz=az1-bz1;
-    float a = d1x*d1x + d1y*d1y + d1z*d1z;
-    float e = d2x*d2x + d2y*d2y + d2z*d2z;
-    float f = d2x*rx  + d2y*ry  + d2z*rz;
-    const float EPS = 1e-10f;
-    float s, t;
-    if (a <= EPS && e <= EPS) { s = t = 0.0f; }
-    else if (a <= EPS) { s = 0.0f; t = fmaxf(0.0f, fminf(1.0f, f/e)); }
-    else {
-        float c = d1x*rx + d1y*ry + d1z*rz;
-        if (e <= EPS) { t = 0.0f; s = fmaxf(0.0f, fminf(1.0f, -c/a)); }
-        else {
-            float b     = d1x*d2x + d1y*d2y + d1z*d2z;
-            float denom = a*e - b*b;
-            s = (fabsf(denom) > EPS) ? fmaxf(0.0f, fminf(1.0f, (b*f-c*e)/denom)) : 0.0f;
-            t = (b*s + f) / e;
-            if      (t < 0.0f) { t = 0.0f; s = fmaxf(0.0f, fminf(1.0f, -c/a)); }
-            else if (t > 1.0f) { t = 1.0f; s = fmaxf(0.0f, fminf(1.0f, (b-c)/a)); }
-        }
-    }
-    float px = ax1+s*d1x - (bx1+t*d2x);
-    float py = ay1+s*d1y - (by1+t*d2y);
-    float pz = az1+s*d1z - (bz1+t*d2z);
-    return sqrtf(px*px + py*py + pz*pz) - (ar + br);
-}
-
-/** Sphere–halfspace signed distance.
- *  HalfSpace encoded as (nx,ny,nz, px,py,pz): unit outward normal + point on plane.
- *  dist = dot(sphere_center - plane_point, normal) - sphere_radius
- */
-__device__ __forceinline__ float sphere_halfspace_dist(
-    float sx, float sy, float sz, float sr,
-    float nx, float ny, float nz,
-    float px, float py, float pz)
-{
-    return (sx-px)*nx + (sy-py)*ny + (sz-pz)*nz - sr;
-}
-
-/** Capsule–halfspace signed distance.
- *  Both endpoints evaluated; the nearer to the plane determines the distance.
- *  dist = min(dot(A-p,n), dot(B-p,n)) - capsule_radius
- */
-__device__ __forceinline__ float capsule_halfspace_dist(
-    float x1, float y1, float z1,
-    float x2, float y2, float z2, float cr,
-    float nx, float ny, float nz,
-    float px, float py, float pz)
-{
-    float d1 = (x1-px)*nx + (y1-py)*ny + (z1-pz)*nz;
-    float d2 = (x2-px)*nx + (y2-py)*ny + (z2-pz)*nz;
-    return fminf(d1, d2) - cr;
-}
+// Geometry primitives are shared across collision-enabled kernels.
 
 // ── World collision: sphere-robot, non-reduced (output [B, K, M]) ─────────────
 //
@@ -665,23 +522,136 @@ static ffi::Error CollisionWorldSphereImpl(
     const int Mh = static_cast<int>(world_halfspaces.dimensions()[0]);
     const int M  = Ms + Mc + Mb + Mh;
 
+    struct GraphCache {
+        cudaGraphExec_t exec = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphNode_t nodes[4] = {nullptr, nullptr, nullptr, nullptr};
+        size_t node_count = 0;
+        int B = -1, K = -1, Ms = -1, Mc = -1, Mb = -1, Mh = -1;
+        bool shape_matches(int b, int k, int ms, int mc, int mb, int mh) const noexcept {
+            return b == B && k == K && ms == Ms && mc == Mc && mb == Mb && mh == Mh;
+        }
+        void invalidate() noexcept {
+            if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+            node_count = 0;
+            B = K = Ms = Mc = Mb = Mh = -1;
+        }
+    };
+    static GraphCache cache;
+
     if (B > 0 && K > 0 && M > 0) {
         const float* sc = sphere_centers.typed_data();
         const float* sr = sphere_radii.typed_data();
         float* od = out->typed_data();
 
-        if (Ms > 0) wcs_vs_spheres<<<WORLD_GRID(B,K,Ms), BLOCK_K, TILE_M*4*sizeof(float), stream>>>(
-            sc, sr, world_spheres.typed_data(), od, B, K, Ms, M, 0);
-        if (Mc > 0) wcs_vs_capsules<<<WORLD_GRID(B,K,Mc), BLOCK_K, TILE_M*7*sizeof(float), stream>>>(
-            sc, sr, world_capsules.typed_data(), od, B, K, Mc, M, Ms);
-        if (Mb > 0) wcs_vs_boxes<<<WORLD_GRID(B,K,Mb), BLOCK_K, TILE_M*15*sizeof(float), stream>>>(
-            sc, sr, world_boxes.typed_data(), od, B, K, Mb, M, Ms+Mc);
-        if (Mh > 0) wcs_vs_halfspaces<<<WORLD_GRID(B,K,Mh), BLOCK_K, TILE_M*6*sizeof(float), stream>>>(
-            sc, sr, world_halfspaces.typed_data(), od, B, K, Mh, M, Ms+Mc+Mb);
+        if (!cache.shape_matches(B, K, Ms, Mc, Mb, Mh)) {
+            cache.invalidate();
+            cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
 
-        const cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess)
-            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+            if (Ms > 0) wcs_vs_spheres<<<WORLD_GRID(B,K,Ms), BLOCK_K, TILE_M*4*sizeof(float), stream>>>(
+                sc, sr, world_spheres.typed_data(), od, B, K, Ms, M, 0);
+            if (Mc > 0) wcs_vs_capsules<<<WORLD_GRID(B,K,Mc), BLOCK_K, TILE_M*7*sizeof(float), stream>>>(
+                sc, sr, world_capsules.typed_data(), od, B, K, Mc, M, Ms);
+            if (Mb > 0) wcs_vs_boxes<<<WORLD_GRID(B,K,Mb), BLOCK_K, TILE_M*15*sizeof(float), stream>>>(
+                sc, sr, world_boxes.typed_data(), od, B, K, Mb, M, Ms+Mc);
+            if (Mh > 0) wcs_vs_halfspaces<<<WORLD_GRID(B,K,Mh), BLOCK_K, TILE_M*6*sizeof(float), stream>>>(
+                sc, sr, world_halfspaces.typed_data(), od, B, K, Mh, M, Ms+Mc+Mb);
+
+            e = cudaGetLastError();
+            if (e != cudaSuccess) {
+                cudaStreamEndCapture(stream, nullptr);
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaStreamEndCapture(stream, &cache.graph);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            size_t n_nodes = 0;
+            e = cudaGraphGetNodes(cache.graph, nullptr, &n_nodes);
+            if (e != cudaSuccess || n_nodes == 0 || n_nodes > 4) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal,
+                    (e != cudaSuccess) ? cudaGetErrorString(e) : "Unexpected node count in collision world sphere graph.");
+            }
+            cache.node_count = n_nodes;
+            e = cudaGraphGetNodes(cache.graph, cache.nodes, &cache.node_count);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaGraphInstantiate(&cache.exec, cache.graph, nullptr, nullptr, 0);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            cache.B = B; cache.K = K; cache.Ms = Ms; cache.Mc = Mc; cache.Mb = Mb; cache.Mh = Mh;
+        } else {
+            int node_idx = 0;
+            if (Ms > 0) {
+                void* wd = const_cast<float*>(world_spheres.typed_data());
+                int kB=B, kK=K, kMt=Ms, kM=M, kMo=0;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcs_vs_spheres);
+                kp.gridDim = WORLD_GRID(B,K,Ms);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 4 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mc > 0) {
+                void* wd = const_cast<float*>(world_capsules.typed_data());
+                int kB=B, kK=K, kMt=Mc, kM=M, kMo=Ms;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcs_vs_capsules);
+                kp.gridDim = WORLD_GRID(B,K,Mc);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 7 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mb > 0) {
+                void* wd = const_cast<float*>(world_boxes.typed_data());
+                int kB=B, kK=K, kMt=Mb, kM=M, kMo=Ms+Mc;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcs_vs_boxes);
+                kp.gridDim = WORLD_GRID(B,K,Mb);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 15 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mh > 0) {
+                void* wd = const_cast<float*>(world_halfspaces.typed_data());
+                int kB=B, kK=K, kMt=Mh, kM=M, kMo=Ms+Mc+Mb;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcs_vs_halfspaces);
+                kp.gridDim = WORLD_GRID(B,K,Mh);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 6 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+        }
+
+        const cudaError_t launch_err = cudaGraphLaunch(cache.exec, stream);
+        if (launch_err != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
     }
     return ffi::Error::Success();
 }
@@ -721,23 +691,136 @@ static ffi::Error CollisionWorldSphereReducedImpl(
     const int Mh = static_cast<int>(world_halfspaces.dimensions()[0]);
     const int M  = Ms + Mc + Mb + Mh;
 
+    struct GraphCache {
+        cudaGraphExec_t exec = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphNode_t nodes[4] = {nullptr, nullptr, nullptr, nullptr};
+        size_t node_count = 0;
+        int B = -1, K = -1, N = -1, Ms = -1, Mc = -1, Mb = -1, Mh = -1;
+        bool shape_matches(int b, int k, int nn, int ms, int mc, int mb, int mh) const noexcept {
+            return b == B && k == K && nn == N && ms == Ms && mc == Mc && mb == Mb && mh == Mh;
+        }
+        void invalidate() noexcept {
+            if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+            node_count = 0;
+            B = K = N = Ms = Mc = Mb = Mh = -1;
+        }
+    };
+    static GraphCache cache;
+
     if (B > 0 && N > 0 && M > 0) {
         const float* sc = sphere_centers.typed_data();
         const float* sr = sphere_radii.typed_data();
         float* od = out->typed_data();
 
-        if (Ms > 0) wcsr_vs_spheres<<<WORLD_GRID(B,N,Ms), BLOCK_K, TILE_M*4*sizeof(float), stream>>>(
-            sc, sr, world_spheres.typed_data(), od, B, K, S, N, Ms, M, 0);
-        if (Mc > 0) wcsr_vs_capsules<<<WORLD_GRID(B,N,Mc), BLOCK_K, TILE_M*7*sizeof(float), stream>>>(
-            sc, sr, world_capsules.typed_data(), od, B, K, S, N, Mc, M, Ms);
-        if (Mb > 0) wcsr_vs_boxes<<<WORLD_GRID(B,N,Mb), BLOCK_K, TILE_M*15*sizeof(float), stream>>>(
-            sc, sr, world_boxes.typed_data(), od, B, K, S, N, Mb, M, Ms+Mc);
-        if (Mh > 0) wcsr_vs_halfspaces<<<WORLD_GRID(B,N,Mh), BLOCK_K, TILE_M*6*sizeof(float), stream>>>(
-            sc, sr, world_halfspaces.typed_data(), od, B, K, S, N, Mh, M, Ms+Mc+Mb);
+        if (!cache.shape_matches(B, K, N, Ms, Mc, Mb, Mh)) {
+            cache.invalidate();
+            cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
 
-        const cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess)
-            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+            if (Ms > 0) wcsr_vs_spheres<<<WORLD_GRID(B,N,Ms), BLOCK_K, TILE_M*4*sizeof(float), stream>>>(
+                sc, sr, world_spheres.typed_data(), od, B, K, S, N, Ms, M, 0);
+            if (Mc > 0) wcsr_vs_capsules<<<WORLD_GRID(B,N,Mc), BLOCK_K, TILE_M*7*sizeof(float), stream>>>(
+                sc, sr, world_capsules.typed_data(), od, B, K, S, N, Mc, M, Ms);
+            if (Mb > 0) wcsr_vs_boxes<<<WORLD_GRID(B,N,Mb), BLOCK_K, TILE_M*15*sizeof(float), stream>>>(
+                sc, sr, world_boxes.typed_data(), od, B, K, S, N, Mb, M, Ms+Mc);
+            if (Mh > 0) wcsr_vs_halfspaces<<<WORLD_GRID(B,N,Mh), BLOCK_K, TILE_M*6*sizeof(float), stream>>>(
+                sc, sr, world_halfspaces.typed_data(), od, B, K, S, N, Mh, M, Ms+Mc+Mb);
+
+            e = cudaGetLastError();
+            if (e != cudaSuccess) {
+                cudaStreamEndCapture(stream, nullptr);
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaStreamEndCapture(stream, &cache.graph);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            size_t n_nodes = 0;
+            e = cudaGraphGetNodes(cache.graph, nullptr, &n_nodes);
+            if (e != cudaSuccess || n_nodes == 0 || n_nodes > 4) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal,
+                    (e != cudaSuccess) ? cudaGetErrorString(e) : "Unexpected node count in reduced collision graph.");
+            }
+            cache.node_count = n_nodes;
+            e = cudaGraphGetNodes(cache.graph, cache.nodes, &cache.node_count);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaGraphInstantiate(&cache.exec, cache.graph, nullptr, nullptr, 0);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            cache.B = B; cache.K = K; cache.N = N; cache.Ms = Ms; cache.Mc = Mc; cache.Mb = Mb; cache.Mh = Mh;
+        } else {
+            int node_idx = 0;
+            if (Ms > 0) {
+                void* wd = const_cast<float*>(world_spheres.typed_data());
+                int kB=B, kK=K, kS=S, kN=N, kMt=Ms, kM=M, kMo=0;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kS, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcsr_vs_spheres);
+                kp.gridDim = WORLD_GRID(B,N,Ms);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 4 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mc > 0) {
+                void* wd = const_cast<float*>(world_capsules.typed_data());
+                int kB=B, kK=K, kS=S, kN=N, kMt=Mc, kM=M, kMo=Ms;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kS, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcsr_vs_capsules);
+                kp.gridDim = WORLD_GRID(B,N,Mc);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 7 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mb > 0) {
+                void* wd = const_cast<float*>(world_boxes.typed_data());
+                int kB=B, kK=K, kS=S, kN=N, kMt=Mb, kM=M, kMo=Ms+Mc;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kS, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcsr_vs_boxes);
+                kp.gridDim = WORLD_GRID(B,N,Mb);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 15 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mh > 0) {
+                void* wd = const_cast<float*>(world_halfspaces.typed_data());
+                int kB=B, kK=K, kS=S, kN=N, kMt=Mh, kM=M, kMo=Ms+Mc+Mb;
+                void* args[] = {&sc, &sr, &wd, &od, &kB, &kK, &kS, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcsr_vs_halfspaces);
+                kp.gridDim = WORLD_GRID(B,N,Mh);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 6 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+        }
+
+        const cudaError_t launch_err = cudaGraphLaunch(cache.exec, stream);
+        if (launch_err != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
     }
     return ffi::Error::Success();
 }
@@ -774,22 +857,135 @@ static ffi::Error CollisionWorldCapsuleImpl(
     const int Mh = static_cast<int>(world_halfspaces.dimensions()[0]);
     const int M  = Ms + Mc + Mb + Mh;
 
+    struct GraphCache {
+        cudaGraphExec_t exec = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphNode_t nodes[4] = {nullptr, nullptr, nullptr, nullptr};
+        size_t node_count = 0;
+        int B = -1, N = -1, Ms = -1, Mc = -1, Mb = -1, Mh = -1;
+        bool shape_matches(int b, int n, int ms, int mc, int mb, int mh) const noexcept {
+            return b == B && n == N && ms == Ms && mc == Mc && mb == Mb && mh == Mh;
+        }
+        void invalidate() noexcept {
+            if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+            node_count = 0;
+            B = N = Ms = Mc = Mb = Mh = -1;
+        }
+    };
+    static GraphCache cache;
+
     if (B > 0 && N > 0 && M > 0) {
         const float* cp = caps.typed_data();
         float* od = out->typed_data();
 
-        if (Ms > 0) wcc_vs_spheres<<<WORLD_GRID(B,N,Ms), BLOCK_K, TILE_M*4*sizeof(float), stream>>>(
-            cp, world_spheres.typed_data(), od, B, N, Ms, M, 0);
-        if (Mc > 0) wcc_vs_capsules<<<WORLD_GRID(B,N,Mc), BLOCK_K, TILE_M*7*sizeof(float), stream>>>(
-            cp, world_capsules.typed_data(), od, B, N, Mc, M, Ms);
-        if (Mb > 0) wcc_vs_boxes<<<WORLD_GRID(B,N,Mb), BLOCK_K, TILE_M*15*sizeof(float), stream>>>(
-            cp, world_boxes.typed_data(), od, B, N, Mb, M, Ms+Mc);
-        if (Mh > 0) wcc_vs_halfspaces<<<WORLD_GRID(B,N,Mh), BLOCK_K, TILE_M*6*sizeof(float), stream>>>(
-            cp, world_halfspaces.typed_data(), od, B, N, Mh, M, Ms+Mc+Mb);
+        if (!cache.shape_matches(B, N, Ms, Mc, Mb, Mh)) {
+            cache.invalidate();
+            cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
 
-        const cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess)
-            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+            if (Ms > 0) wcc_vs_spheres<<<WORLD_GRID(B,N,Ms), BLOCK_K, TILE_M*4*sizeof(float), stream>>>(
+                cp, world_spheres.typed_data(), od, B, N, Ms, M, 0);
+            if (Mc > 0) wcc_vs_capsules<<<WORLD_GRID(B,N,Mc), BLOCK_K, TILE_M*7*sizeof(float), stream>>>(
+                cp, world_capsules.typed_data(), od, B, N, Mc, M, Ms);
+            if (Mb > 0) wcc_vs_boxes<<<WORLD_GRID(B,N,Mb), BLOCK_K, TILE_M*15*sizeof(float), stream>>>(
+                cp, world_boxes.typed_data(), od, B, N, Mb, M, Ms+Mc);
+            if (Mh > 0) wcc_vs_halfspaces<<<WORLD_GRID(B,N,Mh), BLOCK_K, TILE_M*6*sizeof(float), stream>>>(
+                cp, world_halfspaces.typed_data(), od, B, N, Mh, M, Ms+Mc+Mb);
+
+            e = cudaGetLastError();
+            if (e != cudaSuccess) {
+                cudaStreamEndCapture(stream, nullptr);
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaStreamEndCapture(stream, &cache.graph);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            size_t n_nodes = 0;
+            e = cudaGraphGetNodes(cache.graph, nullptr, &n_nodes);
+            if (e != cudaSuccess || n_nodes == 0 || n_nodes > 4) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal,
+                    (e != cudaSuccess) ? cudaGetErrorString(e) : "Unexpected node count in capsule collision graph.");
+            }
+            cache.node_count = n_nodes;
+            e = cudaGraphGetNodes(cache.graph, cache.nodes, &cache.node_count);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaGraphInstantiate(&cache.exec, cache.graph, nullptr, nullptr, 0);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            cache.B = B; cache.N = N; cache.Ms = Ms; cache.Mc = Mc; cache.Mb = Mb; cache.Mh = Mh;
+        } else {
+            int node_idx = 0;
+            if (Ms > 0) {
+                void* wd = const_cast<float*>(world_spheres.typed_data());
+                int kB=B, kN=N, kMt=Ms, kM=M, kMo=0;
+                void* args[] = {&cp, &wd, &od, &kB, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcc_vs_spheres);
+                kp.gridDim = WORLD_GRID(B,N,Ms);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 4 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mc > 0) {
+                void* wd = const_cast<float*>(world_capsules.typed_data());
+                int kB=B, kN=N, kMt=Mc, kM=M, kMo=Ms;
+                void* args[] = {&cp, &wd, &od, &kB, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcc_vs_capsules);
+                kp.gridDim = WORLD_GRID(B,N,Mc);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 7 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mb > 0) {
+                void* wd = const_cast<float*>(world_boxes.typed_data());
+                int kB=B, kN=N, kMt=Mb, kM=M, kMo=Ms+Mc;
+                void* args[] = {&cp, &wd, &od, &kB, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcc_vs_boxes);
+                kp.gridDim = WORLD_GRID(B,N,Mb);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 15 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+            if (Mh > 0) {
+                void* wd = const_cast<float*>(world_halfspaces.typed_data());
+                int kB=B, kN=N, kMt=Mh, kM=M, kMo=Ms+Mc+Mb;
+                void* args[] = {&cp, &wd, &od, &kB, &kN, &kMt, &kM, &kMo};
+                cudaKernelNodeParams kp = {};
+                kp.func = reinterpret_cast<void*>(wcc_vs_halfspaces);
+                kp.gridDim = WORLD_GRID(B,N,Mh);
+                kp.blockDim = dim3(BLOCK_K,1,1);
+                kp.sharedMemBytes = TILE_M * 6 * sizeof(float);
+                kp.kernelParams = args;
+                cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.nodes[node_idx++], &kp);
+                if (e != cudaSuccess) return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+        }
+
+        const cudaError_t launch_err = cudaGraphLaunch(cache.exec, stream);
+        if (launch_err != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
     }
     return ffi::Error::Success();
 }
@@ -821,18 +1017,84 @@ static ffi::Error CollisionSelfSphereImpl(
     const int P = static_cast<int>(pair_i.dimensions()[0]);
     const int total = B * P;
 
+    struct GraphCache {
+        cudaGraphExec_t exec = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphNode_t node = nullptr;
+        int B = -1, S = -1, N = -1, P = -1;
+        bool shape_matches(int b, int s, int n, int p) const noexcept {
+            return b == B && s == S && n == N && p == P;
+        }
+        void invalidate() noexcept {
+            if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+            node = nullptr;
+            B = S = N = P = -1;
+        }
+    };
+    static GraphCache cache;
+
     if (total > 0) {
         const int blocks = (total + 255) / 256;
-        self_collision_sphere_kernel<<<blocks, 256, 0, stream>>>(
-            sphere_centers.typed_data(),
-            sphere_radii.typed_data(),
-            pair_i.typed_data(),
-            pair_j.typed_data(),
-            out->typed_data(),
-            B, S, N, P);
-        const cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess)
-            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+        const float* centers = sphere_centers.typed_data();
+        const float* radii = sphere_radii.typed_data();
+        const int* pi = pair_i.typed_data();
+        const int* pj = pair_j.typed_data();
+        float* od = out->typed_data();
+
+        if (!cache.shape_matches(B, S, N, P)) {
+            cache.invalidate();
+            cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
+            self_collision_sphere_kernel<<<blocks, 256, 0, stream>>>(
+                centers, radii, pi, pj, od, B, S, N, P);
+
+            e = cudaGetLastError();
+            if (e != cudaSuccess) {
+                cudaStreamEndCapture(stream, nullptr);
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaStreamEndCapture(stream, &cache.graph);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            size_t n_nodes = 1;
+            e = cudaGraphGetNodes(cache.graph, &cache.node, &n_nodes);
+            if (e != cudaSuccess || n_nodes == 0) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal,
+                                  (e != cudaSuccess) ? cudaGetErrorString(e) : "Self-sphere graph missing node.");
+            }
+
+            e = cudaGraphInstantiate(&cache.exec, cache.graph, nullptr, nullptr, 0);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            cache.B = B; cache.S = S; cache.N = N; cache.P = P;
+        } else {
+            int kB = B, kS = S, kN = N, kP = P;
+            void* args[] = {&centers, &radii, &pi, &pj, &od, &kB, &kS, &kN, &kP};
+            cudaKernelNodeParams kp = {};
+            kp.func = reinterpret_cast<void*>(self_collision_sphere_kernel);
+            kp.gridDim = dim3(static_cast<unsigned>(blocks), 1u, 1u);
+            kp.blockDim = dim3(256u, 1u, 1u);
+            kp.sharedMemBytes = 0;
+            kp.kernelParams = args;
+            cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.node, &kp);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        cudaError_t launch_err = cudaGraphLaunch(cache.exec, stream);
+        if (launch_err != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
     }
     return ffi::Error::Success();
 }
@@ -861,17 +1123,83 @@ static ffi::Error CollisionSelfCapsuleImpl(
     const int P = static_cast<int>(pair_i.dimensions()[0]);
     const int total = B * P;
 
+    struct GraphCache {
+        cudaGraphExec_t exec = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphNode_t node = nullptr;
+        int B = -1, N = -1, P = -1;
+        bool shape_matches(int b, int n, int p) const noexcept {
+            return b == B && n == N && p == P;
+        }
+        void invalidate() noexcept {
+            if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+            node = nullptr;
+            B = N = P = -1;
+        }
+    };
+    static GraphCache cache;
+
     if (total > 0) {
         const int blocks = (total + 255) / 256;
-        self_collision_capsule_kernel<<<blocks, 256, 0, stream>>>(
-            caps.typed_data(),
-            pair_i.typed_data(),
-            pair_j.typed_data(),
-            out->typed_data(),
-            B, N, P);
-        const cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess)
-            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+        const float* cp = caps.typed_data();
+        const int* pi = pair_i.typed_data();
+        const int* pj = pair_j.typed_data();
+        float* od = out->typed_data();
+
+        if (!cache.shape_matches(B, N, P)) {
+            cache.invalidate();
+            cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
+            self_collision_capsule_kernel<<<blocks, 256, 0, stream>>>(
+                cp, pi, pj, od, B, N, P);
+
+            e = cudaGetLastError();
+            if (e != cudaSuccess) {
+                cudaStreamEndCapture(stream, nullptr);
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            e = cudaStreamEndCapture(stream, &cache.graph);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            size_t n_nodes = 1;
+            e = cudaGraphGetNodes(cache.graph, &cache.node, &n_nodes);
+            if (e != cudaSuccess || n_nodes == 0) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal,
+                                  (e != cudaSuccess) ? cudaGetErrorString(e) : "Self-capsule graph missing node.");
+            }
+
+            e = cudaGraphInstantiate(&cache.exec, cache.graph, nullptr, nullptr, 0);
+            if (e != cudaSuccess) {
+                cache.invalidate();
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+            }
+
+            cache.B = B; cache.N = N; cache.P = P;
+        } else {
+            int kB = B, kN = N, kP = P;
+            void* args[] = {&cp, &pi, &pj, &od, &kB, &kN, &kP};
+            cudaKernelNodeParams kp = {};
+            kp.func = reinterpret_cast<void*>(self_collision_capsule_kernel);
+            kp.gridDim = dim3(static_cast<unsigned>(blocks), 1u, 1u);
+            kp.blockDim = dim3(256u, 1u, 1u);
+            kp.sharedMemBytes = 0;
+            kp.kernelParams = args;
+            cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.node, &kp);
+            if (e != cudaSuccess)
+                return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        cudaError_t launch_err = cudaGraphLaunch(cache.exec, stream);
+        if (launch_err != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
     }
     return ffi::Error::Success();
 }

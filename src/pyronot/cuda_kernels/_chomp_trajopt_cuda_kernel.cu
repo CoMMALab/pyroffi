@@ -14,6 +14,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -42,83 +43,14 @@ namespace ffi = xla::ffi;
 #endif
 
 // ---------------------------------------------------------------------------
-// Geometry distance helpers
+// Geometry distance helpers (shared)
 // ---------------------------------------------------------------------------
 
-__device__ __forceinline__ float chomp_sphere_sphere_dist(
-    float ax, float ay, float az, float ar,
-    float bx, float by, float bz, float br)
-{
-    float dx = ax - bx;
-    float dy = ay - by;
-    float dz = az - bz;
-    return sqrtf(dx * dx + dy * dy + dz * dz) - (ar + br);
-}
-
-__device__ __forceinline__ float chomp_sphere_capsule_dist(
-    float sx, float sy, float sz, float sr,
-    float x1, float y1, float z1,
-    float x2, float y2, float z2, float cr)
-{
-    float vx = x2 - x1, vy = y2 - y1, vz = z2 - z1;
-    float len2 = vx * vx + vy * vy + vz * vz;
-    float t = 0.0f;
-    if (len2 > 1e-12f) {
-        t = ((sx - x1) * vx + (sy - y1) * vy + (sz - z1) * vz) / len2;
-        t = fmaxf(0.0f, fminf(1.0f, t));
-    }
-    float cx = x1 + t * vx;
-    float cy = y1 + t * vy;
-    float cz = z1 + t * vz;
-    float dx = sx - cx, dy = sy - cy, dz = sz - cz;
-    return sqrtf(dx * dx + dy * dy + dz * dz) - (sr + cr);
-}
-
-__device__ __forceinline__ float chomp_box_sdf_local(
-    float p1, float p2, float p3,
-    float hl1, float hl2, float hl3)
-{
-    float q1 = fabsf(p1) - hl1;
-    float q2 = fabsf(p2) - hl2;
-    float q3 = fabsf(p3) - hl3;
-    float mq1 = fmaxf(q1, 0.f), mq2 = fmaxf(q2, 0.f), mq3 = fmaxf(q3, 0.f);
-    return sqrtf(mq1 * mq1 + mq2 * mq2 + mq3 * mq3)
-           + fminf(fmaxf(fmaxf(q1, q2), q3), 0.f);
-}
-
-__device__ __forceinline__ float chomp_sphere_box_dist(
-    float sx, float sy, float sz, float sr,
-    float bcx, float bcy, float bcz,
-    float a1x, float a1y, float a1z,
-    float a2x, float a2y, float a2z,
-    float a3x, float a3y, float a3z,
-    float hl1, float hl2, float hl3)
-{
-    float dx = sx - bcx, dy = sy - bcy, dz = sz - bcz;
-    float p1 = dx * a1x + dy * a1y + dz * a1z;
-    float p2 = dx * a2x + dy * a2y + dz * a2z;
-    float p3 = dx * a3x + dy * a3y + dz * a3z;
-    return chomp_box_sdf_local(p1, p2, p3, hl1, hl2, hl3) - sr;
-}
-
-__device__ __forceinline__ float chomp_sphere_halfspace_dist(
-    float sx, float sy, float sz, float sr,
-    float nx, float ny, float nz,
-    float px, float py, float pz)
-{
-    return (sx - px) * nx + (sy - py) * ny + (sz - pz) * nz - sr;
-}
-
-__device__ __forceinline__ void chomp_apply_se3(
-    const float* __restrict__ T,
-    const float* __restrict__ p,
-    float* __restrict__ out)
-{
-    quat_rotate(T, p, out);
-    out[0] += T[4];
-    out[1] += T[5];
-    out[2] += T[6];
-}
+#define chomp_sphere_sphere_dist sphere_sphere_dist
+#define chomp_sphere_capsule_dist sphere_capsule_dist
+#define chomp_sphere_box_dist sphere_box_dist
+#define chomp_sphere_halfspace_dist sphere_halfspace_dist
+#define chomp_apply_se3 apply_se3_point
 
 // ---------------------------------------------------------------------------
 // Cost helpers

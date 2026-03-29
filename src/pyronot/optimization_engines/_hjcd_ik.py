@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +41,8 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
-from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights  # noqa: F401
+from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
+from ._ls_ik import _prepare_ls_collision_buffers
 
 # Consecutive non-improving LM steps before a random kick is applied.
 _STALL_PATIENCE: int = 6
@@ -643,6 +645,9 @@ def hjcd_solve(
         "kick_scale",
         "eps_pos",
         "eps_ori",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
         "constraint_fns",
         "target_link_indices",
     ),
@@ -666,6 +671,15 @@ def _hjcd_solve_cuda_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_masks: Array,
     target_jnts: Array,
+    robot_spheres_local:  Float[Array, "n_rs 4"],
+    robot_sphere_joint_idx: Array,
+    world_spheres:        Float[Array, "n_ws 4"],
+    world_capsules:       Float[Array, "n_wc 7"],
+    world_boxes:          Float[Array, "n_wb 15"],
+    world_halfspaces:     Float[Array, "n_wh 6"],
+    enable_collision:     bool,
+    collision_weight:     float,
+    collision_margin:     float,
     target_link_indices: tuple[int, ...],
     constraint_fns: tuple = (),
     constraint_args: tuple = (),
@@ -712,11 +726,20 @@ def _hjcd_solve_cuda_jit(
         topo_inv=robot.joints._topo_sort_inv,
         ancestor_masks=ancestor_masks,
         target_T=target_Ts[None],       # (1, n_ee, 7)
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
         target_jnts=target_jnts,
         k_max=coarse_max_iter,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
     coarse_cfgs   = coarse_cfgs[0]    # (num_seeds, n_act)
     coarse_errors = coarse_errors[0]  # (num_seeds,) — all EEs from CUDA kernel
@@ -757,6 +780,12 @@ def _hjcd_solve_cuda_jit(
         topo_inv=robot.joints._topo_sort_inv,
         ancestor_masks=ancestor_masks,
         target_T=target_Ts[None],       # (1, n_ee, 7)
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
@@ -768,6 +797,9 @@ def _hjcd_solve_cuda_jit(
         kick_scale=kick_scale,
         eps_pos=eps_pos,
         eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
     refine_cfgs       = refine_cfgs[0]       # (n_lm_seeds, n_act)
     refine_errors_raw = refine_errors_raw[0]  # (n_lm_seeds,) — all EEs from CUDA
@@ -817,6 +849,12 @@ def hjcd_solve_cuda(
     constraints: Sequence[Callable] | None = None,
     constraint_args: Sequence | None = None,
     constraint_weights: Sequence[float] | None = None,
+    collision_constraint_indices: Sequence[int] | None = None,
+    collision_free: bool = False,
+    collision_checker: Any | None = None,
+    collision_world: Any | None = None,
+    collision_weight: float = 1e4,
+    collision_margin: float = 0.02,
     constraint_refine_iters: int = 12,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`hjcd_solve`.
@@ -903,11 +941,19 @@ def hjcd_solve_cuda(
     else:
         fixed_joint_mask_int = fixed_joint_mask.astype(jnp.int32)
 
-    constraint_fns         = tuple(constraints) if constraints else ()
-    constraint_args_t      = tuple(constraint_args) if constraint_args is not None else ()
-    constraint_weights_arr = (
-        jnp.array(constraint_weights, dtype=jnp.float32)
-        if constraint_weights is not None else None
+    (
+        cuda_constraint_fns,
+        cuda_constraint_args,
+        cuda_constraint_weights,
+        post_constraint_fns,
+        post_constraint_args,
+        post_constraint_weights,
+    ) = split_cuda_and_post_constraints(
+        constraints=constraints,
+        constraint_args=constraint_args,
+        constraint_weights=constraint_weights,
+        collision_constraint_indices=collision_constraint_indices,
+        collision_free=collision_free,
     )
 
     # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
@@ -931,6 +977,16 @@ def hjcd_solve_cuda(
     target_jnts    = jnp.array(target_joints_np)
     ancestor_masks = jnp.array(ancestor_masks_np)
 
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+
     winner = _hjcd_solve_cuda_jit(
         robot=robot,
         target_poses=target_poses_t,
@@ -950,15 +1006,24 @@ def hjcd_solve_cuda(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_masks=ancestor_masks,
         target_jnts=target_jnts,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        enable_collision=bool(collision_free and collision_enabled),
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
         target_link_indices=target_link_indices,
-        constraint_fns=constraint_fns,
-        constraint_args=constraint_args_t,
-        constraint_weights=constraint_weights_arr,
+        constraint_fns=cuda_constraint_fns,
+        constraint_args=cuda_constraint_args,
+        constraint_weights=cuda_constraint_weights,
     )
 
     # ── Post-CUDA JAX refinement with constraints only ─────────────────────
     # Multi-EE is now handled in CUDA; only constraints require JAX refinement.
-    needs_refinement = bool(constraint_fns)
+    needs_refinement = bool(post_constraint_fns)
     if needs_refinement and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
@@ -971,9 +1036,9 @@ def hjcd_solve_cuda(
             constraint_refine_iters, lambda_init, limit_prior_weight, kick_scale,
             key_post, robot.joints.lower_limits, robot.joints.upper_limits,
             eps_pos, eps_ori, fmask,
-            constraint_fns=constraint_fns,
-            constraint_args=constraint_args_t,
-            constraint_weights=constraint_weights_arr,
+            constraint_fns=post_constraint_fns,
+            constraint_args=post_constraint_args,
+            constraint_weights=post_constraint_weights,
         )
 
     return winner
@@ -994,6 +1059,9 @@ def hjcd_solve_cuda(
         "kick_scale",
         "eps_pos",
         "eps_ori",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
         "constraint_fns",
         "target_link_indices",
     ),
@@ -1017,6 +1085,15 @@ def _hjcd_solve_cuda_batch_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_masks:       Array,
     target_jnts:          Array,
+    robot_spheres_local:  Float[Array, "n_rs 4"],
+    robot_sphere_joint_idx: Array,
+    world_spheres:        Float[Array, "n_ws 4"],
+    world_capsules:       Float[Array, "n_wc 7"],
+    world_boxes:          Float[Array, "n_wb 15"],
+    world_halfspaces:     Float[Array, "n_wh 6"],
+    enable_collision:     bool,
+    collision_weight:     float,
+    collision_margin:     float,
     target_link_indices:  tuple[int, ...],
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
@@ -1067,11 +1144,20 @@ def _hjcd_solve_cuda_batch_jit(
         topo_inv=robot.joints._topo_sort_inv,
         ancestor_masks=ancestor_masks,
         target_T=target_T_batch,         # (n_problems, 1, 7)
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
         target_jnts=target_jnts,
         k_max=coarse_max_iter,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
 
     # ── Phase 2 setup: top-K selection + perturbation ─────────────────────
@@ -1108,6 +1194,12 @@ def _hjcd_solve_cuda_batch_jit(
         topo_inv=robot.joints._topo_sort_inv,
         ancestor_masks=ancestor_masks,
         target_T=target_T_batch,         # (n_problems, 1, 7)
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
@@ -1119,6 +1211,9 @@ def _hjcd_solve_cuda_batch_jit(
         kick_scale=kick_scale,
         eps_pos=eps_pos,
         eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
 
     # ── Winner selection: task (all EEs) + constraint penalties + continuity ─
@@ -1168,6 +1263,12 @@ def hjcd_solve_cuda_batch(
     constraints:         Sequence[Callable] | None = None,
     constraint_args:     Sequence | None = None,
     constraint_weights:  Sequence[float] | None = None,
+    collision_constraint_indices: Sequence[int] | None = None,
+    collision_free:      bool = False,
+    collision_checker:   Any | None = None,
+    collision_world:     Any | None = None,
+    collision_weight:    float = 1e4,
+    collision_margin:    float = 0.02,
     constraint_refine_iters: int = 30,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA HJCD-IK: solve n_problems targets in a single kernel launch.
@@ -1217,11 +1318,19 @@ def hjcd_solve_cuda_batch(
     else:
         fixed_joint_mask_int = fixed_joint_mask.astype(jnp.int32)
 
-    constraint_fns         = tuple(constraints) if constraints else ()
-    constraint_args_t      = tuple(constraint_args) if constraint_args is not None else ()
-    constraint_weights_arr = (
-        jnp.array(constraint_weights, dtype=jnp.float32)
-        if constraint_weights is not None else None
+    (
+        cuda_constraint_fns,
+        cuda_constraint_args,
+        cuda_constraint_weights,
+        post_constraint_fns,
+        post_constraint_args,
+        post_constraint_weights,
+    ) = split_cuda_and_post_constraints(
+        constraints=constraints,
+        constraint_args=constraint_args,
+        constraint_weights=constraint_weights,
+        collision_constraint_indices=collision_constraint_indices,
+        collision_free=collision_free,
     )
 
     # Ancestor mask using first EE only (batch path is single-EE; wrap in n_ee=1 format).
@@ -1237,6 +1346,16 @@ def hjcd_solve_cuda_batch(
     # Wrap in (1, n_joints) for n_ee=1.
     ancestor_masks = jnp.array(ancestor_mask_np[None, :])
     target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
+
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
 
     winners = _hjcd_solve_cuda_batch_jit(
         robot=robot,
@@ -1257,14 +1376,23 @@ def hjcd_solve_cuda_batch(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_masks=ancestor_masks,
         target_jnts=target_jnts,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        enable_collision=bool(collision_free and collision_enabled),
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
         target_link_indices=target_link_indices,
-        constraint_fns=constraint_fns,
-        constraint_args=constraint_args_t,
-        constraint_weights=constraint_weights_arr,
+        constraint_fns=cuda_constraint_fns,
+        constraint_args=cuda_constraint_args,
+        constraint_weights=cuda_constraint_weights,
     )
 
     # ── Post-CUDA JAX refinement with all EEs + constraints (vmapped over batch)
-    if constraint_fns and constraint_refine_iters > 0:
+    if post_constraint_fns and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
             if fixed_joint_mask is not None
@@ -1280,9 +1408,9 @@ def hjcd_solve_cuda_batch(
                 (jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),),
                 constraint_refine_iters, lambda_init, limit_prior_weight, kick_scale,
                 key_post, lower, upper, eps_pos, eps_ori, fmask,
-                constraint_fns=constraint_fns,
-                constraint_args=constraint_args_t,
-                constraint_weights=constraint_weights_arr,
+                constraint_fns=post_constraint_fns,
+                constraint_args=post_constraint_args,
+                constraint_weights=post_constraint_weights,
             )
         )(winners, target_poses.wxyz_xyz)
 

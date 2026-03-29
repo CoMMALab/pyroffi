@@ -23,6 +23,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -74,14 +75,23 @@ void ls_ik_lm_kernel(
     const int*   __restrict__ target_jnts,     // (n_ee,) NEW
     const int*   __restrict__ ancestor_masks,  // (n_ee, n_joints) NEW
     const float* __restrict__ target_Ts,       // (n_problems, n_ee, 7) NEW
+    const float* __restrict__ robot_spheres_local,   // (n_rs, 4) [x,y,z,r] in joint frame
+    const int*   __restrict__ robot_sphere_joint_idx, // (n_rs,)
+    const float* __restrict__ world_spheres,    // (Ms, 4)
+    const float* __restrict__ world_capsules,   // (Mc, 7)
+    const float* __restrict__ world_boxes,      // (Mb, 15)
+    const float* __restrict__ world_halfspaces, // (Mh, 6)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
     float*       __restrict__ out,
     float*       __restrict__ out_err,
     int   n_problems, int n_seeds, int n_joints, int n_act, int n_ee, int max_iter,
+    int   n_robot_spheres, int n_world_spheres, int n_world_capsules, int n_world_boxes, int n_world_halfspaces,
+    int   enable_collision,
     float pos_weight, float ori_weight, float lambda_init,
-    float eps_pos, float eps_ori)
+    float eps_pos, float eps_ori,
+    float collision_weight, float collision_margin)
 {
     // ── Shared memory: robot parameters loaded once per block ───────────────
     __shared__ float s_twists       [MAX_JOINTS * 6];
@@ -153,6 +163,73 @@ void ls_ik_lm_kernel(
     for (int ee = 0; ee < n_ee; ee++)
         for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
 
+    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
+        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+
+        fk_single(
+            cfg_eval,
+            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+            T_eval,
+            n_joints, n_act);
+
+        float pen = 0.0f;
+        for (int i = 0; i < n_robot_spheres; i++) {
+            const int jidx = robot_sphere_joint_idx[i];
+            if (jidx < 0 || jidx >= n_joints) continue;
+
+            const float* sp = robot_spheres_local + i * 4;
+            float local_p[3] = {sp[0], sp[1], sp[2]};
+            float world_p[3];
+            apply_se3_point(T_eval + jidx * 7, local_p, world_p);
+            const float rr = sp[3];
+
+            for (int m = 0; m < n_world_spheres; m++) {
+                const float* o = world_spheres + m * 4;
+                const float d = sphere_sphere_dist(world_p[0], world_p[1], world_p[2], rr,
+                                                   o[0], o[1], o[2], o[3]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_capsules; m++) {
+                const float* o = world_capsules + m * 7;
+                const float d = sphere_capsule_dist(world_p[0], world_p[1], world_p[2], rr,
+                                                    o[0], o[1], o[2], o[3], o[4], o[5], o[6]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_boxes; m++) {
+                const float* o = world_boxes + m * 15;
+                const float d = sphere_box_dist(world_p[0], world_p[1], world_p[2], rr,
+                                                o[0], o[1], o[2],
+                                                o[3], o[4], o[5],
+                                                o[6], o[7], o[8],
+                                                o[9], o[10], o[11],
+                                                o[12], o[13], o[14]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_halfspaces; m++) {
+                const float* o = world_halfspaces + m * 6;
+                const float d = sphere_halfspace_dist(world_p[0], world_p[1], world_p[2], rr,
+                                                      o[0], o[1], o[2], o[3], o[4], o[5]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+        }
+        return collision_weight * pen;
+    };
+
+    best_err += collision_penalty(cfg, T_world);
+
     float lam = lambda_init;
 
     for (int iter = 0; iter < max_iter; iter++) {
@@ -187,6 +264,7 @@ void ls_ik_lm_kernel(
 
         float curr_err = 0.0f;
         for (int k = 0; k < 6 * n_ee; k++) curr_err += fw[k] * fw[k];
+        curr_err += collision_penalty(cfg, T_world);
 
         // ── Jacobi column scaling ───────────────────────────────────────
         float col_scale[MAX_ACT];
@@ -280,6 +358,8 @@ void ls_ik_lm_kernel(
                     float rw = r_trial[ee*6+k] * W[k];
                     err_trial += rw * rw;
                 }
+            err_trial += collision_penalty(cfg_trial, T_world);
+
             if (err_trial < best_alpha_err) {
                 best_alpha_err = err_trial;
                 best_alpha_idx = ai;
@@ -331,6 +411,12 @@ static ffi::Error LsIkCudaImpl(
     ffi::Buffer<ffi::DataType::S32> target_jnts,     // (n_ee,) NEW
     ffi::Buffer<ffi::DataType::S32> ancestor_masks,  // (n_ee, n_joints) NEW
     ffi::Buffer<ffi::DataType::F32> target_Ts,       // (n_problems, n_ee, 7) NEW
+    ffi::Buffer<ffi::DataType::F32> robot_spheres_local,
+    ffi::Buffer<ffi::DataType::S32> robot_sphere_joint_idx,
+    ffi::Buffer<ffi::DataType::F32> world_spheres,
+    ffi::Buffer<ffi::DataType::F32> world_capsules,
+    ffi::Buffer<ffi::DataType::F32> world_boxes,
+    ffi::Buffer<ffi::DataType::F32> world_halfspaces,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -340,6 +426,9 @@ static ffi::Error LsIkCudaImpl(
     float   lambda_init,
     float   eps_pos,
     float   eps_ori,
+    int64_t enable_collision,
+    float   collision_weight,
+    float   collision_margin,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_err)
 {
@@ -348,6 +437,11 @@ static ffi::Error LsIkCudaImpl(
     const int n_act      = static_cast<int>(seeds.dimensions()[2]);
     const int n_joints   = static_cast<int>(twists.dimensions()[0]);
     const int n_ee       = static_cast<int>(target_jnts.dimensions()[0]);
+    const int n_robot_spheres = static_cast<int>(robot_spheres_local.dimensions()[0]);
+    const int n_world_spheres = static_cast<int>(world_spheres.dimensions()[0]);
+    const int n_world_capsules = static_cast<int>(world_capsules.dimensions()[0]);
+    const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
+    const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
 
     // LM is register/local-memory heavy; keep block size modest.
     constexpr int THREADS_MAX = 32;
@@ -367,6 +461,12 @@ static ffi::Error LsIkCudaImpl(
         target_jnts.typed_data(),
         ancestor_masks.typed_data(),
         target_Ts.typed_data(),
+        robot_spheres_local.typed_data(),
+        robot_sphere_joint_idx.typed_data(),
+        world_spheres.typed_data(),
+        world_capsules.typed_data(),
+        world_boxes.typed_data(),
+        world_halfspaces.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -374,8 +474,15 @@ static ffi::Error LsIkCudaImpl(
         out_err->typed_data(),
         n_problems, n_seeds, n_joints, n_act, n_ee,
         static_cast<int>(max_iter),
+        n_robot_spheres,
+        n_world_spheres,
+        n_world_capsules,
+        n_world_boxes,
+        n_world_halfspaces,
+        static_cast<int>(enable_collision),
         pos_weight, ori_weight, lambda_init,
-        eps_pos, eps_ori);
+        eps_pos, eps_ori,
+        collision_weight, collision_margin);
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -399,6 +506,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // target_jnts
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // ancestor_masks
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // target_Ts
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // robot_spheres_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // robot_sphere_joint_idx
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_spheres
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_capsules
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_boxes
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_halfspaces
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask
@@ -408,6 +521,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<float>("lambda_init")
         .Attr<float>("eps_pos")
         .Attr<float>("eps_ori")
+        .Attr<int64_t>("enable_collision")
+        .Attr<float>("collision_weight")
+        .Attr<float>("collision_margin")
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out cfgs
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out errors
 );

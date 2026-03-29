@@ -64,10 +64,44 @@ if TYPE_CHECKING:
 # World geometry helper
 # ---------------------------------------------------------------------------
 
+def _pose_translation_np(pose) -> np.ndarray:
+    """Extract translation (xyz) from a jaxlie.SE3 as a concrete numpy array.
+
+    Avoids calling ``pose.translation()`` which performs a JAX slice operation
+    that creates an abstract traced value inside ``jax.lax.scan`` bodies.
+    """
+    return np.asarray(pose.wxyz_xyz)[..., 4:7].astype(np.float32)
+
+
+def _pose_rotation_matrix_np(pose) -> np.ndarray:
+    """Extract rotation matrix from a jaxlie.SE3 as a concrete numpy array.
+
+    Computes the quaternion → rotation-matrix conversion in pure numpy so that
+    no JAX operations are performed (safe inside ``jax.lax.scan`` bodies).
+    Convention: jaxlie stores quaternions as (w, x, y, z).
+    """
+    wxyz = np.asarray(pose.wxyz_xyz)[..., :4].astype(np.float64)
+    w, x, y, z = wxyz[..., 0], wxyz[..., 1], wxyz[..., 2], wxyz[..., 3]
+    R = np.empty(wxyz.shape[:-1] + (3, 3), dtype=np.float32)
+    R[..., 0, 0] = (1 - 2*(y*y + z*z)).astype(np.float32)
+    R[..., 0, 1] = (2*(x*y - w*z)).astype(np.float32)
+    R[..., 0, 2] = (2*(x*z + w*y)).astype(np.float32)
+    R[..., 1, 0] = (2*(x*y + w*z)).astype(np.float32)
+    R[..., 1, 1] = (1 - 2*(x*x + z*z)).astype(np.float32)
+    R[..., 1, 2] = (2*(y*z - w*x)).astype(np.float32)
+    R[..., 2, 0] = (2*(x*z - w*y)).astype(np.float32)
+    R[..., 2, 1] = (2*(y*z + w*x)).astype(np.float32)
+    R[..., 2, 2] = (1 - 2*(x*x + y*y)).astype(np.float32)
+    return R
+
+
 def _extract_world_arrays(
     world_geom: CollGeom,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Convert a pyronot CollGeom (last axis = M obstacles) to flat numpy arrays.
+
+    All conversions use pure numpy (no JAX operations), making this function
+    safe to call inside ``jax.lax.scan`` bodies.
 
     Returns:
         spheres    — float32 [Ms, 4]
@@ -95,37 +129,37 @@ def _extract_world_arrays(
         )
 
     if isinstance(world_geom, Sphere):
-        centers = np.asarray(world_geom.pose.translation(), dtype=np.float32)  # (M, 3)
-        radii   = np.asarray(world_geom.radius,             dtype=np.float32)  # (M,)
-        spheres = np.concatenate([centers, radii[:, None]], axis=-1)           # (M, 4)
+        centers = _pose_translation_np(world_geom.pose)             # (M, 3)
+        radii   = np.asarray(world_geom.radius, dtype=np.float32)   # (M,)
+        spheres = np.concatenate([centers, radii[:, None]], axis=-1) # (M, 4)
         return spheres, empty_c, empty_b, empty_h
 
     if isinstance(world_geom, Capsule):
-        centers = np.asarray(world_geom.pose.translation(), dtype=np.float32)  # (M, 3)
-        axes_v  = np.asarray(world_geom.axis,               dtype=np.float32)  # (M, 3)
-        heights = np.asarray(world_geom.height,             dtype=np.float32)  # (M,)
-        radii   = np.asarray(world_geom.radius,             dtype=np.float32)  # (M,)
+        centers = _pose_translation_np(world_geom.pose)              # (M, 3)
+        axes_v  = np.asarray(world_geom.axis,   dtype=np.float32)    # (M, 3)
+        heights = np.asarray(world_geom.height, dtype=np.float32)    # (M,)
+        radii   = np.asarray(world_geom.radius, dtype=np.float32)    # (M,)
         half_h  = heights[:, None] * 0.5
-        a       = centers - axes_v * half_h                                     # (M, 3)
-        b_      = centers + axes_v * half_h                                     # (M, 3)
-        capsules = np.concatenate([a, b_, radii[:, None]], axis=-1)             # (M, 7)
+        a       = centers - axes_v * half_h                          # (M, 3)
+        b_      = centers + axes_v * half_h                          # (M, 3)
+        capsules = np.concatenate([a, b_, radii[:, None]], axis=-1)  # (M, 7)
         return empty_s, capsules, empty_b, empty_h
 
     if isinstance(world_geom, Box):
-        centers = np.asarray(world_geom.pose.translation(),           dtype=np.float32)  # (M, 3)
-        R       = np.asarray(world_geom.pose.rotation().as_matrix(),  dtype=np.float32)  # (M, 3, 3)
-        ax1     = R[..., :, 0]                                                           # (M, 3) local X
-        ax2     = R[..., :, 1]                                                           # (M, 3) local Y
-        ax3     = R[..., :, 2]                                                           # (M, 3) local Z
-        hl      = np.asarray(world_geom.half_lengths, dtype=np.float32)                  # (M, 3)
-        boxes   = np.concatenate([centers, ax1, ax2, ax3, hl], axis=-1)                  # (M, 15)
+        centers = _pose_translation_np(world_geom.pose)              # (M, 3)
+        R       = _pose_rotation_matrix_np(world_geom.pose)          # (M, 3, 3)
+        ax1     = R[..., :, 0]                                       # (M, 3) local X
+        ax2     = R[..., :, 1]                                       # (M, 3) local Y
+        ax3     = R[..., :, 2]                                       # (M, 3) local Z
+        hl      = np.asarray(world_geom.half_lengths, dtype=np.float32)  # (M, 3)
+        boxes   = np.concatenate([centers, ax1, ax2, ax3, hl], axis=-1)  # (M, 15)
         return empty_s, empty_c, boxes, empty_h
 
     if isinstance(world_geom, HalfSpace):
-        normals = np.asarray(world_geom.pose.rotation().as_matrix()[..., :, 2],
-                             dtype=np.float32)                                    # (M, 3) — Z col = normal
-        points  = np.asarray(world_geom.pose.translation(), dtype=np.float32)    # (M, 3)
-        halfspaces = np.concatenate([normals, points], axis=-1)                   # (M, 6)
+        R       = _pose_rotation_matrix_np(world_geom.pose)          # (M, 3, 3)
+        normals = R[..., :, 2].astype(np.float32)                    # (M, 3) — Z col = normal
+        points  = _pose_translation_np(world_geom.pose)              # (M, 3)
+        halfspaces = np.concatenate([normals, points], axis=-1)      # (M, 6)
         return empty_s, empty_c, empty_b, halfspaces
 
     raise NotImplementedError(

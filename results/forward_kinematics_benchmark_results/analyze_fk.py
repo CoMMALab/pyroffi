@@ -24,13 +24,13 @@ for robot in ROBOTS:
             if pd.notna(r["cuda_ms"]):
                 rows.append({"robot": robot, "method": "pyronot", "batch_size": int(r["batch"]), "time_ms": r["cuda_ms"]})
 
-    # bench_fk_<robot>_curobo.csv has curobo (cuda_ms)
+    # bench_fk_<robot>_curobo.csv has curobo (graph_ms)
     cpath = OUT_DIR / f"bench_fk_{robot}_curobo.csv"
     if cpath.exists():
         raw = pd.read_csv(cpath)
         for _, r in raw.iterrows():
-            if pd.notna(r["cuda_ms"]):
-                rows.append({"robot": robot, "method": "curobo", "batch_size": int(r["batch"]), "time_ms": r["cuda_ms"]})
+            if pd.notna(r["graph_ms"]):
+                rows.append({"robot": robot, "method": "curobo", "batch_size": int(r["batch"]), "time_ms": r["graph_ms"]})
 
 df = pd.DataFrame(rows)
 df.to_csv(OUT_DIR / "fk_benchmark_aggregated.csv", index=False)

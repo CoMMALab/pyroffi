@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -42,7 +43,8 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
-from ._ik_primitives import _ik_residual, _LS_ALPHAS
+from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
+from ._ls_ik import _prepare_ls_collision_buffers
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +399,9 @@ def sqp_ik_solve(
         "lambda_init",
         "eps_pos",
         "eps_ori",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
         "constraint_fns",
         "target_link_indices",
     ),
@@ -418,6 +423,15 @@ def _sqp_ik_solve_cuda_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_masks:       Array,
     target_jnts:          Array,
+    robot_spheres_local:  Float[Array, "n_rs 4"],
+    robot_sphere_joint_idx: Array,
+    world_spheres:        Float[Array, "n_ws 4"],
+    world_capsules:       Float[Array, "n_wc 7"],
+    world_boxes:          Float[Array, "n_wb 15"],
+    world_halfspaces:     Float[Array, "n_wh 6"],
+    enable_collision:     bool,
+    collision_weight:     float,
+    collision_margin:     float,
     target_link_indices:  tuple[int, ...],
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
@@ -466,6 +480,12 @@ def _sqp_ik_solve_cuda_jit(
         target_jnts    = target_jnts,
         ancestor_masks = ancestor_masks,
         target_T       = target_Ts[None],       # (1, n_ee, 7)
+        robot_spheres_local = robot_spheres_local,
+        robot_sphere_joint_idx = robot_sphere_joint_idx,
+        world_spheres = world_spheres,
+        world_capsules = world_capsules,
+        world_boxes = world_boxes,
+        world_halfspaces = world_halfspaces,
         lower          = lower,
         upper          = upper,
         fixed_mask     = fixed_joint_mask_int,
@@ -476,6 +496,9 @@ def _sqp_ik_solve_cuda_jit(
         lambda_init    = lambda_init,
         eps_pos        = eps_pos,
         eps_ori        = eps_ori,
+        enable_collision = enable_collision,
+        collision_weight = collision_weight,
+        collision_margin = collision_margin,
     )
     cfgs   = cfgs[0]    # (n_seeds, n_act)
     errors = errors[0]  # (n_seeds,)
@@ -523,6 +546,12 @@ def sqp_ik_solve_cuda(
     constraints:         Sequence[Callable] | None = None,
     constraint_args:     Sequence | None = None,
     constraint_weights:  Sequence[float] | None = None,
+    collision_constraint_indices: Sequence[int] | None = None,
+    collision_free:      bool = False,
+    collision_checker:   Any | None = None,
+    collision_world:     Any | None = None,
+    collision_weight:    float = 1e4,
+    collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`sqp_ik_solve`.
@@ -583,11 +612,19 @@ def sqp_ik_solve_cuda(
     else:
         fixed_joint_mask_int = fixed_joint_mask.astype(jnp.int32)
 
-    constraint_fns         = tuple(constraints) if constraints else ()
-    constraint_args_t      = tuple(constraint_args) if constraint_args is not None else ()
-    constraint_weights_arr = (
-        jnp.array(constraint_weights, dtype=jnp.float32)
-        if constraint_weights is not None else None
+    (
+        cuda_constraint_fns,
+        cuda_constraint_args,
+        cuda_constraint_weights,
+        post_constraint_fns,
+        post_constraint_args,
+        post_constraint_weights,
+    ) = split_cuda_and_post_constraints(
+        constraints=constraints,
+        constraint_args=constraint_args,
+        constraint_weights=constraint_weights,
+        collision_constraint_indices=collision_constraint_indices,
+        collision_free=collision_free,
     )
 
     # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
@@ -609,6 +646,16 @@ def sqp_ik_solve_cuda(
     target_jnts    = jnp.array(target_joints_np)
     ancestor_masks = jnp.array(ancestor_masks_np)
 
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+
     winner, winner_coll_cost = _sqp_ik_solve_cuda_jit(
         robot=robot,
         target_poses=target_poses_t,
@@ -626,31 +673,38 @@ def sqp_ik_solve_cuda(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_masks=ancestor_masks,
         target_jnts=target_jnts,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        enable_collision=bool(collision_free and collision_enabled),
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
         target_link_indices=target_link_indices,
-        constraint_fns=constraint_fns,
-        constraint_args=constraint_args_t,
-        constraint_weights=constraint_weights_arr,
+        constraint_fns=cuda_constraint_fns,
+        constraint_args=cuda_constraint_args,
+        constraint_weights=cuda_constraint_weights,
     )
 
     # ── Post-CUDA JAX refinement with constraints only ────────────────────
-    if bool(constraint_fns) and constraint_refine_iters > 0:
+    if bool(post_constraint_fns) and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
             if fixed_joint_mask is not None
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
-        skip = float(winner_coll_cost) <= 1e-6
-        if not skip:
-            winner = _sqp_ik_single(
-                winner, robot, target_link_indices, target_poses_t,
-                constraint_refine_iters, n_inner_iters,
-                lambda_init, pos_weight, ori_weight,
-                robot.joints.lower_limits, robot.joints.upper_limits,
-                fmask,
-                constraint_fns=constraint_fns,
-                constraint_args=constraint_args_t,
-                constraint_weights=constraint_weights_arr,
-            )
+        winner = _sqp_ik_single(
+            winner, robot, target_link_indices, target_poses_t,
+            constraint_refine_iters, n_inner_iters,
+            lambda_init, pos_weight, ori_weight,
+            robot.joints.lower_limits, robot.joints.upper_limits,
+            fmask,
+            constraint_fns=post_constraint_fns,
+            constraint_args=post_constraint_args,
+            constraint_weights=post_constraint_weights,
+        )
 
     return winner
 
@@ -670,6 +724,9 @@ def sqp_ik_solve_cuda(
         "lambda_init",
         "eps_pos",
         "eps_ori",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
         "constraint_fns",
         "target_link_indices",
     ),
@@ -691,6 +748,15 @@ def _sqp_ik_solve_cuda_batch_jit(
     fixed_joint_mask_int: Float[Array, "n_act"],
     ancestor_masks:       Array,
     target_jnts:          Array,
+    robot_spheres_local:  Float[Array, "n_rs 4"],
+    robot_sphere_joint_idx: Array,
+    world_spheres:        Float[Array, "n_ws 4"],
+    world_capsules:       Float[Array, "n_wc 7"],
+    world_boxes:          Float[Array, "n_wb 15"],
+    world_halfspaces:     Float[Array, "n_wh 6"],
+    enable_collision:     bool,
+    collision_weight:     float,
+    collision_margin:     float,
     target_link_indices:  tuple[int, ...],
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
@@ -738,6 +804,12 @@ def _sqp_ik_solve_cuda_batch_jit(
         target_jnts    = target_jnts,
         ancestor_masks = ancestor_masks,
         target_T       = target_T_batch,
+        robot_spheres_local = robot_spheres_local,
+        robot_sphere_joint_idx = robot_sphere_joint_idx,
+        world_spheres = world_spheres,
+        world_capsules = world_capsules,
+        world_boxes = world_boxes,
+        world_halfspaces = world_halfspaces,
         lower          = lower,
         upper          = upper,
         fixed_mask     = fixed_joint_mask_int,
@@ -748,6 +820,9 @@ def _sqp_ik_solve_cuda_batch_jit(
         lambda_init    = lambda_init,
         eps_pos        = eps_pos,
         eps_ori        = eps_ori,
+        enable_collision = enable_collision,
+        collision_weight = collision_weight,
+        collision_margin = collision_margin,
     )
 
     if len(constraint_fns) > 0:
@@ -793,6 +868,12 @@ def sqp_ik_solve_cuda_batch(
     constraints:         Sequence[Callable] | None = None,
     constraint_args:     Sequence | None = None,
     constraint_weights:  Sequence[float] | None = None,
+    collision_constraint_indices: Sequence[int] | None = None,
+    collision_free:      bool = False,
+    collision_checker:   Any | None = None,
+    collision_world:     Any | None = None,
+    collision_weight:    float = 1e4,
+    collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA SQP-IK: solve n_problems targets in a single kernel launch.
@@ -830,11 +911,19 @@ def sqp_ik_solve_cuda_batch(
     else:
         fixed_joint_mask_int = fixed_joint_mask.astype(jnp.int32)
 
-    constraint_fns         = tuple(constraints) if constraints else ()
-    constraint_args_t      = tuple(constraint_args) if constraint_args is not None else ()
-    constraint_weights_arr = (
-        jnp.array(constraint_weights, dtype=jnp.float32)
-        if constraint_weights is not None else None
+    (
+        cuda_constraint_fns,
+        cuda_constraint_args,
+        cuda_constraint_weights,
+        post_constraint_fns,
+        post_constraint_args,
+        post_constraint_weights,
+    ) = split_cuda_and_post_constraints(
+        constraints=constraints,
+        constraint_args=constraint_args,
+        constraint_weights=constraint_weights,
+        collision_constraint_indices=collision_constraint_indices,
+        collision_free=collision_free,
     )
 
     parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
@@ -848,6 +937,16 @@ def sqp_ik_solve_cuda_batch(
         j = int(parent_idx_np[j])
     ancestor_masks = jnp.array(ancestor_mask_np[None, :])
     target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
+
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
 
     winners = _sqp_ik_solve_cuda_batch_jit(
         robot=robot,
@@ -866,13 +965,22 @@ def sqp_ik_solve_cuda_batch(
         fixed_joint_mask_int=fixed_joint_mask_int,
         ancestor_masks=ancestor_masks,
         target_jnts=target_jnts,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        enable_collision=bool(collision_free and collision_enabled),
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
         target_link_indices=target_link_indices,
-        constraint_fns=constraint_fns,
-        constraint_args=constraint_args_t,
-        constraint_weights=constraint_weights_arr,
+        constraint_fns=cuda_constraint_fns,
+        constraint_args=cuda_constraint_args,
+        constraint_weights=cuda_constraint_weights,
     )
 
-    if constraint_fns and constraint_refine_iters > 0:
+    if post_constraint_fns and constraint_refine_iters > 0:
         fmask = (
             fixed_joint_mask.astype(jnp.bool_)
             if fixed_joint_mask is not None
@@ -888,9 +996,9 @@ def sqp_ik_solve_cuda_batch(
                 constraint_refine_iters, n_inner_iters,
                 lambda_init, pos_weight, ori_weight,
                 lower, upper, fmask,
-                constraint_fns=constraint_fns,
-                constraint_args=constraint_args_t,
-                constraint_weights=constraint_weights_arr,
+                constraint_fns=post_constraint_fns,
+                constraint_args=post_constraint_args,
+                constraint_weights=post_constraint_weights,
             )
         )(winners, target_poses.wxyz_xyz)
 
