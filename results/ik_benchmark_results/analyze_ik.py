@@ -528,7 +528,7 @@ sub_fig = df[(df["mode"] == "batch") & (df["collision_free"] == False)]
 PLOT_SOLVERS = ["HJCD-JAX", "HJCD-CUDA", "LS-JAX", "LS-CUDA",
                 "SQP-JAX",  "SQP-CUDA",  "MPPI-JAX", "MPPI-CUDA",
                 "PyRoki", "cuRobo"]
-COLORS_JAX  = "#4C72B0"
+COLORS_JAX  = "#CC2288"
 COLORS_CUDA = "#DD5544"
 COLORS_OTHER = {"PyRoki": "#888888", "cuRobo": "#55A868"}
 
@@ -611,8 +611,8 @@ def _latency_bar_fig(sub_df, title, out_stem, solvers=None):
     legend_elements = [
         Patch(facecolor=COLORS_JAX,  label="JAX backend"),
         Patch(facecolor=COLORS_CUDA, label="CUDA backend"),
-        Patch(facecolor="#55A868",   label="CuRobo"),
-        Patch(facecolor="#888888",   label="PyRoKi"),
+        Patch(facecolor="#55A868",   label="cuRobo"),
+        Patch(facecolor="#4C72B0",   label="PyRoki"),
     ]
     fig.legend(handles=legend_elements, loc="upper center", ncol=4,
                frameon=False, fontsize=9, bbox_to_anchor=(0.5, 1.03))
@@ -800,5 +800,174 @@ fig.savefig(OUT_DIR / "ik_cf_success_heatmap.pdf", bbox_inches="tight")
 fig.savefig(OUT_DIR / "ik_cf_success_heatmap.png", dpi=200, bbox_inches="tight")
 print("Wrote ik_cf_success_heatmap.pdf/.png")
 plt.close(fig)
+
+# ── Figure: Combined CF + no-CF bar chart (grouped by algorithm) ──────────────
+
+print("\n── Figure: Combined CF vs no-CF latency bar charts ──")
+
+def _combined_latency_fig(df_all, mode, title, out_stem):
+    """
+    Single grouped bar chart: major x-groups = algorithm family,
+    minor x-groups = robot.  Each robot gets 4 bars (JAX/CUDA × CF/no-CF)
+    for 'my' methods and 2 bars for baselines.  Hatching distinguishes robots.
+    """
+    n_probs = 256 if mode == "batch" else 1
+
+    MY_GROUPS = [
+        ("HJCD", "HJCD-JAX", "HJCD-CUDA"),
+        ("LS",   "LS-JAX",   "LS-CUDA"),
+        ("SQP",  "SQP-JAX",  "SQP-CUDA"),
+        ("MPPI", "MPPI-JAX", "MPPI-CUDA"),
+    ]
+    OTHER_GROUPS = [
+        ("cuRobo", "CuRobo"),
+        ("PyRoki", "PyRoKi"),
+    ]
+
+    C_JAX_NOCF    = "#CC2288"
+    C_JAX_CF      = "#E88ABF"
+    C_CUDA_NOCF   = "#DD5544"
+    C_CUDA_CF     = "#F2A899"
+    C_CUROBO_NOCF = "#55A868"
+    C_CUROBO_CF   = "#A5D6AF"
+    C_PYROKI_NOCF = "#4C72B0"
+    C_PYROKI_CF   = "#9EB8D9"
+
+    OTHER_COLORS = {
+        "CuRobo": (C_CUROBO_NOCF, C_CUROBO_CF),
+        "PyRoKi": (C_PYROKI_NOCF, C_PYROKI_CF),
+    }
+
+    ROBOT_HATCH = {"panda": "", "fetch": "///", "baxter": "xxx"}
+    ROBOT_SHORT_LABEL = {"panda": "Panda\n(7-DOF)", "fetch": "Fetch\n(8-DOF)", "baxter": "Baxter\n(15-DOF)"}
+
+    sub_nocf = df_all[(df_all["mode"] == mode) & (df_all["collision_free"] == False)]
+    sub_cf   = df_all[(df_all["mode"] == mode) & (df_all["collision_free"] == True)]
+
+    bw         = 0.14   # single bar width
+    robot_gap  = 0.10   # gap between robot sub-groups within an algo group
+    algo_gap   = 0.60   # gap between algorithm groups
+
+    fig, ax = plt.subplots(1, 1, figsize=(22, 9))
+
+    def get_t(rdf, sk):
+        if sk not in rdf.index:
+            return np.nan
+        t = rdf.loc[sk, "t_med_ms"]
+        return float(t) / n_probs * 256 if not pd.isna(t) else np.nan
+
+    cx = 0.0
+    robot_tick_pos    = []
+    robot_tick_labels = []
+    algo_group_spans  = []   # (x_lo, x_hi, label)
+
+    for label, jsk, csk in MY_GROUPS:
+        group_x_lo = cx
+        for robot in ROBOTS:
+            rdf_nocf = sub_nocf[sub_nocf["robot"] == robot].set_index("solver_key")
+            rdf_cf   = sub_cf  [sub_cf  ["robot"] == robot].set_index("solver_key")
+
+            vals   = [get_t(rdf_nocf, jsk), get_t(rdf_cf, jsk),
+                      get_t(rdf_nocf, csk), get_t(rdf_cf, csk)]
+            colors = [C_JAX_NOCF, C_JAX_CF, C_CUDA_NOCF, C_CUDA_CF]
+            hatch  = ROBOT_HATCH[robot]
+
+            for i, (val, col) in enumerate(zip(vals, colors)):
+                if not np.isnan(val):
+                    ax.bar(cx + i * bw, val, width=bw * 0.88, color=col,
+                           hatch=hatch, edgecolor="white", linewidth=0.5, zorder=2)
+
+            robot_tick_pos.append(cx + 1.5 * bw)
+            robot_tick_labels.append(ROBOT_SHORT_LABEL[robot])
+            cx += 4 * bw + robot_gap
+
+        algo_group_spans.append((group_x_lo, cx - robot_gap, label))
+        cx += algo_gap
+
+    for label, sk in OTHER_GROUPS:
+        group_x_lo = cx
+        for robot in ROBOTS:
+            rdf_nocf = sub_nocf[sub_nocf["robot"] == robot].set_index("solver_key")
+            rdf_cf   = sub_cf  [sub_cf  ["robot"] == robot].set_index("solver_key")
+
+            vals   = [get_t(rdf_nocf, sk), get_t(rdf_cf, sk)]
+            c_nocf, c_cf = OTHER_COLORS[sk]
+            hatch  = ROBOT_HATCH[robot]
+
+            for i, (val, col) in enumerate(zip(vals, [c_nocf, c_cf])):
+                if not np.isnan(val):
+                    ax.bar(cx + i * bw, val, width=bw * 0.88, color=col,
+                           hatch=hatch, edgecolor="white", linewidth=0.5, zorder=2)
+
+            # Centre tick in a padded block matching MY_GROUPS width so labels
+            # have the same horizontal space (pad with empty bars on each side)
+            robot_tick_pos.append(cx + 1.5 * bw)
+            robot_tick_labels.append(ROBOT_SHORT_LABEL[robot])
+            cx += 4 * bw + robot_gap   # same block width as MY_GROUPS
+
+        algo_group_spans.append((group_x_lo, cx - robot_gap, label))
+        cx += algo_gap
+
+    # Primary x-ticks: robot labels
+    ax.set_xticks(robot_tick_pos)
+    ax.set_xticklabels(robot_tick_labels, fontsize=15, linespacing=1.2)
+    ax.tick_params(axis="x", length=0, pad=6)
+    ax.tick_params(axis="y", labelsize=16)
+    ax.set_ylabel("Median time (ms, log scale)", fontsize=20)
+    ax.set_yscale("log")
+    ax.grid(True, axis="y", which="both", ls=":", alpha=0.4, zorder=0)
+    ax.set_xlim(-0.4, cx - algo_gap + 0.4)
+
+    # Algo-group labels below robot ticks, separator lines between groups
+    y_anno = -0.17   # axes-fraction y position for group labels
+    for i, (x_lo, x_hi, lbl) in enumerate(algo_group_spans):
+        xmid = (x_lo + x_hi) / 2
+        ax.annotate(lbl,
+                    xy=(xmid, 0), xycoords=("data", "axes fraction"),
+                    xytext=(0, -52), textcoords="offset points",
+                    ha="center", va="top", fontsize=20, fontweight="bold",
+                    annotation_clip=False)
+        if i > 0:
+            sep_x = (algo_group_spans[i-1][1] + x_lo) / 2
+            ax.axvline(sep_x, color="gray", lw=1.0, ls="--", alpha=0.45, zorder=1)
+
+    # Legend: condition colours + robot hatching
+    condition_patches = [
+        Patch(facecolor=C_JAX_NOCF,    label="JAX — No Collision"),
+        Patch(facecolor=C_JAX_CF,      label="JAX — Collision Free"),
+        Patch(facecolor=C_CUDA_NOCF,   label="CUDA — No Collision"),
+        Patch(facecolor=C_CUDA_CF,     label="CUDA — Collision Free"),
+        Patch(facecolor=C_CUROBO_NOCF, label="cuRobo — No Collision"),
+        Patch(facecolor=C_CUROBO_CF,   label="cuRobo — Collision Free"),
+        Patch(facecolor=C_PYROKI_NOCF, label="PyRoki — No Collision"),
+        Patch(facecolor=C_PYROKI_CF,   label="PyRoki — Collision Free"),
+    ]
+    robot_patches = [
+        Patch(facecolor="#aaaaaa", hatch="",    edgecolor="white", label="Panda (7-DOF)"),
+        Patch(facecolor="#aaaaaa", hatch="///", edgecolor="white", label="Fetch (8-DOF)"),
+        Patch(facecolor="#aaaaaa", hatch="xxx", edgecolor="white", label="Baxter (15-DOF)"),
+    ]
+    fig.legend(handles=condition_patches + robot_patches,
+               loc="upper center", ncol=6, frameon=False,
+               fontsize=15, bbox_to_anchor=(0.5, 1.04))
+    fig.suptitle(title, fontsize=22, y=1.09)
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.savefig(OUT_DIR / f"{out_stem}.pdf", bbox_inches="tight")
+    fig.savefig(OUT_DIR / f"{out_stem}.png", dpi=200, bbox_inches="tight")
+    print(f"Wrote {out_stem}.pdf/.png")
+    plt.close(fig)
+
+
+_combined_latency_fig(
+    df, mode="sequential",
+    title="Sequential IK Latency — CF vs No-Collision",
+    out_stem="ik_latency_seq_combined_cf",
+)
+
+_combined_latency_fig(
+    df, mode="batch",
+    title="Batch IK Latency (256 Problems) — CF vs No-Collision",
+    out_stem="ik_latency_batch_combined_cf",
+)
 
 print("\nDone.")
