@@ -65,7 +65,7 @@ import numpy as np
 import pyronot as pk
 import yourdfpy
 
-from pyronot.collision import Box, RobotCollision, Sphere, collide
+from pyronot.collision import Box, RobotCollisionSpherized, Sphere, collide
 from pyronot._robot_srdf_parser import read_disabled_collisions_from_srdf
 
 # Optional NVML for GPU monitoring (nvidia-ml-py / pynvml).
@@ -294,7 +294,7 @@ COLLISION_FREE = True
 
 # Where to persist the obstacle scene.  Reuse this file in curobo / pyroki
 # benchmarks by loading the ``curobo_world_model`` key.
-ENV_FILE = pathlib.Path(__file__).resolve().parent.parent / "resources" / "bench_env.json"
+ENV_FILE = pathlib.Path(__file__).resolve().parent.parent / "resources" / "bench_env_large.json"
 
 # CSV output path.  Results are appended (not overwritten) so multiple runs
 # accumulate.  Set to None to disable CSV output.
@@ -1038,7 +1038,7 @@ def _default_srdf_for_robot(robot_name: str) -> pathlib.Path | None:
 
 
 def _disabled_pairs_from_srdf(srdf_path: pathlib.Path | None) -> tuple[tuple[str, str], ...]:
-    """Load SRDF disabled collision pairs as RobotCollision ignore tuples."""
+    """Load SRDF disabled collision pairs as RobotCollisionSpherized ignore tuples."""
     if srdf_path is None or not srdf_path.exists():
         return ()
     try:
@@ -1266,7 +1266,11 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     urdf_path = ROBOT_URDFS[robot_name]
     if not urdf_path.exists():
         raise FileNotFoundError(f"Spherized URDF not found: {urdf_path}")
-    urdf = yourdfpy.URDF.load(str(urdf_path))
+    mesh_dir = urdf_path.parent / "meshes"
+    if mesh_dir.exists():
+        urdf = yourdfpy.URDF.load(str(urdf_path), mesh_dir=str(mesh_dir))
+    else:
+        urdf = yourdfpy.URDF.load(str(urdf_path))
     robot = pk.Robot.from_urdf(urdf)
     n_act = robot.joints.num_actuated_joints
     target_link_name = _resolve_target_link_name(robot_name, robot)
@@ -1329,7 +1333,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print("\nSetting up collision environment ...")
         srdf_path = _default_srdf_for_robot(robot_name)
         ignore_pairs = _disabled_pairs_from_srdf(srdf_path)
-        robot_coll = RobotCollision.from_urdf(urdf, user_ignore_pairs=ignore_pairs)
+        robot_coll = RobotCollisionSpherized.from_urdf(urdf, user_ignore_pairs=ignore_pairs)
         if srdf_path is not None and srdf_path.exists():
             print(f"  Using SRDF disabled pairs: {srdf_path} ({len(ignore_pairs)} pairs)")
         else:

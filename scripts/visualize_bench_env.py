@@ -13,9 +13,11 @@ import pathlib
 import time
 
 import numpy as np
+import pyronot as pk
 import viser
+import yourdfpy
 
-from pyronot.collision import Box, Sphere
+from pyronot.collision import Box, RobotCollisionSpherized, Sphere
 
 
 def _load_env(path: pathlib.Path) -> dict:
@@ -56,7 +58,86 @@ def _scene_extent_xy(env: dict) -> float:
     return max(2.0, 2.0 * max_abs_xy + 0.5)
 
 
+def _discover_spherized_urdfs(resources_dir: pathlib.Path) -> dict[str, pathlib.Path]:
+    urdf_paths = sorted(resources_dir.rglob("*_spherized.urdf"))
+    out: dict[str, pathlib.Path] = {}
+    collisions: dict[str, list[pathlib.Path]] = {}
+
+    for urdf_path in urdf_paths:
+        stem = urdf_path.stem
+        if not stem.endswith("_spherized"):
+            continue
+        robot_name = stem[: -len("_spherized")]
+        if robot_name in out:
+            collisions.setdefault(robot_name, [out[robot_name]]).append(urdf_path)
+            continue
+        out[robot_name] = urdf_path
+
+    if collisions:
+        msg_lines = []
+        for robot_name, paths in collisions.items():
+            msg_lines.append(f"{robot_name}: {[str(p) for p in paths]}")
+        raise ValueError(
+            "Found duplicate spherized URDFs for robot names:\n" + "\n".join(msg_lines)
+        )
+    return out
+
+
+def _default_cfg_from_limits(robot: pk.Robot) -> np.ndarray:
+    lower = np.asarray(robot.joints.lower_limits, dtype=np.float32)
+    upper = np.asarray(robot.joints.upper_limits, dtype=np.float32)
+    finite = np.isfinite(lower) & np.isfinite(upper)
+    return np.where(finite, 0.5 * (lower + upper), 0.0).astype(np.float32)
+
+
+def _render_robot_primitives(
+    server: viser.ViserServer,
+    robot: pk.Robot,
+    robot_coll: RobotCollisionSpherized,
+    cfg: np.ndarray,
+) -> int:
+    coll_world = robot_coll.at_config(robot, cfg)
+    if not isinstance(coll_world, Sphere):
+        raise TypeError("Expected RobotCollisionSpherized.at_config to return Sphere geometry.")
+
+    batch_axes = coll_world.get_batch_axes()
+    if len(batch_axes) < 2:
+        raise ValueError(f"Unexpected robot collision batch axes: {batch_axes}")
+
+    num_spheres_per_link, num_links = batch_axes[-2], batch_axes[-1]
+    centers = np.asarray(coll_world.pose.translation(), dtype=np.float32)
+    radii = np.asarray(coll_world.radius, dtype=np.float32)
+    blue_rgba = np.array([50, 120, 255, 170], dtype=np.uint8)
+
+    n_rendered = 0
+    for link_idx in range(num_links):
+        link_name = robot_coll.link_names[link_idx].replace("/", "_")
+        for sphere_idx in range(num_spheres_per_link):
+            radius = float(radii[sphere_idx, link_idx])
+            if radius <= 0.0:
+                continue  # Skip padded/degenerate spheres.
+            center = centers[sphere_idx, link_idx]
+            sphere = Sphere.from_center_and_radius(center=center, radius=radius)
+            mesh = sphere.to_trimesh()
+            mesh.visual.face_colors = blue_rgba
+            server.scene.add_mesh_trimesh(
+                f"/robot_primitives/{link_name}/sphere_{sphere_idx}",
+                mesh=mesh,
+            )
+            n_rendered += 1
+    return n_rendered
+
+
 def main() -> None:
+    resources_dir = pathlib.Path("resources")
+    robot_models = _discover_spherized_urdfs(resources_dir)
+    if not robot_models:
+        raise FileNotFoundError(
+            f"No *_spherized.urdf files found under {resources_dir.resolve()}."
+        )
+
+    default_robot = "ur5" if "ur5" in robot_models else sorted(robot_models.keys())[0]
+
     parser = argparse.ArgumentParser(description="Visualize bench_env.json in viser.")
     parser.add_argument(
         "--env",
@@ -66,15 +147,33 @@ def main() -> None:
     )
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Viser host.")
     parser.add_argument("--port", type=int, default=8080, help="Viser port.")
+    parser.add_argument(
+        "--robot",
+        type=str,
+        default=default_robot,
+        choices=tuple(sorted(robot_models.keys())),
+        help="Robot name. Loads resources/**/<robot>_spherized.urdf.",
+    )
     args = parser.parse_args()
 
     env = _load_env(args.env)
     env.setdefault("spheres", [])
     env.setdefault("cuboids", [])
 
+    robot_urdf_path = robot_models[args.robot]
+    robot_mesh_dir = robot_urdf_path.parent / "meshes"
+    if robot_mesh_dir.exists():
+        urdf = yourdfpy.URDF.load(robot_urdf_path.as_posix(), mesh_dir=robot_mesh_dir.as_posix())
+    else:
+        urdf = yourdfpy.URDF.load(robot_urdf_path.as_posix())
+    robot = pk.Robot.from_urdf(urdf)
+    robot_coll = RobotCollisionSpherized.from_urdf(urdf)
+    default_cfg = _default_cfg_from_limits(robot)
+
     server = viser.ViserServer(host=args.host, port=args.port)
     print(f"Viser server started at http://{args.host}:{args.port}")
     print(f"Loaded env: {args.env}")
+    print(f"Loaded robot: {args.robot} ({robot_urdf_path})")
 
     floor = env.get("floor", {})
     floor_pt = np.array(floor.get("point", [0.0, 0.0, 0.0]), dtype=np.float32)
@@ -116,6 +215,9 @@ def main() -> None:
             wxyz=wxyz,
         )
         server.scene.add_mesh_trimesh(f"/env/cuboids/{name}", box.to_trimesh())
+
+    num_robot_spheres = _render_robot_primitives(server, robot, robot_coll, default_cfg)
+    print(f"Rendered {num_robot_spheres} robot collision spheres (blue).")
 
     def _obstacle_options() -> list[str]:
         out: list[str] = []

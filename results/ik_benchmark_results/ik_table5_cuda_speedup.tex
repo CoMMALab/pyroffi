@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\caption{CUDA speedup factor over the equivalent JAX implementation in sequential IK (no collision avoidance). Speedup $= t_{\text{JAX}} / t_{\text{CUDA}}$.}
+\label{tab:ik_cuda_speedup}
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Algorithm} & \textbf{Panda} & \textbf{Fetch} & \textbf{Baxter} \\
+\midrule
+HJCD & 16.1$\times$ & 16.7$\times$ & 13.8$\times$ \\
+LS & 11.9$\times$ & 11.8$\times$ & 9.4$\times$ \\
+SQP & 6.3$\times$ & 6.3$\times$ & 4.8$\times$ \\
+MPPI & 14.4$\times$ & 15.5$\times$ & 15.9$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,29 @@
+\begin{table}[t]
+\centering
+\caption{Batch IK throughput with no collision avoidance (256 simultaneous problems; 5 timed runs). Time is the median wall-clock duration for the full batch (ms). VRAM is the peak GPU memory during inference (MB). Bold: fastest per robot.}
+\label{tab:ik_batch_nocoll}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\multicolumn{1}{c}{} & \multicolumn{2}{c}{\textbf{Panda}} & \multicolumn{2}{c}{\textbf{Fetch}} & \multicolumn{2}{c}{\textbf{Baxter}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+\textbf{Solver} & time (ms) & VRAM (MB) & time (ms) & VRAM (MB) & time (ms) & VRAM (MB) \\
+\midrule
+HJCD (JAX) & 4.11 & 21,180 & 5.73 & 21,214 & 20.44 & 21,222 \\
+HJCD (CUDA) & 0.018 & 21,200 & 0.021 & 21,214 & 0.061 & 21,222 \\
+\midrule
+LS (JAX) & 4.41 & 21,172 & 6.02 & 21,214 & 20.22 & 21,222 \\
+LS (CUDA) & 0.020 & 21,200 & 0.026 & 21,214 & 0.080 & 21,222 \\
+\midrule
+SQP (JAX) & 4.45 & 21,188 & 6.08 & 21,214 & 20.38 & 21,222 \\
+SQP (CUDA) & 0.040 & 21,200 & 0.049 & 21,214 & 0.158 & 21,222 \\
+\midrule
+MPPI (JAX) & 1.24 & 21,200 & 1.62 & 21,214 & 4.93 & 21,222 \\
+MPPI (CUDA) & \textbf{9.0\,\textmu s} & 21,202 & \textbf{0.010} & 21,214 & \textbf{0.022} & 21,222 \\
+\midrule
+PyRoKi & 14.96 & 21,214 & 17.35 & 21,214 & 55.34 & 21,222 \\
+\midrule
+CuRobo & 0.192 & 1,729 & 0.102 & 1,467 & 0.205 & 1,729 \\
+\bottomrule
+\end{tabular}
+\end{table}
