@@ -17,7 +17,10 @@ from viser.extras import ViserUrdf
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import pyronot_snippets as pks
+<<<<<<<< HEAD:examples/18_spherized_trajopt.py
 import yourdfpy
+========
+>>>>>>>> origin/main:examples/07_trajopt.py
 
 
 def main(robot_name: Literal["ur5", "panda"] = "panda"):

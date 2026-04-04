@@ -1,4 +1,11 @@
+<<<<<<<< HEAD:examples/13_spherized_robot_ik.py
 """Spherized Robot IK"""
+========
+"""Basic IK
+
+Simplest Inverse Kinematics Example using PyRoNot.
+"""
+>>>>>>>> origin/main:examples/01_basic_ik.py
 
 import time
 
@@ -8,7 +15,10 @@ import viser
 from viser.extras import ViserUrdf
 
 import pyronot_snippets as pks
+<<<<<<<< HEAD:examples/13_spherized_robot_ik.py
 import yourdfpy
+========
+>>>>>>>> origin/main:examples/01_basic_ik.py
 
 
 def main():
