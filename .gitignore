@@ -15,3 +15,8 @@ htmlcov
 .envrc
 .vite
 build
+HJCD-IK
+resources/learned_ik/*
+pRRTC
+src/pyronot/cuda_kernels/*.so
+src/pyronot/cuda_kernels/*.o

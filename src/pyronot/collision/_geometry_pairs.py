@@ -236,7 +236,7 @@ def box_box(box1: Box, box2: Box) -> Float[Array, "*batch"]:
     # Compute AABB SDF for each box2 vertex in box1's frame
     hl1 = box1.half_lengths
     q2 = jnp.abs(verts2_in_box1) - hl1[..., None, :]
-    outside2 = jnp.linalg.norm(jnp.maximum(q2, 0.0), axis=-1)
+    outside2 = jnp.sqrt(jnp.sum(jnp.maximum(q2, 0.0) ** 2, axis=-1) + 1e-12)
     inside2 = jnp.minimum(jnp.max(q2, axis=-1), 0.0)
     sdist2_to_box1 = outside2 + inside2  # (*batch, 8)
     min_dist2 = jnp.min(sdist2_to_box1, axis=-1)
@@ -247,7 +247,7 @@ def box_box(box1: Box, box2: Box) -> Float[Array, "*batch"]:
     verts1_in_box2 = box2.pose.inverse().apply(verts1_world)
     
     q1 = jnp.abs(verts1_in_box2) - hl2[..., None, :]
-    outside1 = jnp.linalg.norm(jnp.maximum(q1, 0.0), axis=-1)
+    outside1 = jnp.sqrt(jnp.sum(jnp.maximum(q1, 0.0) ** 2, axis=-1) + 1e-12)
     inside1 = jnp.minimum(jnp.max(q1, axis=-1), 0.0)
     sdist1_to_box2 = outside1 + inside1  # (*batch, 8)
     min_dist1 = jnp.min(sdist1_to_box2, axis=-1)
@@ -267,7 +267,7 @@ def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
 
     hl = box.half_lengths
     q = jnp.abs(sph_pos_b) - hl
-    outside = jnp.linalg.norm(jnp.maximum(q, 0.0), axis=-1)
+    outside = jnp.sqrt(jnp.sum(jnp.maximum(q, 0.0) ** 2, axis=-1) + 1e-12)
     inside = jnp.minimum(jnp.max(q, axis=-1), 0.0)
     sdist_box = outside + inside
 
@@ -308,7 +308,7 @@ def box_capsule(box: Box, capsule: Capsule) -> Float[Array, "*batch"]:
     q = jnp.abs(p) - hl
 
     # Standard AABB SDF
-    outside = jnp.linalg.norm(jnp.maximum(q, 0.0), axis=-1)
+    outside = jnp.sqrt(jnp.sum(jnp.maximum(q, 0.0) ** 2, axis=-1) + 1e-12)
     inside = jnp.minimum(jnp.max(q, axis=-1), 0.0)
     sdist_box = outside + inside
 

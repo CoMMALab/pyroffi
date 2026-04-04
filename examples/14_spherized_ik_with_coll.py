@@ -8,12 +8,19 @@ import time
 import numpy as np
 import pyronot as pk
 import viser
+<<<<<<<< HEAD:examples/14_spherized_ik_with_coll.py
 from pyronot.collision import HalfSpace, RobotCollision, RobotCollisionSpherized, Sphere
+========
+from pyronot.collision import HalfSpace, RobotCollision, Sphere
+>>>>>>>> origin/main:examples/04_ik_with_coll.py
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
 
 import pyronot_snippets as pks
+<<<<<<<< HEAD:examples/14_spherized_ik_with_coll.py
 import yourdfpy
+========
+>>>>>>>> origin/main:examples/04_ik_with_coll.py
 
 
 def main():
