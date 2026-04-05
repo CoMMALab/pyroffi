@@ -90,12 +90,13 @@ print(latex_str)
 
 # ── 2. Scaling plot ──
 
-fig, axes = plt.subplots(1, len(ROBOT_ORDER), figsize=(14, 3.5), sharey=True)
-
+fig, axes = plt.subplots(2, 2, figsize=(10, 6.5), sharey=True)
+axes_flat = axes.flatten()
+font_size = 16
 COLORS = {"pyroki": "#4C72B0", "pyronot": "#DD5544", "curobo": "#55A868"}
 MARKERS = {"pyroki": "o", "pyronot": "s", "curobo": "^"}
-
-for ax, robot in zip(axes, ROBOT_ORDER):
+CASE_LABELS = {"pyroki": "PyRoki (JAX)", "pyronot": "PyRoFFI (CUDA)", "curobo": "cuRobo"}
+for ax, robot in zip(axes_flat, ROBOT_ORDER):
     rdf = df[df["robot"] == robot]
     for method in METHOD_ORDER:
         mdf = rdf[rdf["method"] == method].sort_values("batch_size")
@@ -103,23 +104,25 @@ for ax, robot in zip(axes, ROBOT_ORDER):
             continue
         ax.plot(mdf["batch_size"], mdf["time_ms"],
                 marker=MARKERS[method], markersize=5, linewidth=1.5,
-                color=COLORS[method], label=method)
+                color=COLORS[method], label=CASE_LABELS[method])
 
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
-    ax.set_title(ROBOT_LABELS[robot], fontsize=10)
-    ax.set_xlabel("Batch size")
+    ax.set_title(ROBOT_LABELS[robot], fontsize=font_size)
+    ax.set_xlabel("Batch size", fontsize=font_size)
     ax.grid(True, which="both", ls=":", alpha=0.4)
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(
         lambda x, _: f"$2^{{{int(np.log2(x))}}}$" if x >= 1 and np.log2(x) == int(np.log2(x)) else ""))
     all_batches = sorted(rdf["batch_size"].unique())
     ax.set_xticks(all_batches[::2])
-    ax.tick_params(axis="x", labelsize=8, rotation=0)
+    ax.tick_params(axis="x", labelsize=11, rotation=0)
+    ax.tick_params(axis="y", labelsize=11)
 
-axes[0].set_ylabel("Time (ms)")
-handles, labels = axes[0].get_legend_handles_labels()
+for ax in axes[:, 0]:
+    ax.set_ylabel("Time (ms)", fontsize=font_size)
+handles, labels = axes_flat[0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="upper center", ncol=len(METHOD_ORDER),
-           frameon=False, fontsize=9, bbox_to_anchor=(0.5, 1.02))
+           frameon=False, fontsize=font_size, bbox_to_anchor=(0.5, 1.03))
 fig.tight_layout(rect=[0, 0, 1, 0.93])
 fig.savefig(OUT_DIR / "fk_scaling.pdf", bbox_inches="tight")
 fig.savefig(OUT_DIR / "fk_scaling.png", dpi=200, bbox_inches="tight")
