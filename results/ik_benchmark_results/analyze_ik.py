@@ -61,14 +61,14 @@ BATCH_SOLVER_ORDER = [
 ]
 
 SOLVER_DISPLAY = {
-    "HJCD-JAX":  r"PyRoNot-HJCD (JAX)",
-    "HJCD-CUDA": r"PyRoNot-HJCD (CUDA)",
-    "LS-JAX":    r"PyRoNot-LS (JAX)",
-    "LS-CUDA":   r"PyRoNot-LS (CUDA)",
-    "SQP-JAX":   r"PyRoNot-SQP (JAX)",
-    "SQP-CUDA":  r"PyRoNot-SQP (CUDA)",
-    "MPPI-JAX":  r"PyRoNot-MPPI (JAX)",
-    "MPPI-CUDA": r"PyRoNot-MPPI (CUDA)",
+    "HJCD-JAX":  r"PyRoFFI-HJCD (JAX)",
+    "HJCD-CUDA": r"PyRoFFI-HJCD (CUDA)",
+    "LS-JAX":    r"PyRoFFI-LS (JAX)",
+    "LS-CUDA":   r"PyRoFFI-LS (CUDA)",
+    "SQP-JAX":   r"PyRoFFI-SQP (JAX)",
+    "SQP-CUDA":  r"PyRoFFI-SQP (CUDA)",
+    "MPPI-JAX":  r"PyRoFFI-MPPI (JAX)",
+    "MPPI-CUDA": r"PyRoFFI-MPPI (CUDA)",
     "Learned-JAX": r"Learned (JAX)",
     "PyRoki":    r"PyRoki",
     "cuRobo":    r"cuRobo",
@@ -481,7 +481,7 @@ piv5 = sub5.pivot_table(index="solver_key", columns="robot",
 
 ALGO_PAIRS = [("HJCD-JAX", "HJCD-CUDA"), ("LS-JAX", "LS-CUDA"),
               ("SQP-JAX", "SQP-CUDA"),   ("MPPI-JAX", "MPPI-CUDA")]
-ALGO_NAMES = {"HJCD": "PyRoNot-HJCD", "LS": "PyRoNot-LS", "SQP": "PyRoNot-SQP", "MPPI": "PyRoNot-MPPI"}
+ALGO_NAMES = {"HJCD": "PyRoFFI-HJCD", "LS": "PyRoFFI-LS", "SQP": "PyRoFFI-SQP", "MPPI": "PyRoFFI-MPPI"}
 
 lines = []
 lines.append(r"\begin{table}[t]")
@@ -815,10 +815,10 @@ def _combined_latency_fig(df_all, mode, title, out_stem, my_groups=None, vertica
     n_probs = 256 if mode == "batch" else 1
 
     _DEFAULT_MY_GROUPS = [
-        ("PyRoNot-HJCD", "HJCD-JAX", "HJCD-CUDA"),
-        ("PyRoNot-LS",   "LS-JAX",   "LS-CUDA"),
-        ("PyRoNot-SQP",  "SQP-JAX",  "SQP-CUDA"),
-        ("PyRoNot-MPPI", "MPPI-JAX", "MPPI-CUDA"),
+        ("PyRoFFI-HJCD", "HJCD-JAX", "HJCD-CUDA"),
+        ("PyRoFFI-LS",   "LS-JAX",   "LS-CUDA"),
+        ("PyRoFFI-SQP",  "SQP-JAX",  "SQP-CUDA"),
+        ("PyRoFFI-MPPI", "MPPI-JAX", "MPPI-CUDA"),
     ]
     MY_GROUPS = my_groups if my_groups is not None else _DEFAULT_MY_GROUPS
     OTHER_GROUPS = [
@@ -1001,7 +1001,7 @@ _combined_latency_fig(
     df, mode="batch",
     title="Batch IK Latency (256 Problems)",
     out_stem="ik_latency_batch_mppi_baselines_cf",
-    my_groups=[("PyRoNot-MPPI", "MPPI-JAX", "MPPI-CUDA")],
+    my_groups=[("PyRoFFI-MPPI", "MPPI-JAX", "MPPI-CUDA")],
     vertical_legend=True,
 )
 
