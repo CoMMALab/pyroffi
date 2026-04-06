@@ -72,9 +72,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=2048)
     parser.add_argument("--seeds-per-launch", type=int, default=2048)
-    parser.add_argument("--restarts-per-target", type=int, default=8)
+    parser.add_argument("--restarts-per-target", type=int, default=1)
     parser.add_argument("--max-iter", type=int, default=32)
-    parser.add_argument("--n-iterations", type=int, default=100)
+    parser.add_argument("--n-iterations", type=int, default=10)
     parser.add_argument("--noise-std", type=float, default=0.01)
     parser.add_argument(
         "--threads-per-block",

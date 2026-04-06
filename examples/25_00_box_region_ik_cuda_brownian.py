@@ -59,8 +59,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=2048)
     parser.add_argument("--seeds-per-launch", type=int, default=2048)
-    parser.add_argument("--restarts-per-target", type=int, default=8)
-    parser.add_argument("--max-iter", type=int, default=32)
+    parser.add_argument("--restarts-per-target", type=int, default=3)
+    parser.add_argument("--max-iter", type=int, default=10)
     parser.add_argument("--noise-std", type=float, default=0.01)
     parser.add_argument("--threads-per-block", type=int, default=128,
                         help="CUDA threads per block (multiple of 32; for current build use <= 384).")
