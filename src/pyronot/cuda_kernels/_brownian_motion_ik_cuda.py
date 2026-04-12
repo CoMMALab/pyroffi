@@ -1,8 +1,12 @@
-"""JAX FFI wrapper for region-projection LS-IK CUDA kernel.
+"""JAX FFI wrapper for the Brownian-motion region IK CUDA kernel.
 
 Compile the companion shared library first:
 
-    bash src/pyronot/cuda_kernels/build_region_ls_ik_cuda.sh
+    bash src/pyronot/cuda_kernels/build_brownian_motion_ik_cuda.sh
+
+The kernel accepts per-problem box bounds (box_mins / box_maxs with shape
+(n_problems, 3)), enabling multiple distinct regions to be solved in a
+single kernel launch.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float, Int
 
-_LIB_NAME = "_region_ls_ik_cuda_lib.so"
+_LIB_NAME = "_brownian_motion_ik_cuda_lib.so"
 
 
 @lru_cache(maxsize=1)
@@ -25,8 +29,8 @@ def _load_and_register() -> None:
     lib_path = Path(__file__).parent / _LIB_NAME
     if not lib_path.exists():
         raise RuntimeError(
-            f"Region LS-IK CUDA library not found at {lib_path}.\n"
-            "Compile it first with: bash src/pyronot/cuda_kernels/build_region_ls_ik_cuda.sh\n"
+            f"Brownian-motion IK CUDA library not found at {lib_path}.\n"
+            "Compile it first with: bash src/pyronot/cuda_kernels/build_brownian_motion_ik_cuda.sh\n"
         )
 
     lib = ctypes.CDLL(str(lib_path))
@@ -36,11 +40,11 @@ def _load_and_register() -> None:
     _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
 
     capsule = _PyCapsule_New(
-        ctypes.cast(getattr(lib, "RegionLsIkCudaFfi"), ctypes.c_void_p),
+        ctypes.cast(getattr(lib, "BrownianMotionIkCudaFfi"), ctypes.c_void_p),
         b"xla._CUSTOM_CALL_TARGET",
         None,
     )
-    jax.ffi.register_ffi_target("region_ls_ik_cuda", capsule, platform="CUDA")
+    jax.ffi.register_ffi_target("brownian_motion_ik_cuda", capsule, platform="CUDA")
 
 
 def _robot_buffers(
@@ -65,7 +69,7 @@ def _robot_buffers(
     )
 
 
-def region_ls_ik_cuda(
+def brownian_motion_ik_cuda(
     seeds: Float[Array, "n_problems n_seeds n_act"],
     init_points: Float[Array, "n_problems n_seeds 3"],
     twists: Float[Array, "n_joints 6"],
@@ -78,8 +82,8 @@ def region_ls_ik_cuda(
     topo_inv: Int[Array, " n_joints"],
     ancestor_mask: Int[Array, " n_joints"],
     target_quat: Float[Array, "4"],
-    box_min: Float[Array, "3"],
-    box_max: Float[Array, "3"],
+    box_mins: Float[Array, "n_problems 3"],
+    box_maxs: Float[Array, "n_problems 3"],
     lower: Float[Array, " n_act"],
     upper: Float[Array, " n_act"],
     fixed_mask: Int[Array, " n_act"],
@@ -101,6 +105,11 @@ def region_ls_ik_cuda(
     Float[Array, "n_problems n_seeds 3"],
     Float[Array, "n_problems n_seeds 3"],
 ]:
+    """Run multi-seed brownian-motion region IK on the GPU.
+
+    Each problem has its own axis-aligned box defined by box_mins[p] and
+    box_maxs[p], enabling multiple distinct regions in a single kernel launch.
+    """
     _load_and_register()
 
     n_problems, n_seeds, n_act = seeds.shape
@@ -116,7 +125,7 @@ def region_ls_ik_cuda(
     )
 
     cfgs, errs, ee_points, target_points = jax.ffi.ffi_call(
-        "region_ls_ik_cuda",
+        "brownian_motion_ik_cuda",
         (
             jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
             jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),
@@ -129,8 +138,8 @@ def region_ls_ik_cuda(
         *rb,
         ancestor_mask.astype(jnp.int32),
         target_quat.astype(jnp.float32),
-        box_min.astype(jnp.float32),
-        box_max.astype(jnp.float32),
+        box_mins.astype(jnp.float32),
+        box_maxs.astype(jnp.float32),
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),

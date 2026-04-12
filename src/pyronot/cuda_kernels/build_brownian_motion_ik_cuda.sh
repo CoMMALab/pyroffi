@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build _region_ls_ik_cuda_lib.so from _region_ls_ik_cuda_kernel.cu.
+# Build _brownian_motion_ik_cuda_lib.so from _brownian_motion_ik_cuda_kernel.cu.
 #
 # Usage (from repo root):
-#   bash src/pyronot/cuda_kernels/build_region_ls_ik_cuda.sh
-#   bash src/pyronot/cuda_kernels/build_region_ls_ik_cuda.sh --debug
+#   bash src/pyronot/cuda_kernels/build_brownian_motion_ik_cuda.sh
+#   bash src/pyronot/cuda_kernels/build_brownian_motion_ik_cuda.sh --debug
 
 set -euo pipefail
 
@@ -45,8 +45,8 @@ if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/_region_ls_ik_cuda_kernel.cu"
-OUT="${SCRIPT_DIR}/_region_ls_ik_cuda_lib.so"
+SRC="${SCRIPT_DIR}/_brownian_motion_ik_cuda_kernel.cu"
+OUT="${SCRIPT_DIR}/_brownian_motion_ik_cuda_lib.so"
 
 JAXLIB_INC="$(python3 -c "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
 

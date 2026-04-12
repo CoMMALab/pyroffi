@@ -223,8 +223,8 @@ void hit_and_run_ik_kernel(
     const int*   __restrict__ mimic_act_idx,
     const int*   __restrict__ topo_inv,
     const int*   __restrict__ ancestor_masks,
-    const float* __restrict__ box_min,
-    const float* __restrict__ box_max,
+    const float* __restrict__ box_mins,   // (n_problems * 3) — per-problem box min
+    const float* __restrict__ box_maxs,   // (n_problems * 3) — per-problem box max
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -250,8 +250,8 @@ void hit_and_run_ik_kernel(
     __shared__ float s_lower[MAX_ACT];
     __shared__ float s_upper[MAX_ACT];
     __shared__ int   s_fixed_mask[MAX_ACT];
-    __shared__ float s_box_min[3];
-    __shared__ float s_box_max[3];
+    // NOTE: box bounds are per-problem; each warp reads its own bounds into
+    // local registers (w_box_min/w_box_max) rather than block-wide shared memory.
 
     for (int i = threadIdx.x; i < n_joints * 6; i += blockDim.x) s_twists[i]    = twists[i];
     for (int i = threadIdx.x; i < n_joints * 7; i += blockDim.x) s_parent_tf[i] = parent_tf[i];
@@ -269,10 +269,6 @@ void hit_and_run_ik_kernel(
         s_upper[i]      = upper[i];
         s_fixed_mask[i] = fixed_mask[i];
     }
-    for (int i = threadIdx.x; i < 3; i += blockDim.x) {
-        s_box_min[i] = box_min[i];
-        s_box_max[i] = box_max[i];
-    }
     __syncthreads();
 
     const int warp_id_in_block = threadIdx.x >> 5;
@@ -284,6 +280,16 @@ void hit_and_run_ik_kernel(
 
     const int problem_idx = global_chain_idx / n_samples;
     const int chain_idx = global_chain_idx % n_samples;
+
+    // Per-warp box bounds: lane 0 caches the 6 floats from global memory.
+    // Other lanes never access these; only lane 0 uses them for target generation.
+    float w_box_min[3], w_box_max[3];
+    if (lane_id == 0) {
+        for (int k = 0; k < 3; k++) {
+            w_box_min[k] = box_mins[problem_idx * 3 + k];
+            w_box_max[k] = box_maxs[problem_idx * 3 + k];
+        }
+    }
 
     uint32_t rng_state = (uint32_t)(*rng_seed_ptr)
                        ^ (uint32_t)(chain_idx * 0x9e3779b9u)
@@ -298,16 +304,17 @@ void hit_and_run_ik_kernel(
     float* cfg     = J       + MAX_ACT * 6;
     float* best_cfg = cfg    + MAX_ACT;
     float* r       = best_cfg + MAX_ACT;
-    float* r_trial = r + 6;
-    float* col_scale = r_trial + 6;
+    float* col_scale = r + 6;
     float* A         = col_scale + MAX_ACT;
     float* rhs       = A + MAX_ACT * MAX_ACT;
-    float* s_target  = rhs + MAX_ACT;           // 7 floats: shared target pose for all lanes
+    float* direction = rhs + MAX_ACT;           // n_act floats: shared direction for all lanes
+    float* s_target  = direction + MAX_ACT;     // 7 floats: shared target pose for all lanes
 
     const float W[6] = {
         pos_weight, pos_weight, pos_weight,
         ori_weight, ori_weight, ori_weight,
     };
+    (void)noise_std;
     float lam = lambda_init;
 
     for (int a = lane_id; a < n_act; a += 32)
@@ -317,6 +324,89 @@ void hit_and_run_ik_kernel(
     float best_err = 1e30f;
 
     for (int iter = 0; iter < n_iterations; iter++) {
+        lam = lambda_init;
+
+        if (iter > 0) {
+            // Hit-and-run step from current feasible state:
+            // 1) sample random direction on S^(n-1),
+            // 2) clip with joint limits to get [lambda_min, lambda_max],
+            // 3) sample lambda uniformly on the chord.
+            float local_norm_sq = 0.0f;
+            for (int a = lane_id; a < n_act; a += 32) {
+                float g = 0.0f;
+                if (!s_fixed_mask[a]) {
+                    g = rng_normal(rng_state);
+                    local_norm_sq += g * g;
+                }
+                direction[a] = g;
+            }
+
+            for (int off = 16; off > 0; off >>= 1) {
+                local_norm_sq += __shfl_down_sync(0xffffffffu, local_norm_sq, off);
+            }
+
+            float inv_dir_norm = 0.0f;
+            if (lane_id == 0) {
+                const float norm_sq = fmaxf(local_norm_sq, 1e-20f);
+                inv_dir_norm = rsqrtf(norm_sq);
+            }
+            inv_dir_norm = __shfl_sync(0xffffffffu, inv_dir_norm, 0);
+
+            for (int a = lane_id; a < n_act; a += 32) {
+                direction[a] *= inv_dir_norm;
+            }
+            __syncwarp();
+
+            float local_lmin = -1e30f;
+            float local_lmax =  1e30f;
+            for (int a = lane_id; a < n_act; a += 32) {
+                if (s_fixed_mask[a]) continue;
+                const float d = direction[a];
+                if (fabsf(d) <= 1e-9f) continue;
+
+                float lo = (s_lower[a] - best_cfg[a]) / d;
+                float hi = (s_upper[a] - best_cfg[a]) / d;
+                if (lo > hi) {
+                    const float tmp = lo;
+                    lo = hi;
+                    hi = tmp;
+                }
+                local_lmin = fmaxf(local_lmin, lo);
+                local_lmax = fminf(local_lmax, hi);
+            }
+
+            for (int off = 16; off > 0; off >>= 1) {
+                local_lmin = fmaxf(local_lmin, __shfl_down_sync(0xffffffffu, local_lmin, off));
+                local_lmax = fminf(local_lmax, __shfl_down_sync(0xffffffffu, local_lmax, off));
+            }
+
+            float sampled_lambda = 0.0f;
+            int valid_interval = 1;
+            if (lane_id == 0) {
+                const float lambda_min = local_lmin;
+                const float lambda_max = local_lmax;
+                if (!(lambda_min < lambda_max)) {
+                    valid_interval = 0;
+                    sampled_lambda = 0.0f;
+                } else {
+                    const float u = (float)(xorshift32(rng_state) >> 8) * (1.0f / 16777216.0f);
+                    sampled_lambda = lambda_min + u * (lambda_max - lambda_min);
+                }
+            }
+            sampled_lambda = __shfl_sync(0xffffffffu, sampled_lambda, 0);
+            valid_interval = __shfl_sync(0xffffffffu, valid_interval, 0);
+
+            for (int a = lane_id; a < n_act; a += 32) {
+                if (s_fixed_mask[a] || !valid_interval) {
+                    cfg[a] = best_cfg[a];
+                } else {
+                    cfg[a] = clampf(best_cfg[a] + sampled_lambda * direction[a], s_lower[a], s_upper[a]);
+                }
+            }
+            __syncwarp();
+            best_err = 1e30f;
+        }
+
         // Sample a random Cartesian target inside the box.
         // Only lane 0 writes into the per-warp shared workspace so that all
         // lanes see a consistent target_T after __syncwarp().
@@ -325,9 +415,9 @@ void hit_and_run_ik_kernel(
             const float u1 = (float)(xorshift32(rng_state) >> 8) * (1.0f / 16777216.0f);
             const float u2 = (float)(xorshift32(rng_state) >> 8) * (1.0f / 16777216.0f);
             s_target[0] = 1.0f; s_target[1] = 0.0f; s_target[2] = 0.0f; s_target[3] = 0.0f;
-            s_target[4] = s_box_min[0] + u0 * (s_box_max[0] - s_box_min[0]);
-            s_target[5] = s_box_min[1] + u1 * (s_box_max[1] - s_box_min[1]);
-            s_target[6] = s_box_min[2] + u2 * (s_box_max[2] - s_box_min[2]);
+            s_target[4] = w_box_min[0] + u0 * (w_box_max[0] - w_box_min[0]);
+            s_target[5] = w_box_min[1] + u1 * (w_box_max[1] - w_box_min[1]);
+            s_target[6] = w_box_min[2] + u2 * (w_box_max[2] - w_box_min[2]);
         }
         __syncwarp();
 
@@ -340,6 +430,11 @@ void hit_and_run_ik_kernel(
             for (int k = 0; k < 6; k++) {
                 float rw = r[k] * W[k];
                 curr_err += rw * rw;
+            }
+
+            if (curr_err < best_err) {
+                best_err = curr_err;
+                for (int a = 0; a < n_act; a++) best_cfg[a] = cfg[a];
             }
 
             if (norm3(r) < eps_pos && norm3(r+3) < eps_ori) break;
@@ -369,21 +464,6 @@ void hit_and_run_ik_kernel(
                 best_err = trial_err;
                 for (int a = 0; a < n_act; a++) best_cfg[a] = cfg[a];
             }
-        }
-
-        if (iter < n_iterations - 1) {
-            for (int a = lane_id; a < n_act; a += 32) {
-                if (s_fixed_mask[a]) cfg[a] = best_cfg[a];
-                else {
-                    float u1 = (float)(xorshift32(rng_state) >> 8) * (1.0f / 16777216.0f);
-                    float u2 = (float)(xorshift32(rng_state) >> 8) * (1.0f / 16777216.0f);
-                    float noise = sqrtf(-2.0f * logf(u1 + 1e-7f)) * cosf(6.2831853f * u2);
-                    cfg[a] = best_cfg[a] + noise_std * noise;
-                    cfg[a] = clampf(cfg[a], s_lower[a], s_upper[a]);
-                }
-            }
-            __syncwarp();
-            best_err = 1e30f;
         }
     }
 
@@ -418,8 +498,8 @@ static ffi::Error HitAndRunIkCudaImpl(
     ffi::Buffer<ffi::DataType::S32> mimic_act_idx,
     ffi::Buffer<ffi::DataType::S32> topo_inv,
     ffi::Buffer<ffi::DataType::S32> ancestor_masks,
-    ffi::Buffer<ffi::DataType::F32> box_min,
-    ffi::Buffer<ffi::DataType::F32> box_max,
+    ffi::Buffer<ffi::DataType::F32> box_mins,   // (n_problems, 3) — per-problem
+    ffi::Buffer<ffi::DataType::F32> box_maxs,   // (n_problems, 3) — per-problem
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -476,8 +556,8 @@ static ffi::Error HitAndRunIkCudaImpl(
         mimic_act_idx.typed_data(),
         topo_inv.typed_data(),
         ancestor_masks.typed_data(),
-        box_min.typed_data(),
-        box_max.typed_data(),
+        box_mins.typed_data(),
+        box_maxs.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -515,8 +595,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // mimic_act_idx
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // topo_inv
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // ancestor_masks
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_min
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_max
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_mins  (n_problems, 3)
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_maxs  (n_problems, 3)
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask

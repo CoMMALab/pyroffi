@@ -76,8 +76,8 @@ def hit_and_run_ik_cuda(
     mimic_act_idx: Int[Array, " n_joints"],
     topo_inv: Int[Array, " n_joints"],
     ancestor_mask: Int[Array, " n_joints"],
-    box_min: Float[Array, "3"],
-    box_max: Float[Array, "3"],
+    box_mins: Float[Array, "n_problems 3"],
+    box_maxs: Float[Array, "n_problems 3"],
     lower: Float[Array, " n_act"],
     upper: Float[Array, " n_act"],
     fixed_mask: Int[Array, " n_act"],
@@ -99,6 +99,11 @@ def hit_and_run_ik_cuda(
     Float[Array, "n_problems n_samples 3"],
     Float[Array, "n_problems n_samples 3"],
 ]:
+    """Run multi-seed hit-and-run region IK on the GPU.
+
+    Each problem has its own axis-aligned box defined by box_mins[p] and
+    box_maxs[p], enabling multiple distinct regions in a single kernel launch.
+    """
     _load_and_register()
 
     n_problems, n_samples, n_act = seeds.shape
@@ -125,8 +130,8 @@ def hit_and_run_ik_cuda(
         seeds.astype(jnp.float32),
         *rb,
         ancestor_mask.astype(jnp.int32),
-        box_min.astype(jnp.float32),
-        box_max.astype(jnp.float32),
+        box_mins.astype(jnp.float32),
+        box_maxs.astype(jnp.float32),
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),

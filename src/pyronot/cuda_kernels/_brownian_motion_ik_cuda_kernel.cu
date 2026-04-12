@@ -1,5 +1,5 @@
 /**
- * Region-projection LS-IK CUDA kernel: Warp-per-Problem optimised.
+ * Brownian-motion region IK CUDA kernel: Warp-per-Problem optimised.
  *
  * Key changes from the Thread-per-Problem version:
  *
@@ -24,16 +24,15 @@
  *      closed-form Cramer's-rule solve for the 3×3 system, replacing the
  *      general looped Cholesky.  No loops, no branches.
  *
- *   5. Build with --use_fast_math for hardware SFU (sqrtf, rsqrtf, etc.).
+ *   5. Batched-box support: each problem carries its own axis-aligned
+ *      box defined by box_mins[p*3 .. p*3+2] and box_maxs[p*3 .. p*3+2].
+ *      This enables multiple distinct regions to be solved in a single
+ *      kernel launch with zero overhead.
  *
- * Unchanged from the previous version:
- *   - Kernel signature / XLA FFI binding.
- *   - Algorithm structure (Phase 1 GN + Phase 2 null-space Brownian).
- *   - Jacobian-reuse every 3rd iteration in Phase 1.
- *   - Phase 2 periodic FK check and corrective GN.
+ *   6. Build with --use_fast_math for hardware SFU (sqrtf, rsqrtf, etc.).
  *
  * Build:
- *   bash src/pyronot/cuda_kernels/build_region_ls_ik_cuda.sh
+ *   bash src/pyronot/cuda_kernels/build_brownian_motion_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"
@@ -72,10 +71,12 @@ namespace ffi = xla::ffi;
                            + WSMEM_SCRATCH_SZ)
 
 // Static shared memory used by per-block cached kinematics arrays.
+// Box bounds are per-problem and held in registers on lane 0, so they
+// are NOT included in this budget.
 #define STATIC_SMEM_BYTES ( \
     sizeof(float) * ( \
         (MAX_JOINTS * 6) + (MAX_JOINTS * 7) + (MAX_JOINTS) + (MAX_JOINTS) + \
-        (MAX_ACT) + (MAX_ACT) + 4 + 3 + 3 \
+        (MAX_ACT) + (MAX_ACT) + 4 \
     ) + \
     sizeof(int) * ( \
         (MAX_JOINTS) + (MAX_JOINTS) + (MAX_JOINTS) + (MAX_JOINTS) + (MAX_JOINTS) + (MAX_ACT) \
@@ -336,7 +337,7 @@ static __device__ void gn_step_warp(
 // ---------------------------------------------------------------------------
 
 __global__
-void region_ls_ik_warp_kernel(
+void brownian_motion_ik_kernel(
     const float* __restrict__ seeds,
     const float* __restrict__ init_points,
     const float* __restrict__ twists,
@@ -349,8 +350,8 @@ void region_ls_ik_warp_kernel(
     const int*   __restrict__ topo_inv,
     const int*   __restrict__ ancestor_mask,
     const float* __restrict__ target_quat,
-    const float* __restrict__ box_min,
-    const float* __restrict__ box_max,
+    const float* __restrict__ box_mins,   // (n_problems * 3) — per-problem box min
+    const float* __restrict__ box_maxs,   // (n_problems * 3) — per-problem box max
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -378,8 +379,8 @@ void region_ls_ik_warp_kernel(
     __shared__ float s_upper[MAX_ACT];
     __shared__ int   s_fixed_mask[MAX_ACT];
     __shared__ float s_target_quat[4];
-    __shared__ float s_box_min[3];
-    __shared__ float s_box_max[3];
+    // NOTE: box bounds are per-problem and are held in lane-0 local registers
+    // (w_box_min/w_box_max), not in block-wide shared memory.
 
     for (int i = threadIdx.x; i < n_joints * 6; i += blockDim.x) s_twists[i]      = twists[i];
     for (int i = threadIdx.x; i < n_joints * 7; i += blockDim.x) s_parent_tf[i]   = parent_tf[i];
@@ -398,10 +399,6 @@ void region_ls_ik_warp_kernel(
         s_fixed_mask[i] = fixed_mask[i];
     }
     for (int i = threadIdx.x; i < 4; i += blockDim.x) s_target_quat[i] = target_quat[i];
-    for (int i = threadIdx.x; i < 3; i += blockDim.x) {
-        s_box_min[i] = box_min[i];
-        s_box_max[i] = box_max[i];
-    }
     __syncthreads();
 
     // ── Per-warp dynamic shared-memory workspace ────────────────────────────
@@ -425,7 +422,16 @@ void region_ls_ik_warp_kernel(
     const int warp_global_id = blockIdx.x * warps_per_block + warp_in_block;
     if (warp_global_id >= n_problems * n_seeds) return;
     const int p = warp_global_id / n_seeds;
-    const int s = warp_global_id % n_seeds;
+
+    // ── Per-warp box bounds (lane 0 reads from per-problem global arrays) ───
+    // Only lane 0 uses these; other lanes never access them.
+    float w_box_min[3], w_box_max[3];
+    if (lane == 0) {
+        for (int k = 0; k < 3; k++) {
+            w_box_min[k] = box_mins[p * 3 + k];
+            w_box_max[k] = box_maxs[p * 3 + k];
+        }
+    }
 
     // ── Initialise per-warp workspace ──────────────────────────────────────
     for (int a = lane; a < n_act; a += 32) {
@@ -438,7 +444,7 @@ void region_ls_ik_warp_kernel(
 
     // Per-lane RNG: each lane has a unique initial state for diverse noise.
     uint32_t rng_state = (uint32_t)(*rng_seed_ptr)
-                       ^ (uint32_t)(s * 0x9e3779b9u + (uint32_t)lane * 0x6c62272eu)
+                       ^ (uint32_t)((warp_global_id % n_seeds) * 0x9e3779b9u + (uint32_t)lane * 0x6c62272eu)
                        ^ (uint32_t)(p * 0x6c62272eu + (uint32_t)lane * 0x9e3779b9u);
     xorshift32(rng_state); xorshift32(rng_state); xorshift32(rng_state);
 
@@ -472,7 +478,7 @@ void region_ls_ik_warp_kernel(
             };
             compute_r_from_T_world(w_T_world, target_jnt, target_T, w_r);
             const float* ee = w_T_world + target_jnt * 7 + 4;
-            const float  d  = box_dist_sq(ee, s_box_min, s_box_max);
+            const float  d  = box_dist_sq(ee, w_box_min, w_box_max);
             w_scratch[1] = d;
             w_scratch[2] = norm3(w_r);
             if (d < w_scratch[0]) {
@@ -516,7 +522,7 @@ void region_ls_ik_warp_kernel(
         };
         compute_r_from_T_world(w_T_world, target_jnt, target_T2, w_r);
         const float* ee0 = w_T_world + target_jnt * 7 + 4;
-        const float  d0  = box_dist_sq(ee0, s_box_min, s_box_max);
+        const float  d0  = box_dist_sq(ee0, w_box_min, w_box_max);
         if (d0 < w_scratch[0]) {
             w_scratch[0] = d0;
             for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
@@ -596,7 +602,7 @@ void region_ls_ik_warp_kernel(
 
             if (lane == 0) {
                 const float* T_ee = w_T_world + target_jnt * 7;
-                const float  d    = box_dist_sq(T_ee + 4, s_box_min, s_box_max);
+                const float  d    = box_dist_sq(T_ee + 4, w_box_min, w_box_max);
                 w_scratch[1] = d;
                 if (d < w_scratch[0]) {
                     w_scratch[0] = d;
@@ -604,7 +610,7 @@ void region_ls_ik_warp_kernel(
                 }
                 // Nearest point on box boundary for corrective target.
                 for (int k = 0; k < 3; k++)
-                    w_scratch[6+k] = clampf(T_ee[4+k], s_box_min[k], s_box_max[k]);
+                    w_scratch[6+k] = clampf(T_ee[4+k], w_box_min[k], w_box_max[k]);
             }
             __syncwarp();
 
@@ -648,7 +654,7 @@ void region_ls_ik_warp_kernel(
 
                 if (lane == 0) {
                     const float* T_ee_c = w_T_world + target_jnt * 7;
-                    const float  d_c    = box_dist_sq(T_ee_c + 4, s_box_min, s_box_max);
+                    const float  d_c    = box_dist_sq(T_ee_c + 4, w_box_min, w_box_max);
                     if (d_c < w_scratch[0]) {
                         w_scratch[0] = d_c;
                         for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
@@ -690,7 +696,7 @@ void region_ls_ik_warp_kernel(
 // XLA FFI handler
 // ---------------------------------------------------------------------------
 
-static ffi::Error RegionLsIkCudaImpl(
+static ffi::Error BrownianMotionIkCudaImpl(
     cudaStream_t stream,
     ffi::Buffer<ffi::DataType::F32> seeds,
     ffi::Buffer<ffi::DataType::F32> init_points,
@@ -704,8 +710,8 @@ static ffi::Error RegionLsIkCudaImpl(
     ffi::Buffer<ffi::DataType::S32> topo_inv,
     ffi::Buffer<ffi::DataType::S32> ancestor_mask,
     ffi::Buffer<ffi::DataType::F32> target_quat,
-    ffi::Buffer<ffi::DataType::F32> box_min,
-    ffi::Buffer<ffi::DataType::F32> box_max,
+    ffi::Buffer<ffi::DataType::F32> box_mins,   // (n_problems, 3) — per-problem
+    ffi::Buffer<ffi::DataType::F32> box_maxs,   // (n_problems, 3) — per-problem
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -733,7 +739,7 @@ static ffi::Error RegionLsIkCudaImpl(
     if (n_act > MAX_ACT || n_joints > MAX_JOINTS) {
         return ffi::Error(
             ffi::ErrorCode::kInvalidArgument,
-            "RegionLsIkCuda: compile-time limits exceeded (MAX_ACT/MAX_JOINTS)."
+            "BrownianMotionIkCuda: compile-time limits exceeded (MAX_ACT/MAX_JOINTS)."
         );
     }
 
@@ -742,7 +748,7 @@ static ffi::Error RegionLsIkCudaImpl(
     if (tpb < 32 || tpb > 1024 || tpb % 32 != 0) {
         return ffi::Error(
             ffi::ErrorCode::kInvalidArgument,
-            "RegionLsIkCuda: threads_per_block must be a multiple of 32 in [32, 1024]."
+            "BrownianMotionIkCuda: threads_per_block must be a multiple of 32 in [32, 1024]."
         );
     }
 
@@ -781,7 +787,7 @@ static ffi::Error RegionLsIkCudaImpl(
         std::snprintf(
             msg,
             sizeof(msg),
-            "RegionLsIkCuda: threads_per_block=%d exceeds shared-memory budget "
+            "BrownianMotionIkCuda: threads_per_block=%d exceeds shared-memory budget "
             "(requested %zu B total, device limit %d B). "
             "For this build, max threads_per_block by shared memory is %d.",
             tpb,
@@ -794,7 +800,7 @@ static ffi::Error RegionLsIkCudaImpl(
     // Clear any pre-existing CUDA error on this thread before our launch.
     (void)cudaGetLastError();
 
-    region_ls_ik_warp_kernel<<<dim3(blocks), tpb, smem_bytes, stream>>>(
+    brownian_motion_ik_kernel<<<dim3(blocks), tpb, smem_bytes, stream>>>(
         seeds.typed_data(),
         init_points.typed_data(),
         twists.typed_data(),
@@ -807,8 +813,8 @@ static ffi::Error RegionLsIkCudaImpl(
         topo_inv.typed_data(),
         ancestor_mask.typed_data(),
         target_quat.typed_data(),
-        box_min.typed_data(),
-        box_max.typed_data(),
+        box_mins.typed_data(),
+        box_maxs.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -840,8 +846,8 @@ static ffi::Error RegionLsIkCudaImpl(
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    RegionLsIkCudaFfi,
-    RegionLsIkCudaImpl,
+    BrownianMotionIkCudaFfi,
+    BrownianMotionIkCudaImpl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // seeds
@@ -856,8 +862,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // topo_inv
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // ancestor_mask
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // target_quat
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_min
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_max
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_mins  (n_problems, 3)
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_maxs  (n_problems, 3)
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask

@@ -158,7 +158,7 @@ def main() -> None:
         verbose=args.verbose,
     )
 
-    from pyronot.optimization_engines._hit_and_run_ik import _box_entropy
+    from pyronot.optimization_engines._region_ik import _box_entropy
 
     max_entropy = float(np.log(args.entropy_bins**3))
 

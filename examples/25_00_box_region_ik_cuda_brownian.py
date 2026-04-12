@@ -1,7 +1,7 @@
 """Sample Panda IK configurations with end-effector coverage inside a box region.
 
 Prerequisite:
-    bash src/pyronot/cuda_kernels/build_region_ls_ik_cuda.sh
+    bash src/pyronot/cuda_kernels/build_brownian_motion_ik_cuda.sh
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pyronot as pk
 import viser
-from pyronot.optimization_engines import ls_ik_sample_box_region_cuda
+from pyronot.optimization_engines import brownian_motion_sample_box_region_cuda
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
 
@@ -192,7 +192,7 @@ def main() -> None:
         if solve_nonce == 0:
             rng_key_warmup = jax.random.PRNGKey(0)
             t0 = time.perf_counter()
-            warm_cfgs, _, _, _ = ls_ik_sample_box_region_cuda(
+            warm_cfgs, _, _, _ = brownian_motion_sample_box_region_cuda(
                 rng_key=rng_key_warmup, box_min=box_min_jax, box_max=box_max_jax, **call_kwargs
             )
             warm_cfgs.block_until_ready()
@@ -202,7 +202,7 @@ def main() -> None:
         solve_nonce += 1
         rng_key_run = jax.random.PRNGKey(solve_nonce)
         t0 = time.perf_counter()
-        cfgs, ee_points, target_points, errors = ls_ik_sample_box_region_cuda(
+        cfgs, ee_points, target_points, errors = brownian_motion_sample_box_region_cuda(
             rng_key=rng_key_run, box_min=box_min_jax, box_max=box_max_jax, **call_kwargs
         )
         cfgs.block_until_ready()
