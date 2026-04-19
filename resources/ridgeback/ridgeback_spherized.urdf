@@ -1,0 +1,1373 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="ridgeback" path="ridgeback/ridgeback.urdf">
+	<material name="dark_grey">
+		<color rgba="0.2 0.2 0.2 1.0"></color>
+	</material>
+	<material name="light_grey">
+		<color rgba="0.4 0.4 0.4 1.0"></color>
+	</material>
+	<material name="red">
+		<color rgba="0.8 0.0 0.0 1.0"></color>
+	</material>
+	<material name="white">
+		<color rgba="0.9 0.9 0.9 1.0"></color>
+	</material>
+	<material name="yellow">
+		<color rgba="0.8 0.8 0.0 1.0"></color>
+	</material>
+	<material name="black">
+		<color rgba="0.15 0.15 0.15 1.0"></color>
+	</material>
+	<link name="front_rocker_link">
+		<visual>
+			<origin rpy="1.57079632679 0 1.57079632679" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/rocker.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<inertial>
+			<origin rpy="1.57079632679 0 1.57079632679" xyz="0 0 0"></origin>
+			<mass value="10.267"></mass>
+			<inertia ixx="0.0288" ixy="2.20484e-6" ixz="-1.3145e-5" iyy="0.4324" iyz="1.8944e-3" izz="0.4130"></inertia>
+		</inertial>
+	</link>
+	<link name="front_left_wheel_link">
+		<visual>
+			<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/wheel.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<mass value="2.3"></mass>
+			<inertia ixx="3.3212e-3" ixy="0" ixz="0" iyy="6.6424e-3" iyz="0" izz="3.3212e-3"></inertia>
+		</inertial>
+	</link>
+	<link name="front_right_wheel_link">
+		<visual>
+			<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/wheel.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<mass value="2.3"></mass>
+			<inertia ixx="3.3212e-3" ixy="0" ixz="0" iyy="6.6424e-3" iyz="0" izz="3.3212e-3"></inertia>
+		</inertial>
+	</link>
+	<link name="rear_rocker_link">
+		<visual>
+			<origin rpy="1.57079632679 0 1.57079632679" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/rocker.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<inertial>
+			<origin rpy="1.57079632679 0 1.57079632679" xyz="0 0 0"></origin>
+			<mass value="10.267"></mass>
+			<inertia ixx="0.0288" ixy="2.20484e-6" ixz="-1.3145e-5" iyy="0.4324" iyz="1.8944e-3" izz="0.4130"></inertia>
+		</inertial>
+	</link>
+	<link name="rear_left_wheel_link">
+		<visual>
+			<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/wheel.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<mass value="2.3"></mass>
+			<inertia ixx="3.3212e-3" ixy="0" ixz="0" iyy="6.6424e-3" iyz="0" izz="3.3212e-3"></inertia>
+		</inertial>
+	</link>
+	<link name="rear_right_wheel_link">
+		<visual>
+			<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/wheel.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<mass value="2.3"></mass>
+			<inertia ixx="3.3212e-3" ixy="0" ixz="0" iyy="6.6424e-3" iyz="0" izz="3.3212e-3"></inertia>
+		</inertial>
+	</link>
+	<link name="base_link"></link>
+	<link name="chassis_link">
+		<visual>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/body.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.2387603372335434"></sphere>
+			</geometry>
+			<origin xyz="-0.3288712799549103 -0.17685802280902863 0.12415941804647446" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.25164440274238586"></sphere>
+			</geometry>
+			<origin xyz="-0.13920119404792786 -0.17759309709072113 0.1454431414604187" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.23581090569496155"></sphere>
+			</geometry>
+			<origin xyz="-0.32944539189338684 0.18121829628944397 0.13334845006465912" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.2440321296453476"></sphere>
+			</geometry>
+			<origin xyz="-0.15149788558483124 0.18413496017456055 0.14615148305892944" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.2387603372335434"></sphere>
+			</geometry>
+			<origin xyz="0.3186626434326172 -0.1857600063085556 0.12476904690265656" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.25164440274238586"></sphere>
+			</geometry>
+			<origin xyz="0.12900429964065552 -0.181280255317688 0.14569564163684845" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.23581090569496155"></sphere>
+			</geometry>
+			<origin xyz="0.32906270027160645 0.17216543853282928 0.13396841287612915" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.2440321296453476"></sphere>
+			</geometry>
+			<origin xyz="0.1512388288974762 0.1799730807542801 0.14643649756908417" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="1.57079632679 0 1.57079632679" xyz="0.012 0.002 0.067"></origin>
+			<mass value="165.304"></mass>
+			<inertia ixx="4.4744" ixy="0.03098" ixz="0.003647" iyy="7.1624" iyz="0.1228" izz="4.6155"></inertia>
+		</inertial>
+	</link>
+	<link name="riser_link">
+		<visual>
+			<origin rpy="0 0 0.785398163397" xyz="0 0 0.0275"></origin>
+			<geometry>
+				<box size="0.493 0.493 0.055"></box>
+			</geometry>
+			<material name="light_grey"></material>
+		</visual>
+	</link>
+	<link name="left_side_cover_link">
+		<visual>
+			<origin rpy="0 0 3.14159265359" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/side-cover.stl"></mesh>
+			</geometry>
+			<material name="yellow"></material>
+		</visual>
+	</link>
+	<link name="right_side_cover_link">
+		<visual>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/side-cover.stl"></mesh>
+			</geometry>
+			<material name="yellow"></material>
+		</visual>
+	</link>
+	<link name="front_cover_link">
+		<visual>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/end-cover.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+	</link>
+	<link name="rear_cover_link">
+		<visual>
+			<origin rpy="0 0 3.14159265359" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/end-cover.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+	</link>
+	<link name="front_lights_link">
+		<visual>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/lights.stl"></mesh>
+			</geometry>
+			<material name="white"></material>
+		</visual>
+	</link>
+	<link name="rear_lights_link">
+		<visual>
+			<origin rpy="0 0 3.14159265359" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/lights.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+	</link>
+	<link name="top_link">
+		<visual>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/top.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.13086803257465363"></sphere>
+			</geometry>
+			<origin xyz="-0.3159722089767456 -0.29505935311317444 0.2762800455093384" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.1042085811495781"></sphere>
+			</geometry>
+			<origin xyz="-0.40190252661705017 -0.08123430609703064 0.2760254144668579" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09774167835712433"></sphere>
+			</geometry>
+			<origin xyz="-0.2789543569087982 -0.09264358878135681 0.27702540159225464" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.1026562824845314"></sphere>
+			</geometry>
+			<origin xyz="-0.15788476169109344 -0.30578652024269104 0.27738431096076965" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10149485617876053"></sphere>
+			</geometry>
+			<origin xyz="-0.04839840531349182 -0.28863295912742615 0.27661818265914917" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10241246223449707"></sphere>
+			</geometry>
+			<origin xyz="-0.16536027193069458 -0.09114284813404083 0.2755027711391449" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.102085180580616"></sphere>
+			</geometry>
+			<origin xyz="-0.05508921295404434 -0.09255894273519516 0.27632346749305725" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10874052345752716"></sphere>
+			</geometry>
+			<origin xyz="-0.39453744888305664 0.1006084680557251 0.2782032787799835" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.1020214632153511"></sphere>
+			</geometry>
+			<origin xyz="-0.2824661433696747 0.1008501723408699 0.2780437171459198" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.13305971026420593"></sphere>
+			</geometry>
+			<origin xyz="-0.30774638056755066 0.29598772525787354 0.2771815359592438" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.12914076447486877"></sphere>
+			</geometry>
+			<origin xyz="-0.1022767573595047 0.10579676926136017 0.27651458978652954" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10077520459890366"></sphere>
+			</geometry>
+			<origin xyz="-0.1613451987504959 0.2921963632106781 0.2781164050102234" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10382340848445892"></sphere>
+			</geometry>
+			<origin xyz="-0.04672815650701523 0.30320724844932556 0.2771705389022827" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.12939691543579102"></sphere>
+			</geometry>
+			<origin xyz="0.09528090804815292 -0.30560028553009033 0.275414377450943" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10163940489292145"></sphere>
+			</geometry>
+			<origin xyz="0.05451265722513199 -0.10895063728094101 0.2771449685096741" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09827549755573273"></sphere>
+			</geometry>
+			<origin xyz="0.1617986559867859 -0.10714498907327652 0.2779626250267029" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.12584049999713898"></sphere>
+			</geometry>
+			<origin xyz="0.3224908113479614 -0.28356415033340454 0.2773337960243225" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09763774275779724"></sphere>
+			</geometry>
+			<origin xyz="0.2752695083618164 -0.10415149480104446 0.27521663904190063" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10390984266996384"></sphere>
+			</geometry>
+			<origin xyz="0.3966997563838959 -0.09839161485433578 0.27554619312286377" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.1347317397594452"></sphere>
+			</geometry>
+			<origin xyz="0.11826589703559875 0.10689021646976471 0.276421457529068" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10002801567316055"></sphere>
+			</geometry>
+			<origin xyz="0.05176760256290436 0.3008219599723816 0.27787643671035767" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10225547850131989"></sphere>
+			</geometry>
+			<origin xyz="0.1646445393562317 0.30439040064811707 0.27671706676483154" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09228448569774628"></sphere>
+			</geometry>
+			<origin xyz="0.2793116271495819 0.08721837401390076 0.27571961283683777" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09831979125738144"></sphere>
+			</geometry>
+			<origin xyz="0.40644869208335876 0.08051525801420212 0.27542591094970703" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.1250428706407547"></sphere>
+			</geometry>
+			<origin xyz="0.3090294599533081 0.29333221912384033 0.27569180727005005" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="axle_link">
+		<visual>
+			<origin rpy="0 1.57079632679 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="ridgeback_meshes/axle.stl"></mesh>
+			</geometry>
+			<material name="black"></material>
+		</visual>
+	</link>
+	<link name="imu_link">
+		<inertial>
+			<mass value="0.001"></mass>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<inertia ixx="1e-09" ixy="0.0" ixz="0.0" iyy="1e-09" iyz="0.0" izz="1e-09"></inertia>
+		</inertial>
+	</link>
+	<link name="mid_mount"></link>
+	<link name="left_fr3_root"></link>
+	<link name="right_fr3_root"></link>
+	<link name="left_fr3_link0">
+		<visual name="left_fr3_link0_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link0.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.121697336435318"></sphere>
+			</geometry>
+			<origin xyz="-0.04346934333443642 -0.004792150110006332 0.053050700575113297" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0172 0.0004 0.0745"></origin>
+			<mass value="2.3966"></mass>
+			<inertia ixx="0.009" ixy="0.0" ixz="0.002" iyy="0.0115" iyz="0.0" izz="0.0085"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link0_accelerometer_top"></link>
+	<link name="left_fr3_link0_accelerometer_bottom"></link>
+	<link name="left_fr3_link1">
+		<visual name="left_fr3_link1_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link1.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.1406814008951187"></sphere>
+			</geometry>
+			<origin xyz="0.003091755323112011 -0.02358158305287361 -0.08095426857471466" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0000004128 -0.0181251324 -0.0386035970"></origin>
+			<mass value="2.9274653454"></mass>
+			<inertia ixx="0.0239273164851" ixy="1.33179034557e-05" ixz="-0.000114047749186" iyy="0.0224821613276" iyz="-0.00199503206282" izz="0.00635009825853"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link1_accelerometer_top"></link>
+	<link name="left_fr3_link1_accelerometer_bottom"></link>
+	<link name="left_fr3_link2">
+		<visual name="left_fr3_link2_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link2.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.08561582118272781"></sphere>
+			</geometry>
+			<origin xyz="-0.00027406992739997804 -0.13454459607601166 0.012914624065160751" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08341819792985916"></sphere>
+			</geometry>
+			<origin xyz="-0.0051994118839502335 -0.00760915270075202 0.04534563049674034" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0031828864 -0.0743221644 0.0088146084"></origin>
+			<mass value="2.9355370338"></mass>
+			<inertia ixx="0.0419389462576" ixy="0.000202573315211" ixz="0.00407778422718" iyy="0.0251451488501" iyz="-0.00422521580066" izz="0.0617021447289"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link2_accelerometer_top"></link>
+	<link name="left_fr3_link2_accelerometer_bottom"></link>
+	<link name="left_fr3_link3">
+		<visual name="left_fr3_link3_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link3.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.09309548884630203"></sphere>
+			</geometry>
+			<origin xyz="0.0034124150406569242 0.01282901968806982 -0.056011177599430084" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10632076114416122"></sphere>
+			</geometry>
+			<origin xyz="0.07322046905755997 0.02272232249379158 -0.04427839443087578" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0407015686 -0.0048200565 -0.0289730823"></origin>
+			<mass value="2.2449013699"></mass>
+			<inertia ixx="0.0241014254724" ixy="0.00240469455904" ixz="-0.00285626927011" iyy="0.0197405326671" iyz="-0.00210421268389" izz="0.0190444944822"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link3_accelerometer_top"></link>
+	<link name="left_fr3_link3_accelerometer_bottom"></link>
+	<link name="left_fr3_link4">
+		<visual name="left_fr3_link4_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link4.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.10517468303442001"></sphere>
+			</geometry>
+			<origin xyz="-0.04302874207496643 0.007855305448174477 0.024531321600079536" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09603451192378998"></sphere>
+			</geometry>
+			<origin xyz="-0.05322655662894249 0.08006096631288528 0.02025982365012169" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0459100965 0.0630492960 -0.0085187868"></origin>
+			<mass value="2.6155955791"></mass>
+			<inertia ixx="0.0345299832191" ixy="0.0132255226598" ixz="0.0101514299848" iyy="0.028881621933" iyz="-0.00097628338707" izz="0.0412547117115"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link4_accelerometer_top"></link>
+	<link name="left_fr3_link4_accelerometer_bottom"></link>
+	<link name="left_fr3_link5">
+		<visual name="left_fr3_link5_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link5.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.10085063427686691"></sphere>
+			</geometry>
+			<origin xyz="-0.00332356127910316 0.030466701835393906 -0.19194118678569794" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08568153530359268"></sphere>
+			</geometry>
+			<origin xyz="-0.0010915949242189527 0.06987523287534714 -0.024751251563429832" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0016039605 0.0292536262 -0.0972965990"></origin>
+			<mass value="2.3271207594"></mass>
+			<inertia ixx="0.0516102784637" ixy="-0.00571517338778" ixz="-0.00356731676259" iyy="0.0478772971337" iyz="0.0106739851085" izz="0.0164236255794"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link5_accelerometer_top"></link>
+	<link name="left_fr3_link5_accelerometer_bottom"></link>
+	<link name="left_fr3_link6">
+		<visual name="left_fr3_link6_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link6.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.07223740220069885"></sphere>
+			</geometry>
+			<origin xyz="0.02089521288871765 0.012532442808151245 0.004240002017468214" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07786983251571655"></sphere>
+			</geometry>
+			<origin xyz="0.08564461767673492 0.01609397865831852 -0.0006152261630631983" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0597131221 -0.0410294666 -0.0101692726"></origin>
+			<mass value="1.8170376524"></mass>
+			<inertia ixx="0.00541233359438" ixy="0.00619345636029" ixz="0.00142192893061" iyy="0.0140583295455" iyz="-0.00131407537411" izz="0.0160808179242"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link7">
+		<visual name="left_fr3_link7_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link7.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.054914623498916626"></sphere>
+			</geometry>
+			<origin xyz="0.007920041680335999 -0.0032804561778903008 0.07519295811653137" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.05977703258395195"></sphere>
+			</geometry>
+			<origin xyz="0.016532951965928078 0.034667979925870895 0.07330690324306488" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0045225817 0.0086261921 -0.0161633251"></origin>
+			<mass value="0.6271432862"></mass>
+			<inertia ixx="0.000210923891501" ixy="-2.43329911446e-05" ixz="4.56448039378e-05" iyy="0.000177185680024" iyz="8.74407022323e-05" izz="5.99319059966e-05"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_link8"></link>
+	<link name="left_fr3_hand">
+		<visual name="left_fr3_hand_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/hand.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.061396125704050064"></sphere>
+			</geometry>
+			<origin xyz="-0.0017815055325627327 -0.05078727751970291 0.02051997184753418" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.060611750930547714"></sphere>
+			</geometry>
+			<origin xyz="0.0005955336964689195 0.04814108833670616 0.02759919874370098" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0000376 0.0119128 0.0207260"></origin>
+			<mass value="0.6544"></mass>
+			<inertia ixx="0.00186" ixy="0.0" ixz="0.0" iyy="0.0003" iyz="-2e-05" izz="0.00174"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_hand_tcp"></link>
+	<link name="left_fr3_leftfinger">
+		<visual name="left_fr3_leftfinger_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/finger.dae"></mesh>
+			</geometry>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0.0152850 0.0219675"></origin>
+			<mass value="0.0291"></mass>
+			<inertia ixx="8.49e-06" ixy="0.0" ixz="0.0" iyy="8.53e-06" iyz="-1.06e-06" izz="1.77e-06"></inertia>
+		</inertial>
+	</link>
+	<link name="left_fr3_rightfinger">
+		<visual name="left_fr3_rightfinger_visual">
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="fr3_meshes/visual/finger.dae"></mesh>
+			</geometry>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0.0152850 0.0219675"></origin>
+			<mass value="0.0291"></mass>
+			<inertia ixx="8.49e-06" ixy="0.0" ixz="0.0" iyy="8.53e-06" iyz="-1.06e-06" izz="1.77e-06"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link0">
+		<visual name="right_fr3_link0_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link0.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.121697336435318"></sphere>
+			</geometry>
+			<origin xyz="-0.04346934333443642 -0.004792150110006332 0.053050700575113297" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0172 0.0004 0.0745"></origin>
+			<mass value="2.3966"></mass>
+			<inertia ixx="0.009" ixy="0.0" ixz="0.002" iyy="0.0115" iyz="0.0" izz="0.0085"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link0_accelerometer_top"></link>
+	<link name="right_fr3_link0_accelerometer_bottom"></link>
+	<link name="right_fr3_link1">
+		<visual name="right_fr3_link1_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link1.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.1406814008951187"></sphere>
+			</geometry>
+			<origin xyz="0.003091755323112011 -0.02358158305287361 -0.08095426857471466" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0000004128 -0.0181251324 -0.0386035970"></origin>
+			<mass value="2.9274653454"></mass>
+			<inertia ixx="0.0239273164851" ixy="1.33179034557e-05" ixz="-0.000114047749186" iyy="0.0224821613276" iyz="-0.00199503206282" izz="0.00635009825853"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link1_accelerometer_top"></link>
+	<link name="right_fr3_link1_accelerometer_bottom"></link>
+	<link name="right_fr3_link2">
+		<visual name="right_fr3_link2_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link2.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.08561582118272781"></sphere>
+			</geometry>
+			<origin xyz="-0.00027406992739997804 -0.13454459607601166 0.012914624065160751" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08341819792985916"></sphere>
+			</geometry>
+			<origin xyz="-0.0051994118839502335 -0.00760915270075202 0.04534563049674034" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0031828864 -0.0743221644 0.0088146084"></origin>
+			<mass value="2.9355370338"></mass>
+			<inertia ixx="0.0419389462576" ixy="0.000202573315211" ixz="0.00407778422718" iyy="0.0251451488501" iyz="-0.00422521580066" izz="0.0617021447289"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link2_accelerometer_top"></link>
+	<link name="right_fr3_link2_accelerometer_bottom"></link>
+	<link name="right_fr3_link3">
+		<visual name="right_fr3_link3_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link3.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.09309548884630203"></sphere>
+			</geometry>
+			<origin xyz="0.0034124150406569242 0.01282901968806982 -0.056011177599430084" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.10632076114416122"></sphere>
+			</geometry>
+			<origin xyz="0.07322046905755997 0.02272232249379158 -0.04427839443087578" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0407015686 -0.0048200565 -0.0289730823"></origin>
+			<mass value="2.2449013699"></mass>
+			<inertia ixx="0.0241014254724" ixy="0.00240469455904" ixz="-0.00285626927011" iyy="0.0197405326671" iyz="-0.00210421268389" izz="0.0190444944822"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link3_accelerometer_top"></link>
+	<link name="right_fr3_link3_accelerometer_bottom"></link>
+	<link name="right_fr3_link4">
+		<visual name="right_fr3_link4_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link4.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.10517468303442001"></sphere>
+			</geometry>
+			<origin xyz="-0.04302874207496643 0.007855305448174477 0.024531321600079536" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09603451192378998"></sphere>
+			</geometry>
+			<origin xyz="-0.05322655662894249 0.08006096631288528 0.02025982365012169" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0459100965 0.0630492960 -0.0085187868"></origin>
+			<mass value="2.6155955791"></mass>
+			<inertia ixx="0.0345299832191" ixy="0.0132255226598" ixz="0.0101514299848" iyy="0.028881621933" iyz="-0.00097628338707" izz="0.0412547117115"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link4_accelerometer_top"></link>
+	<link name="right_fr3_link4_accelerometer_bottom"></link>
+	<link name="right_fr3_link5">
+		<visual name="right_fr3_link5_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link5.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.10085063427686691"></sphere>
+			</geometry>
+			<origin xyz="-0.00332356127910316 0.030466701835393906 -0.19194118678569794" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08568153530359268"></sphere>
+			</geometry>
+			<origin xyz="-0.0010915949242189527 0.06987523287534714 -0.024751251563429832" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0016039605 0.0292536262 -0.0972965990"></origin>
+			<mass value="2.3271207594"></mass>
+			<inertia ixx="0.0516102784637" ixy="-0.00571517338778" ixz="-0.00356731676259" iyy="0.0478772971337" iyz="0.0106739851085" izz="0.0164236255794"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link5_accelerometer_top"></link>
+	<link name="right_fr3_link5_accelerometer_bottom"></link>
+	<link name="right_fr3_link6">
+		<visual name="right_fr3_link6_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link6.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.07223740220069885"></sphere>
+			</geometry>
+			<origin xyz="0.02089521288871765 0.012532442808151245 0.004240002017468214" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07786983251571655"></sphere>
+			</geometry>
+			<origin xyz="0.08564461767673492 0.01609397865831852 -0.0006152261630631983" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0597131221 -0.0410294666 -0.0101692726"></origin>
+			<mass value="1.8170376524"></mass>
+			<inertia ixx="0.00541233359438" ixy="0.00619345636029" ixz="0.00142192893061" iyy="0.0140583295455" iyz="-0.00131407537411" izz="0.0160808179242"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link7">
+		<visual name="right_fr3_link7_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/link7.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.054914623498916626"></sphere>
+			</geometry>
+			<origin xyz="0.007920041680335999 -0.0032804561778903008 0.07519295811653137" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.05977703258395195"></sphere>
+			</geometry>
+			<origin xyz="0.016532951965928078 0.034667979925870895 0.07330690324306488" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.0045225817 0.0086261921 -0.0161633251"></origin>
+			<mass value="0.6271432862"></mass>
+			<inertia ixx="0.000210923891501" ixy="-2.43329911446e-05" ixz="4.56448039378e-05" iyy="0.000177185680024" iyz="8.74407022323e-05" izz="5.99319059966e-05"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_link8"></link>
+	<link name="right_fr3_hand">
+		<visual name="right_fr3_hand_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/hand.dae"></mesh>
+			</geometry>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.061396125704050064"></sphere>
+			</geometry>
+			<origin xyz="-0.0017815055325627327 -0.05078727751970291 0.02051997184753418" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.060611750930547714"></sphere>
+			</geometry>
+			<origin xyz="0.0005955336964689195 0.04814108833670616 0.02759919874370098" rpy="0 0 0"></origin>
+		</collision>
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.0000376 0.0119128 0.0207260"></origin>
+			<mass value="0.6544"></mass>
+			<inertia ixx="0.00186" ixy="0.0" ixz="0.0" iyy="0.0003" iyz="-2e-05" izz="0.00174"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_hand_tcp"></link>
+	<link name="right_fr3_leftfinger">
+		<visual name="right_fr3_leftfinger_visual">
+			<geometry>
+				<mesh filename="fr3_meshes/visual/finger.dae"></mesh>
+			</geometry>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0.0152850 0.0219675"></origin>
+			<mass value="0.0291"></mass>
+			<inertia ixx="8.49e-06" ixy="0.0" ixz="0.0" iyy="8.53e-06" iyz="-1.06e-06" izz="1.77e-06"></inertia>
+		</inertial>
+	</link>
+	<link name="right_fr3_rightfinger">
+		<visual name="right_fr3_rightfinger_visual">
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="fr3_meshes/visual/finger.dae"></mesh>
+			</geometry>
+		</visual>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0.0152850 0.0219675"></origin>
+			<mass value="0.0291"></mass>
+			<inertia ixx="8.49e-06" ixy="0.0" ixz="0.0" iyy="8.53e-06" iyz="-1.06e-06" izz="1.77e-06"></inertia>
+		</inertial>
+	</link>
+	<joint name="front_rocker" type="revolute">
+		<parent link="axle_link"></parent>
+		<child link="front_rocker_link"></child>
+		<origin rpy="0 0 0" xyz="0.319 0 0"></origin>
+		<axis xyz="1 0 0"></axis>
+		<limit effort="0" lower="-0.08726" upper="0.08726" velocity="0"></limit>
+	</joint>
+	<joint name="front_left_wheel" type="continuous">
+		<parent link="front_rocker_link"></parent>
+		<child link="front_left_wheel_link"></child>
+		<origin rpy="0 0 0" xyz="0 0.2755 0"></origin>
+		<axis xyz="0 1 0"></axis>
+	</joint>
+	<joint name="front_right_wheel" type="continuous">
+		<parent link="front_rocker_link"></parent>
+		<child link="front_right_wheel_link"></child>
+		<origin rpy="0 0 0" xyz="0 -0.2755 0"></origin>
+		<axis xyz="0 1 0"></axis>
+	</joint>
+	<joint name="rear_rocker" type="fixed">
+		<parent link="axle_link"></parent>
+		<child link="rear_rocker_link"></child>
+		<origin rpy="0 0 0" xyz="-0.319 0 0"></origin>
+		<axis xyz="1 0 0"></axis>
+		<limit effort="0" velocity="0"></limit>
+	</joint>
+	<joint name="rear_left_wheel" type="continuous">
+		<parent link="rear_rocker_link"></parent>
+		<child link="rear_left_wheel_link"></child>
+		<origin rpy="0 0 0" xyz="0 0.2755 0"></origin>
+		<axis xyz="0 1 0"></axis>
+	</joint>
+	<joint name="rear_right_wheel" type="continuous">
+		<parent link="rear_rocker_link"></parent>
+		<child link="rear_right_wheel_link"></child>
+		<origin rpy="0 0 0" xyz="0 -0.2755 0"></origin>
+		<axis xyz="0 1 0"></axis>
+	</joint>
+	<joint name="base_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="base_link"></parent>
+		<child link="chassis_link"></child>
+	</joint>
+	<joint name="riser_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.22"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="riser_link"></child>
+	</joint>
+	<joint name="right_side_cover_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="right_side_cover_link"></child>
+	</joint>
+	<joint name="left_side_cover_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="left_side_cover_link"></child>
+	</joint>
+	<joint name="front_cover_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="front_cover_link"></child>
+	</joint>
+	<joint name="rear_cover_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="rear_cover_link"></child>
+	</joint>
+	<joint name="front_lights_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="front_lights_link"></child>
+	</joint>
+	<joint name="rear_lights_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="rear_lights_link"></child>
+	</joint>
+	<joint name="top_link_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 -0.22"></origin>
+		<parent link="riser_link"></parent>
+		<child link="top_link"></child>
+	</joint>
+	<joint name="axle_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.05"></origin>
+		<parent link="chassis_link"></parent>
+		<child link="axle_link"></child>
+	</joint>
+	<joint name="imu_joint" type="fixed">
+		<parent link="chassis_link"></parent>
+		<child link="imu_link"></child>
+		<origin rpy="0 0 0" xyz="0.2085 -0.2902 0.1681"></origin>
+	</joint>
+	<joint name="mid_mount_joint" type="fixed">
+		<parent link="riser_link"></parent>
+		<child link="mid_mount"></child>
+		<origin rpy="0 0 0" xyz="0 0 0.06"></origin>
+	</joint>
+	<joint name="left_fr3_mount_joint" type="fixed">
+		<parent link="mid_mount"></parent>
+		<child link="left_fr3_root"></child>
+		<origin rpy="0 0 0" xyz="0.21 0.20 0.0"></origin>
+	</joint>
+	<joint name="right_fr3_mount_joint" type="fixed">
+		<parent link="mid_mount"></parent>
+		<child link="right_fr3_root"></child>
+		<origin rpy="0 0 0" xyz="0.21 -0.20 0.0"></origin>
+	</joint>
+	<joint name="left_fr3_base_joint" type="fixed">
+		<parent link="left_fr3_root"></parent>
+		<child link="left_fr3_link0"></child>
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+	</joint>
+	<joint name="left_fr3_link0_accelerometer_top_joint" type="fixed">
+		<origin rpy="3.1416 0.0 0.0" xyz="-0.017402 -0.007872 0.04715"></origin>
+		<parent link="left_fr3_link0"></parent>
+		<child link="left_fr3_link0_accelerometer_top"></child>
+	</joint>
+	<joint name="left_fr3_link0_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="0.0 0.0 -1.5708" xyz="-0.019739 0.0015506 0.05075"></origin>
+		<parent link="left_fr3_link0"></parent>
+		<child link="left_fr3_link0_accelerometer_bottom"></child>
+	</joint>
+	<joint name="left_fr3_link1_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 3.1416" xyz="0.017402 -0.093352 -0.00787"></origin>
+		<parent link="left_fr3_link1"></parent>
+		<child link="left_fr3_link1_accelerometer_top"></child>
+	</joint>
+	<joint name="left_fr3_link1_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="-1.5708 1.5708 0.0" xyz="0.01974 -0.08975 0.00155"></origin>
+		<parent link="left_fr3_link1"></parent>
+		<child link="left_fr3_link1_accelerometer_bottom"></child>
+	</joint>
+	<joint name="left_fr3_joint1" type="revolute">
+		<origin rpy="0 0 0" xyz="0 0 0.333"></origin>
+		<parent link="left_fr3_link0"></parent>
+		<child link="left_fr3_link1"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-2.9007" upper="2.9007" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.9007" soft_upper_limit="2.9007"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="6.0" velocity_offset="0.652"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="4.206399e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_link2_accelerometer_top_joint" type="fixed">
+		<origin rpy="1.5708 0.0 3.1416" xyz="0.017403 -0.11715 0.00787"></origin>
+		<parent link="left_fr3_link2"></parent>
+		<child link="left_fr3_link2_accelerometer_top"></child>
+	</joint>
+	<joint name="left_fr3_link2_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="1.5708 -1.5708 0.0" xyz="0.019737 -0.11875 -0.00155"></origin>
+		<parent link="left_fr3_link2"></parent>
+		<child link="left_fr3_link2_accelerometer_bottom"></child>
+	</joint>
+	<joint name="left_fr3_joint2" type="revolute">
+		<origin rpy="-1.57079632679 0 0" xyz="0 0 0"></origin>
+		<parent link="left_fr3_link1"></parent>
+		<child link="left_fr3_link2"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-1.8361" upper="1.8361" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-1.8361" soft_upper_limit="1.8361"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="2.585" velocity_offset="0.25"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="4.206399e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_link3_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 0.0" xyz="0.065099 0.077352 -0.00787"></origin>
+		<parent link="left_fr3_link3"></parent>
+		<child link="left_fr3_link3_accelerometer_top"></child>
+	</joint>
+	<joint name="left_fr3_link3_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="1.5708 1.5708 0.0" xyz="0.062769 0.073756 0.00155"></origin>
+		<parent link="left_fr3_link3"></parent>
+		<child link="left_fr3_link3_accelerometer_bottom"></child>
+	</joint>
+	<joint name="left_fr3_joint3" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0 -0.316 0"></origin>
+		<parent link="left_fr3_link2"></parent>
+		<child link="left_fr3_link3"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-2.9007" upper="2.9007" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.9007" soft_upper_limit="2.9007"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="3.5" velocity_offset="0.2005"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_link4_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 -3.1416" xyz="-0.0651 0.046252 -0.00787"></origin>
+		<parent link="left_fr3_link4"></parent>
+		<child link="left_fr3_link4_accelerometer_top"></child>
+	</joint>
+	<joint name="left_fr3_link4_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="-1.5708 1.5708 0.0" xyz="-0.062775 0.049753 0.00155"></origin>
+		<parent link="left_fr3_link4"></parent>
+		<child link="left_fr3_link4_accelerometer_bottom"></child>
+	</joint>
+	<joint name="left_fr3_joint4" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0.0825 0 0"></origin>
+		<parent link="left_fr3_link3"></parent>
+		<child link="left_fr3_link4"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-3.077" upper="-0.1169" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-3.077" soft_upper_limit="-0.1169"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="4.0" velocity_offset="0.3542"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_link5_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 0.0" xyz="-0.017363 0.085872 -0.00795"></origin>
+		<parent link="left_fr3_link5"></parent>
+		<child link="left_fr3_link5_accelerometer_top"></child>
+	</joint>
+	<joint name="left_fr3_link5_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="1.5708 1.5708 0.0" xyz="-0.019742 0.082275 0.00146"></origin>
+		<parent link="left_fr3_link5"></parent>
+		<child link="left_fr3_link5_accelerometer_bottom"></child>
+	</joint>
+	<joint name="left_fr3_joint5" type="revolute">
+		<origin rpy="-1.57079632679 0 0" xyz="-0.0825 0.384 0"></origin>
+		<parent link="left_fr3_link4"></parent>
+		<child link="left_fr3_link5"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12.0" lower="-2.8763" upper="2.8763" velocity="5.26"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.8763" soft_upper_limit="2.8763"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="17.0" velocity_offset="0.5738"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="80.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_joint6" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+		<parent link="left_fr3_link5"></parent>
+		<child link="left_fr3_link6"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12.0" lower="0.4398" upper="4.6216" velocity="4.18"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="0.4398" soft_upper_limit="4.6216"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="5.5" velocity_offset="0.4885"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="80.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_joint7" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0.088 0 0"></origin>
+		<parent link="left_fr3_link6"></parent>
+		<child link="left_fr3_link7"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12.0" lower="-3.0508" upper="3.0508" velocity="5.26"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-3.0508" soft_upper_limit="3.0508"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="17.0" velocity_offset="0.4592"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="80.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="left_fr3_joint8" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.107"></origin>
+		<parent link="left_fr3_link7"></parent>
+		<child link="left_fr3_link8"></child>
+	</joint>
+	<joint name="left_fr3_hand_joint" type="fixed">
+		<parent link="left_fr3_link8"></parent>
+		<child link="left_fr3_hand"></child>
+		<origin rpy="0 0 -0.785398163397" xyz="0 0 0"></origin>
+	</joint>
+	<joint name="left_fr3_hand_tcp_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.1034"></origin>
+		<parent link="left_fr3_hand"></parent>
+		<child link="left_fr3_hand_tcp"></child>
+	</joint>
+	<joint name="left_fr3_finger_joint1" type="prismatic">
+		<parent link="left_fr3_hand"></parent>
+		<child link="left_fr3_leftfinger"></child>
+		<origin rpy="0 0 0" xyz="0 0 0.0584"></origin>
+		<axis xyz="0 1 0"></axis>
+		<limit effort="100" lower="0.0" upper="0.04" velocity="0.2"></limit>
+		<dynamics damping="0.3"></dynamics>
+	</joint>
+	<joint name="left_fr3_finger_joint2" type="prismatic">
+		<parent link="left_fr3_hand"></parent>
+		<child link="left_fr3_rightfinger"></child>
+		<origin rpy="0 0 3.14159265359" xyz="0 0 0.0584"></origin>
+		<axis xyz="0 1 0"></axis>
+		<limit effort="100" lower="0.0" upper="0.04" velocity="0.2"></limit>
+		<mimic joint="left_fr3_finger_joint1"></mimic>
+		<dynamics damping="0.3"></dynamics>
+	</joint>
+	<joint name="right_fr3_base_joint" type="fixed">
+		<parent link="right_fr3_root"></parent>
+		<child link="right_fr3_link0"></child>
+		<origin rpy="0 0 0" xyz="0 0 0"></origin>
+	</joint>
+	<joint name="right_fr3_link0_accelerometer_top_joint" type="fixed">
+		<origin rpy="3.1416 0.0 0.0" xyz="-0.017402 -0.007872 0.04715"></origin>
+		<parent link="right_fr3_link0"></parent>
+		<child link="right_fr3_link0_accelerometer_top"></child>
+	</joint>
+	<joint name="right_fr3_link0_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="0.0 0.0 -1.5708" xyz="-0.019739 0.0015506 0.05075"></origin>
+		<parent link="right_fr3_link0"></parent>
+		<child link="right_fr3_link0_accelerometer_bottom"></child>
+	</joint>
+	<joint name="right_fr3_link1_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 3.1416" xyz="0.017402 -0.093352 -0.00787"></origin>
+		<parent link="right_fr3_link1"></parent>
+		<child link="right_fr3_link1_accelerometer_top"></child>
+	</joint>
+	<joint name="right_fr3_link1_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="-1.5708 1.5708 0.0" xyz="0.01974 -0.08975 0.00155"></origin>
+		<parent link="right_fr3_link1"></parent>
+		<child link="right_fr3_link1_accelerometer_bottom"></child>
+	</joint>
+	<joint name="right_fr3_joint1" type="revolute">
+		<origin rpy="0 0 0" xyz="0 0 0.333"></origin>
+		<parent link="right_fr3_link0"></parent>
+		<child link="right_fr3_link1"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-2.9007" upper="2.9007" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.9007" soft_upper_limit="2.9007"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="6.0" velocity_offset="0.652"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="4.206399e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_link2_accelerometer_top_joint" type="fixed">
+		<origin rpy="1.5708 0.0 3.1416" xyz="0.017403 -0.11715 0.00787"></origin>
+		<parent link="right_fr3_link2"></parent>
+		<child link="right_fr3_link2_accelerometer_top"></child>
+	</joint>
+	<joint name="right_fr3_link2_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="1.5708 -1.5708 0.0" xyz="0.019737 -0.11875 -0.00155"></origin>
+		<parent link="right_fr3_link2"></parent>
+		<child link="right_fr3_link2_accelerometer_bottom"></child>
+	</joint>
+	<joint name="right_fr3_joint2" type="revolute">
+		<origin rpy="-1.57079632679 0 0" xyz="0 0 0"></origin>
+		<parent link="right_fr3_link1"></parent>
+		<child link="right_fr3_link2"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-1.8361" upper="1.8361" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-1.8361" soft_upper_limit="1.8361"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="2.585" velocity_offset="0.25"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="4.206399e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_link3_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 0.0" xyz="0.065099 0.077352 -0.00787"></origin>
+		<parent link="right_fr3_link3"></parent>
+		<child link="right_fr3_link3_accelerometer_top"></child>
+	</joint>
+	<joint name="right_fr3_link3_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="1.5708 1.5708 0.0" xyz="0.062769 0.073756 0.00155"></origin>
+		<parent link="right_fr3_link3"></parent>
+		<child link="right_fr3_link3_accelerometer_bottom"></child>
+	</joint>
+	<joint name="right_fr3_joint3" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0 -0.316 0"></origin>
+		<parent link="right_fr3_link2"></parent>
+		<child link="right_fr3_link3"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-2.9007" upper="2.9007" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.9007" soft_upper_limit="2.9007"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="3.5" velocity_offset="0.2005"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_link4_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 -3.1416" xyz="-0.0651 0.046252 -0.00787"></origin>
+		<parent link="right_fr3_link4"></parent>
+		<child link="right_fr3_link4_accelerometer_top"></child>
+	</joint>
+	<joint name="right_fr3_link4_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="-1.5708 1.5708 0.0" xyz="-0.062775 0.049753 0.00155"></origin>
+		<parent link="right_fr3_link4"></parent>
+		<child link="right_fr3_link4_accelerometer_bottom"></child>
+	</joint>
+	<joint name="right_fr3_joint4" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0.0825 0 0"></origin>
+		<parent link="right_fr3_link3"></parent>
+		<child link="right_fr3_link4"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87.0" lower="-3.077" upper="-0.1169" velocity="2.62"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-3.077" soft_upper_limit="-0.1169"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="4.0" velocity_offset="0.3542"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="120.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_link5_accelerometer_top_joint" type="fixed">
+		<origin rpy="-1.5708 0.0 0.0" xyz="-0.017363 0.085872 -0.00795"></origin>
+		<parent link="right_fr3_link5"></parent>
+		<child link="right_fr3_link5_accelerometer_top"></child>
+	</joint>
+	<joint name="right_fr3_link5_accelerometer_bottom_joint" type="fixed">
+		<origin rpy="1.5708 1.5708 0.0" xyz="-0.019742 0.082275 0.00146"></origin>
+		<parent link="right_fr3_link5"></parent>
+		<child link="right_fr3_link5_accelerometer_bottom"></child>
+	</joint>
+	<joint name="right_fr3_joint5" type="revolute">
+		<origin rpy="-1.57079632679 0 0" xyz="-0.0825 0.384 0"></origin>
+		<parent link="right_fr3_link4"></parent>
+		<child link="right_fr3_link5"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12.0" lower="-2.8763" upper="2.8763" velocity="5.26"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.8763" soft_upper_limit="2.8763"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="17.0" velocity_offset="0.5738"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="80.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_joint6" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+		<parent link="right_fr3_link5"></parent>
+		<child link="right_fr3_link6"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12.0" lower="0.4398" upper="4.6216" velocity="4.18"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="0.4398" soft_upper_limit="4.6216"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="5.5" velocity_offset="0.4885"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="80.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_joint7" type="revolute">
+		<origin rpy="1.57079632679 0 0" xyz="0.088 0 0"></origin>
+		<parent link="right_fr3_link6"></parent>
+		<child link="right_fr3_link7"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12.0" lower="-3.0508" upper="3.0508" velocity="5.26"></limit>
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-3.0508" soft_upper_limit="3.0508"></safety_controller>
+		<position_based_velocity_limits deceleration_limit="17.0" velocity_offset="0.4592"></position_based_velocity_limits>
+		<dynamics D="1" K="7000" damping="0.003" friction="0.2" gear_ratio="80.0" motor_inertia="3.211626e-05" mu_coulomb="0" mu_viscous="16"></dynamics>
+	</joint>
+	<joint name="right_fr3_joint8" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.107"></origin>
+		<parent link="right_fr3_link7"></parent>
+		<child link="right_fr3_link8"></child>
+	</joint>
+	<joint name="right_fr3_hand_joint" type="fixed">
+		<parent link="right_fr3_link8"></parent>
+		<child link="right_fr3_hand"></child>
+		<origin rpy="0 0 -0.785398163397" xyz="0 0 0"></origin>
+	</joint>
+	<joint name="right_fr3_hand_tcp_joint" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.1034"></origin>
+		<parent link="right_fr3_hand"></parent>
+		<child link="right_fr3_hand_tcp"></child>
+	</joint>
+	<joint name="right_fr3_finger_joint1" type="prismatic">
+		<parent link="right_fr3_hand"></parent>
+		<child link="right_fr3_leftfinger"></child>
+		<origin rpy="0 0 0" xyz="0 0 0.0584"></origin>
+		<axis xyz="0 1 0"></axis>
+		<limit effort="100" lower="0.0" upper="0.04" velocity="0.2"></limit>
+		<dynamics damping="0.3"></dynamics>
+	</joint>
+	<joint name="right_fr3_finger_joint2" type="prismatic">
+		<parent link="right_fr3_hand"></parent>
+		<child link="right_fr3_rightfinger"></child>
+		<origin rpy="0 0 3.14159265359" xyz="0 0 0.0584"></origin>
+		<axis xyz="0 1 0"></axis>
+		<limit effort="100" lower="0.0" upper="0.04" velocity="0.2"></limit>
+		<mimic joint="right_fr3_finger_joint1"></mimic>
+		<dynamics damping="0.3"></dynamics>
+	</joint>
+	<transmission name="front_wheel_trans">
+		<type>transmission_interface/SimpleTransmission</type>
+		<joint name="front_left_wheel">
+			<hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+		</joint>
+		<actuator name="front_left_actuator">
+			<mechanicalReduction>1</mechanicalReduction>
+		</actuator>
+	</transmission>
+	<transmission name="front_wheel_trans">
+		<type>transmission_interface/SimpleTransmission</type>
+		<joint name="front_right_wheel">
+			<hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+		</joint>
+		<actuator name="front_right_actuator">
+			<mechanicalReduction>1</mechanicalReduction>
+		</actuator>
+	</transmission>
+	<transmission name="rear_wheel_trans">
+		<type>transmission_interface/SimpleTransmission</type>
+		<joint name="rear_left_wheel">
+			<hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+		</joint>
+		<actuator name="rear_left_actuator">
+			<mechanicalReduction>1</mechanicalReduction>
+		</actuator>
+	</transmission>
+	<transmission name="rear_wheel_trans">
+		<type>transmission_interface/SimpleTransmission</type>
+		<joint name="rear_right_wheel">
+			<hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+		</joint>
+		<actuator name="rear_right_actuator">
+			<mechanicalReduction>1</mechanicalReduction>
+		</actuator>
+	</transmission>
+</robot>
