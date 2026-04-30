@@ -54,7 +54,7 @@ SRC="${SCRIPT_DIR}/_hjcd_ik_cuda_kernel.cu"
 OUT="${SCRIPT_DIR}/_hjcd_ik_cuda_lib.so"
 
 # Locate the jaxlib include directory that ships xla/ffi/api/ffi.h.
-JAXLIB_INC="$(python3 -c \
+JAXLIB_INC="$(python -c \
   "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
 
 if [ ! -f "${JAXLIB_INC}/xla/ffi/api/ffi.h" ]; then
