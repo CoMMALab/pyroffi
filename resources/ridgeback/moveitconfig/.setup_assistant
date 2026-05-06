@@ -1,0 +1,11 @@
+moveit_setup_assistant_config:
+  URDF:
+    package: ""
+    relative_path: /src/pyroffi/resources/ridgeback/ridgeback_spherized.urdf
+    xacro_args: ""
+  SRDF:
+    relative_path: config/ridgeback.srdf
+  CONFIG:
+    author_name: siyer
+    author_email: siyer@siyer.edu
+    generated_timestamp: 1778086289
