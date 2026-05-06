@@ -31,6 +31,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_collision_cuda_helpers.cuh"
 
 #include "xla/ffi/api/ffi.h"
 
@@ -69,6 +70,14 @@ void svgd_region_ik_kernel(
     const int*   __restrict__ target_jnts,
     const int*   __restrict__ ancestor_masks,
     const float* __restrict__ target_Ts,
+    const float* __restrict__ robot_spheres_local,    // (n_rs, 4)
+    const int*   __restrict__ robot_sphere_joint_idx, // (n_rs,)
+    const float* __restrict__ world_spheres,    // (Ms, 4)
+    const float* __restrict__ world_capsules,   // (Mc, 7)
+    const float* __restrict__ world_boxes,      // (Mb, 15)
+    const float* __restrict__ world_halfspaces, // (Mh, 6)
+    const int*   __restrict__ self_pair_i,      // (n_self,)
+    const int*   __restrict__ self_pair_j,      // (n_self,)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -79,7 +88,11 @@ void svgd_region_ik_kernel(
     float*       __restrict__ out_err,
     float*       __restrict__ out_ee,     // (n_problems * n_particles, 3)
     float*       __restrict__ out_target, // (n_problems * n_particles, 3)
-    int n_problems, int n_particles, int n_joints, int n_act, int n_ee)
+    int n_problems, int n_particles, int n_joints, int n_act, int n_ee,
+    int n_robot_spheres, int n_world_spheres, int n_world_capsules,
+    int n_world_boxes, int n_world_halfspaces, int n_self_pairs,
+    int enable_collision,
+    float collision_weight, float collision_margin)
 {
     // ---- Shared memory: robot parameters (loaded once per block) ----
     __shared__ float s_twists       [MAX_JOINTS * 6];
@@ -208,9 +221,199 @@ void svgd_region_ik_kernel(
             s_grad_logp[t * n_act + a] = -2.0f * g;
         }
 
-        // Update best solution
+        // ------------------------------------------------------------------
+        // Collision: scalar penalty + analytical gradient (option B).
+        //
+        // log p(q) = -||r||^2 - collision_weight * sum_{pairs} max(0, margin-d)^2
+        // grad_logp -= collision_weight * sum_{active pairs} 2*(d-margin) * dd/dq
+        // For each robot sphere, dd/dq is computed by walking up the parent
+        // chain and accumulating n^T (z_j × arm) (revolute) or n^T z_j
+        // (prismatic), where n is the unit normal at the obstacle surface.
+        // n is obtained via finite differences on the dist function w.r.t.
+        // the sphere center (analytical for sphere-sphere self-pairs).
+        // ------------------------------------------------------------------
+        float coll_pen = 0.0f;
+        if (enable_collision && n_robot_spheres > 0) {
+            // Cache world position + radius for every robot sphere using the
+            // T_world produced by the task FK above.
+            float sphere_world[MAX_ROBOT_SPHERES * 4];
+            for (int i = 0; i < n_robot_spheres; i++) {
+                const int jidx = robot_sphere_joint_idx[i];
+                if (jidx < 0 || jidx >= n_joints) {
+                    sphere_world[i*4 + 3] = -1.0f;
+                    continue;
+                }
+                const float* sp = robot_spheres_local + i * 4;
+                float local_p[3] = {sp[0], sp[1], sp[2]};
+                apply_se3_point(T_world + jidx * 7, local_p, sphere_world + i * 4);
+                sphere_world[i*4 + 3] = sp[3];
+            }
+
+            // Walk the kinematic ancestor chain of `sphere_jnt` and add
+            //   contrib = factor * n^T J_p_sphere * sign
+            // to grad_logp.  J_p column for joint j at sphere position
+            // (sx,sy,sz):
+            //   revolute  → z_j × (sphere_pos - p_j)
+            //   prismatic → z_j
+            auto add_grad_for_sphere = [&](
+                int sphere_jnt,
+                float sx, float sy, float sz,
+                float nx, float ny, float nz,
+                float factor, float sign)
+            {
+                int j = sphere_jnt;
+                while (j >= 0 && j < n_joints) {
+                    const int a1 = s_act_idx[j];
+                    const int a2 = s_mimic_act_idx[j];
+                    if (a1 < 0 && a2 < 0) { j = s_parent_idx[j]; continue; }
+
+                    const float* tw = s_twists + j * 6;
+                    const float ang_sq = tw[3]*tw[3] + tw[4]*tw[4] + tw[5]*tw[5];
+                    const float lin_sq = tw[0]*tw[0] + tw[1]*tw[1] + tw[2]*tw[2];
+                    const float* T_j = T_world + j * 7;
+                    const float* p_j = T_j + 4;
+
+                    float jg_lin[3];
+                    if (ang_sq > 1e-6f) {
+                        const float inv_ang = 1.0f / sqrtf(ang_sq);
+                        const float body_ax[3] = { tw[3]*inv_ang, tw[4]*inv_ang, tw[5]*inv_ang };
+                        float z_j[3];
+                        quat_rotate(T_j, body_ax, z_j);
+                        const float arm_j[3] = { sx - p_j[0], sy - p_j[1], sz - p_j[2] };
+                        cross3(z_j, arm_j, jg_lin);
+                    } else if (lin_sq > 1e-6f) {
+                        const float inv_lin = 1.0f / sqrtf(lin_sq);
+                        const float body_ax[3] = { tw[0]*inv_lin, tw[1]*inv_lin, tw[2]*inv_lin };
+                        float z_j[3];
+                        quat_rotate(T_j, body_ax, z_j);
+                        jg_lin[0] = z_j[0]; jg_lin[1] = z_j[1]; jg_lin[2] = z_j[2];
+                    } else {
+                        j = s_parent_idx[j]; continue;
+                    }
+
+                    const float n_dot_jg = nx*jg_lin[0] + ny*jg_lin[1] + nz*jg_lin[2];
+                    const float ms = s_mimic_mul[j];
+                    const float contrib = sign * factor * ms * n_dot_jg;
+                    if (a1 >= 0) s_grad_logp[t*n_act + a1] -= contrib;
+                    if (a2 >= 0) s_grad_logp[t*n_act + a2] -= contrib;
+
+                    j = s_parent_idx[j];
+                }
+            };
+
+            const float fd_h = 1e-4f;
+            const float fd_inv = 0.5f / fd_h;
+
+            // Robot-sphere vs world primitives.
+            for (int i = 0; i < n_robot_spheres; i++) {
+                const float rr = sphere_world[i*4 + 3];
+                if (rr < 0.0f) continue;
+                const float wx = sphere_world[i*4 + 0];
+                const float wy = sphere_world[i*4 + 1];
+                const float wz = sphere_world[i*4 + 2];
+                const int sphere_jnt = robot_sphere_joint_idx[i];
+
+                for (int m = 0; m < n_world_spheres; m++) {
+                    const float* o = world_spheres + m * 4;
+                    const float d = sphere_sphere_dist(wx, wy, wz, rr,
+                                                       o[0], o[1], o[2], o[3]);
+                    if (d >= collision_margin) continue;
+                    const float diff = d - collision_margin;
+                    coll_pen += diff * diff;
+                    const float nx = (sphere_sphere_dist(wx+fd_h, wy, wz, rr, o[0], o[1], o[2], o[3])
+                                    - sphere_sphere_dist(wx-fd_h, wy, wz, rr, o[0], o[1], o[2], o[3])) * fd_inv;
+                    const float ny = (sphere_sphere_dist(wx, wy+fd_h, wz, rr, o[0], o[1], o[2], o[3])
+                                    - sphere_sphere_dist(wx, wy-fd_h, wz, rr, o[0], o[1], o[2], o[3])) * fd_inv;
+                    const float nz = (sphere_sphere_dist(wx, wy, wz+fd_h, rr, o[0], o[1], o[2], o[3])
+                                    - sphere_sphere_dist(wx, wy, wz-fd_h, rr, o[0], o[1], o[2], o[3])) * fd_inv;
+                    const float factor = 2.0f * collision_weight * diff;
+                    add_grad_for_sphere(sphere_jnt, wx, wy, wz, nx, ny, nz, factor, 1.0f);
+                }
+                for (int m = 0; m < n_world_capsules; m++) {
+                    const float* o = world_capsules + m * 7;
+                    const float d = sphere_capsule_dist(wx, wy, wz, rr,
+                                                        o[0], o[1], o[2], o[3], o[4], o[5], o[6]);
+                    if (d >= collision_margin) continue;
+                    const float diff = d - collision_margin;
+                    coll_pen += diff * diff;
+                    const float nx = (sphere_capsule_dist(wx+fd_h, wy, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6])
+                                    - sphere_capsule_dist(wx-fd_h, wy, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6])) * fd_inv;
+                    const float ny = (sphere_capsule_dist(wx, wy+fd_h, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6])
+                                    - sphere_capsule_dist(wx, wy-fd_h, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6])) * fd_inv;
+                    const float nz = (sphere_capsule_dist(wx, wy, wz+fd_h, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6])
+                                    - sphere_capsule_dist(wx, wy, wz-fd_h, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6])) * fd_inv;
+                    const float factor = 2.0f * collision_weight * diff;
+                    add_grad_for_sphere(sphere_jnt, wx, wy, wz, nx, ny, nz, factor, 1.0f);
+                }
+                for (int m = 0; m < n_world_boxes; m++) {
+                    const float* o = world_boxes + m * 15;
+                    const float d = sphere_box_dist(wx, wy, wz, rr,
+                                                    o[0], o[1], o[2], o[3], o[4], o[5],
+                                                    o[6], o[7], o[8], o[9], o[10], o[11],
+                                                    o[12], o[13], o[14]);
+                    if (d >= collision_margin) continue;
+                    const float diff = d - collision_margin;
+                    coll_pen += diff * diff;
+                    const float nx = (sphere_box_dist(wx+fd_h, wy, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9], o[10], o[11], o[12], o[13], o[14])
+                                    - sphere_box_dist(wx-fd_h, wy, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9], o[10], o[11], o[12], o[13], o[14])) * fd_inv;
+                    const float ny = (sphere_box_dist(wx, wy+fd_h, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9], o[10], o[11], o[12], o[13], o[14])
+                                    - sphere_box_dist(wx, wy-fd_h, wz, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9], o[10], o[11], o[12], o[13], o[14])) * fd_inv;
+                    const float nz = (sphere_box_dist(wx, wy, wz+fd_h, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9], o[10], o[11], o[12], o[13], o[14])
+                                    - sphere_box_dist(wx, wy, wz-fd_h, rr, o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[9], o[10], o[11], o[12], o[13], o[14])) * fd_inv;
+                    const float factor = 2.0f * collision_weight * diff;
+                    add_grad_for_sphere(sphere_jnt, wx, wy, wz, nx, ny, nz, factor, 1.0f);
+                }
+                for (int m = 0; m < n_world_halfspaces; m++) {
+                    const float* o = world_halfspaces + m * 6;
+                    const float d = sphere_halfspace_dist(wx, wy, wz, rr,
+                                                          o[0], o[1], o[2], o[3], o[4], o[5]);
+                    if (d >= collision_margin) continue;
+                    const float diff = d - collision_margin;
+                    coll_pen += diff * diff;
+                    // sphere-halfspace SDF gradient w.r.t. sphere center is the
+                    // halfspace normal — analytical, no FD needed.
+                    const float nx = o[0], ny = o[1], nz = o[2];
+                    const float factor = 2.0f * collision_weight * diff;
+                    add_grad_for_sphere(sphere_jnt, wx, wy, wz, nx, ny, nz, factor, 1.0f);
+                }
+            }
+
+            // Self-collision pairs (analytical normal: unit vector along
+            // sphere-center separation; gradient contributions from both spheres).
+            for (int i = 0; i < n_self_pairs; i++) {
+                const int a = self_pair_i[i];
+                const int b = self_pair_j[i];
+                if (a < 0 || a >= n_robot_spheres || b < 0 || b >= n_robot_spheres) continue;
+                const float ra = sphere_world[a*4 + 3];
+                const float rb = sphere_world[b*4 + 3];
+                if (ra < 0.0f || rb < 0.0f) continue;
+                const float ax = sphere_world[a*4 + 0];
+                const float ay = sphere_world[a*4 + 1];
+                const float az = sphere_world[a*4 + 2];
+                const float bx = sphere_world[b*4 + 0];
+                const float by = sphere_world[b*4 + 1];
+                const float bz = sphere_world[b*4 + 2];
+                const float d = sphere_sphere_dist(ax, ay, az, ra, bx, by, bz, rb);
+                if (d >= collision_margin) continue;
+                const float diff = d - collision_margin;
+                coll_pen += diff * diff;
+                const float dx = ax - bx, dy = ay - by, dz = az - bz;
+                const float dist = sqrtf(dx*dx + dy*dy + dz*dz) + 1e-12f;
+                const float nx = dx / dist, ny = dy / dist, nz = dz / dist;
+                const float factor = 2.0f * collision_weight * diff;
+                const int joint_a = robot_sphere_joint_idx[a];
+                const int joint_b = robot_sphere_joint_idx[b];
+                add_grad_for_sphere(joint_a, ax, ay, az, nx, ny, nz, factor, +1.0f);
+                add_grad_for_sphere(joint_b, bx, by, bz, nx, ny, nz, factor, -1.0f);
+            }
+
+            coll_pen *= collision_weight;
+        }
+
+        // Update best solution (collision-aware).
         float curr_err = 0.0f;
         for (int k = 0; k < 6 * n_ee; k++) curr_err += r[k] * r[k];
+        curr_err += coll_pen;
         if (curr_err < best_err) {
             best_err = curr_err;
             for (int a = 0; a < n_act; a++) best_cfg[a] = cfg[a];
@@ -336,12 +539,23 @@ static ffi::Error SvgdRegionIkCudaImpl(
     ffi::Buffer<ffi::DataType::S32> target_jnts,
     ffi::Buffer<ffi::DataType::S32> ancestor_masks,
     ffi::Buffer<ffi::DataType::F32> target_Ts,
+    ffi::Buffer<ffi::DataType::F32> robot_spheres_local,
+    ffi::Buffer<ffi::DataType::S32> robot_sphere_joint_idx,
+    ffi::Buffer<ffi::DataType::F32> world_spheres,
+    ffi::Buffer<ffi::DataType::F32> world_capsules,
+    ffi::Buffer<ffi::DataType::F32> world_boxes,
+    ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
     int64_t n_iters,
     float bandwidth,
     float step_size,
+    int64_t enable_collision,
+    float   collision_weight,
+    float   collision_margin,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_err,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_ee,
@@ -352,6 +566,12 @@ static ffi::Error SvgdRegionIkCudaImpl(
     const int n_act = static_cast<int>(seeds.dimensions()[2]);
     const int n_joints = static_cast<int>(twists.dimensions()[0]);
     const int n_ee = static_cast<int>(target_jnts.dimensions()[0]);
+    const int n_robot_spheres   = static_cast<int>(robot_spheres_local.dimensions()[0]);
+    const int n_world_spheres   = static_cast<int>(world_spheres.dimensions()[0]);
+    const int n_world_capsules  = static_cast<int>(world_capsules.dimensions()[0]);
+    const int n_world_boxes     = static_cast<int>(world_boxes.dimensions()[0]);
+    const int n_world_halfspaces= static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs      = static_cast<int>(self_pair_i.dimensions()[0]);
 
     constexpr int THREADS_MAX = 32;
     const int threads = n_particles < THREADS_MAX ? n_particles : THREADS_MAX;
@@ -370,6 +590,14 @@ static ffi::Error SvgdRegionIkCudaImpl(
         target_jnts.typed_data(),
         ancestor_masks.typed_data(),
         target_Ts.typed_data(),
+        robot_spheres_local.typed_data(),
+        robot_sphere_joint_idx.typed_data(),
+        world_spheres.typed_data(),
+        world_capsules.typed_data(),
+        world_boxes.typed_data(),
+        world_halfspaces.typed_data(),
+        self_pair_i.typed_data(),
+        self_pair_j.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -380,7 +608,11 @@ static ffi::Error SvgdRegionIkCudaImpl(
         out_err->typed_data(),
         out_ee->typed_data(),
         out_target->typed_data(),
-        n_problems, n_particles, n_joints, n_act, n_ee);
+        n_problems, n_particles, n_joints, n_act, n_ee,
+        n_robot_spheres, n_world_spheres, n_world_capsules,
+        n_world_boxes, n_world_halfspaces, n_self_pairs,
+        static_cast<int>(enable_collision),
+        collision_weight, collision_margin);
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -408,12 +640,23 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // target_jnts
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // ancestor_masks
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // target_Ts
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // robot_spheres_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // robot_sphere_joint_idx
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_spheres
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_capsules
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_boxes
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // fixed_mask
         .Attr<int64_t>("n_iters")
         .Attr<float>("bandwidth")
         .Attr<float>("step_size")
+        .Attr<int64_t>("enable_collision")
+        .Attr<float>("collision_weight")
+        .Attr<float>("collision_margin")
         .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out cfgs
         .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out errors
         .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out ee_points

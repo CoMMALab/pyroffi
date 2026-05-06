@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import functools
 import warnings
-from typing import Callable, Tuple
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -64,6 +64,7 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
+from ._ls_ik import _prepare_ls_collision_buffers
 
 _REGION_IK_MAX_TPB_BY_SMEM = 384  # MAX_JOINTS=64, MAX_ACT=16 build of CUDA kernel.
 _HIT_AND_RUN_MAX_TPB_BY_SMEM = 384
@@ -381,6 +382,9 @@ def _run_region_sampler_loop(
         "n_brownian_steps",
         "fk_check_freq",
         "threads_per_block",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
     ),
 )
 def _brownian_motion_batch_select_jit(
@@ -397,6 +401,14 @@ def _brownian_motion_batch_select_jit(
     ancestor_mask: Array,
     box_mins: Array,
     box_maxs: Array,
+    robot_spheres_local: Array,
+    robot_sphere_joint_idx: Array,
+    world_spheres: Array,
+    world_capsules: Array,
+    world_boxes: Array,
+    world_halfspaces: Array,
+    self_pair_i: Array,
+    self_pair_j: Array,
     lower: Array,
     upper: Array,
     fixed_mask: Array,
@@ -412,6 +424,9 @@ def _brownian_motion_batch_select_jit(
     n_brownian_steps: int,
     fk_check_freq: int,
     threads_per_block: int = 128,
+    enable_collision: bool = False,
+    collision_weight: float = 0.0,
+    collision_margin: float = 0.02,
 ) -> tuple[Array, Array, Array, Array, Array]:
     from ..cuda_kernels._brownian_motion_ik_cuda import brownian_motion_ik_cuda
 
@@ -430,6 +445,14 @@ def _brownian_motion_batch_select_jit(
         target_quat=jnp.array([1.0, 0.0, 0.0, 0.0], dtype=jnp.float32),
         box_mins=box_mins,
         box_maxs=box_maxs,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_mask,
@@ -444,6 +467,9 @@ def _brownian_motion_batch_select_jit(
         n_brownian_steps=n_brownian_steps,
         fk_check_freq=fk_check_freq,
         threads_per_block=threads_per_block,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
 
     best_idx = jnp.argmin(errs, axis=1)
@@ -467,6 +493,9 @@ def _brownian_motion_batch_select_jit(
         "bandwidth",
         "step_size",
         "threads_per_block",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
     ),
 )
 def _svgd_region_batch_select_jit(
@@ -483,6 +512,14 @@ def _svgd_region_batch_select_jit(
     ancestor_mask: Array,
     box_mins: Array,
     box_maxs: Array,
+    robot_spheres_local: Array,
+    robot_sphere_joint_idx: Array,
+    world_spheres: Array,
+    world_capsules: Array,
+    world_boxes: Array,
+    world_halfspaces: Array,
+    self_pair_i: Array,
+    self_pair_j: Array,
     lower: Array,
     upper: Array,
     fixed_mask: Array,
@@ -493,6 +530,9 @@ def _svgd_region_batch_select_jit(
     bandwidth: float,
     step_size: float,
     threads_per_block: int = 128,
+    enable_collision: bool = False,
+    collision_weight: float = 0.0,
+    collision_margin: float = 0.02,
 ) -> tuple[Array, Array, Array, Array, Array]:
     from ..cuda_kernels._svgd_region_ik_cuda import svgd_region_ik_cuda
 
@@ -509,12 +549,23 @@ def _svgd_region_batch_select_jit(
         topo_inv=topo_inv,
         target_jnts=jnp.array([target_jnt], dtype=jnp.int32),
         ancestor_masks=ancestor_mask[None, :],
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_mask,
         n_iters=n_iters,
         bandwidth=bandwidth,
         step_size=step_size,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
 
     best_idx = jnp.argmin(errs, axis=1)
@@ -543,6 +594,9 @@ def _svgd_region_batch_select_jit(
         "eps_ori",
         "noise_std",
         "threads_per_block",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
     ),
 )
 def _hit_and_run_batch_select_jit(
@@ -558,6 +612,14 @@ def _hit_and_run_batch_select_jit(
     ancestor_mask: Array,
     box_mins: Array,
     box_maxs: Array,
+    robot_spheres_local: Array,
+    robot_sphere_joint_idx: Array,
+    world_spheres: Array,
+    world_capsules: Array,
+    world_boxes: Array,
+    world_halfspaces: Array,
+    self_pair_i: Array,
+    self_pair_j: Array,
     lower: Array,
     upper: Array,
     fixed_mask: Array,
@@ -573,6 +635,9 @@ def _hit_and_run_batch_select_jit(
     eps_ori: float,
     noise_std: float,
     threads_per_block: int = 128,
+    enable_collision: bool = False,
+    collision_weight: float = 0.0,
+    collision_margin: float = 0.02,
 ) -> tuple[Array, Array, Array, Array, Array]:
     from ..cuda_kernels._hit_and_run_ik_cuda import hit_and_run_ik_cuda
 
@@ -589,6 +654,14 @@ def _hit_and_run_batch_select_jit(
         ancestor_mask=ancestor_mask,
         box_mins=box_mins,
         box_maxs=box_maxs,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_mask,
@@ -603,6 +676,9 @@ def _hit_and_run_batch_select_jit(
         eps_ori=eps_ori,
         noise_std=noise_std,
         threads_per_block=threads_per_block,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
 
     best_idx = jnp.argmin(errs, axis=1)
@@ -628,6 +704,9 @@ def _hit_and_run_batch_select_jit(
         "ori_weight",
         "lambda_init",
         "eps_pos",
+        "enable_collision",
+        "collision_weight",
+        "collision_margin",
     ),
 )
 def _direct_region_batch_select_jit(
@@ -638,6 +717,14 @@ def _direct_region_batch_select_jit(
     box_mins: Array,
     box_maxs: Array,
     fixed_mask: Array,
+    robot_spheres_local: Array,
+    robot_sphere_joint_idx: Array,
+    world_spheres: Array,
+    world_capsules: Array,
+    world_boxes: Array,
+    world_halfspaces: Array,
+    self_pair_i: Array,
+    self_pair_j: Array,
     *,
     target_jnt: int,
     target_link_index: int,
@@ -646,6 +733,9 @@ def _direct_region_batch_select_jit(
     ori_weight: float,
     lambda_init: float,
     eps_pos: float,
+    enable_collision: bool = False,
+    collision_weight: float = 0.0,
+    collision_margin: float = 0.02,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Sample-then-solve: each problem solves IK to a fixed cartesian target.
 
@@ -670,13 +760,6 @@ def _direct_region_batch_select_jit(
     )
     target_T = jnp.concatenate([quat, targets_per_problem], axis=1)[:, None, :]  # (n_problems, 1, 7)
 
-    empty_rs = jnp.zeros((0, 4), dtype=jnp.float32)
-    empty_idx = jnp.zeros((0,), dtype=jnp.int32)
-    empty_ws = jnp.zeros((0, 4), dtype=jnp.float32)
-    empty_wc = jnp.zeros((0, 7), dtype=jnp.float32)
-    empty_wb = jnp.zeros((0, 15), dtype=jnp.float32)
-    empty_wh = jnp.zeros((0, 6), dtype=jnp.float32)
-
     cfgs, errs = ls_ik_cuda(
         seeds=seeds,
         twists=robot.joints.twists,
@@ -690,14 +773,14 @@ def _direct_region_batch_select_jit(
         target_jnts=jnp.array([target_jnt], dtype=jnp.int32),
         ancestor_masks=ancestor_mask[None, :],
         target_T=target_T,
-        robot_spheres_local=empty_rs,
-        robot_sphere_joint_idx=empty_idx,
-        world_spheres=empty_ws,
-        world_capsules=empty_wc,
-        world_boxes=empty_wb,
-        world_halfspaces=empty_wh,
-        self_pair_i=empty_idx,
-        self_pair_j=empty_idx,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=robot.joints.lower_limits,
         upper=robot.joints.upper_limits,
         fixed_mask=fixed_mask,
@@ -707,6 +790,9 @@ def _direct_region_batch_select_jit(
         lambda_init=lambda_init,
         eps_pos=eps_pos,
         eps_ori=1.0,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
     )
 
     best_idx = jnp.argmin(errs, axis=1)
@@ -751,6 +837,11 @@ def brownian_motion_sample_box_region_cuda(
     target_entropy: float | None = None,
     entropy_bins: int = 10,
     verbose: bool = False,
+    collision_free: bool = False,
+    collision_checker: Any | None = None,
+    collision_world: Any | None = None,
+    collision_weight: float = 1e4,
+    collision_margin: float = 0.02,
 ) -> (
     Tuple[
         Float[Array, "n_samples n_act"],
@@ -799,6 +890,19 @@ def brownian_motion_sample_box_region_cuda(
         n_act, seeds_per_launch, memory_limit_gb, restarts_per_target
     )
 
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        self_pair_i,
+        self_pair_j,
+        kernel_collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    enable_collision = bool(collision_free and kernel_collision_enabled)
+
     def step_fn(*, seeds, init_points, box_mins_pp, box_maxs_pp, rng_seed):
         return _brownian_motion_batch_select_jit(
             seeds=seeds,
@@ -814,6 +918,14 @@ def brownian_motion_sample_box_region_cuda(
             ancestor_mask=ancestor_mask,
             box_mins=box_mins_pp,
             box_maxs=box_maxs_pp,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
             lower=lower,
             upper=upper,
             fixed_mask=fixed_mask,
@@ -828,6 +940,9 @@ def brownian_motion_sample_box_region_cuda(
             n_brownian_steps=n_brownian_steps,
             fk_check_freq=fk_check_freq,
             threads_per_block=threads_per_block,
+            enable_collision=enable_collision,
+            collision_weight=float(collision_weight),
+            collision_margin=float(collision_margin),
         )
 
     return _run_region_sampler_loop(
@@ -874,6 +989,11 @@ def svgd_sample_box_region_cuda(
     target_entropy: float | None = None,
     entropy_bins: int = 10,
     verbose: bool = False,
+    collision_free: bool = False,
+    collision_checker: Any | None = None,
+    collision_world: Any | None = None,
+    collision_weight: float = 1e4,
+    collision_margin: float = 0.02,
 ) -> (
     Tuple[
         Float[Array, "n_samples n_act"],
@@ -908,6 +1028,19 @@ def svgd_sample_box_region_cuda(
         n_act, seeds_per_launch, memory_limit_gb, restarts_per_target
     )
 
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        self_pair_i,
+        self_pair_j,
+        kernel_collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    enable_collision = bool(collision_free and kernel_collision_enabled)
+
     def step_fn(*, seeds, init_points, box_mins_pp, box_maxs_pp, rng_seed):
         return _svgd_region_batch_select_jit(
             seeds=seeds,
@@ -923,6 +1056,14 @@ def svgd_sample_box_region_cuda(
             ancestor_mask=ancestor_mask,
             box_mins=box_mins_pp,
             box_maxs=box_maxs_pp,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
             lower=lower,
             upper=upper,
             fixed_mask=fixed_mask,
@@ -932,6 +1073,9 @@ def svgd_sample_box_region_cuda(
             bandwidth=bandwidth,
             step_size=step_size,
             threads_per_block=threads_per_block,
+            enable_collision=enable_collision,
+            collision_weight=float(collision_weight),
+            collision_margin=float(collision_margin),
         )
 
     return _run_region_sampler_loop(
@@ -983,6 +1127,11 @@ def hit_and_run_sample_box_region_cuda(
     target_entropy: float | None = None,
     entropy_bins: int = 10,
     verbose: bool = False,
+    collision_free: bool = False,
+    collision_checker: Any | None = None,
+    collision_world: Any | None = None,
+    collision_weight: float = 1e4,
+    collision_margin: float = 0.02,
 ) -> (
     Tuple[
         Float[Array, "n_samples n_act"],
@@ -1017,6 +1166,19 @@ def hit_and_run_sample_box_region_cuda(
         n_act, seeds_per_launch, memory_limit_gb, restarts_per_target
     )
 
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        self_pair_i,
+        self_pair_j,
+        kernel_collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    enable_collision = bool(collision_free and kernel_collision_enabled)
+
     def step_fn(*, seeds, init_points, box_mins_pp, box_maxs_pp, rng_seed):
         return _hit_and_run_batch_select_jit(
             seeds=seeds,
@@ -1031,6 +1193,14 @@ def hit_and_run_sample_box_region_cuda(
             ancestor_mask=ancestor_mask,
             box_mins=box_mins_pp,
             box_maxs=box_maxs_pp,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
             lower=lower,
             upper=upper,
             fixed_mask=fixed_mask,
@@ -1045,6 +1215,9 @@ def hit_and_run_sample_box_region_cuda(
             eps_ori=eps_ori,
             noise_std=noise_std,
             threads_per_block=threads_per_block,
+            enable_collision=enable_collision,
+            collision_weight=float(collision_weight),
+            collision_margin=float(collision_margin),
         )
 
     return _run_region_sampler_loop(
@@ -1092,6 +1265,11 @@ def direct_sample_box_region_cuda(
     target_entropy: float | None = None,
     entropy_bins: int = 10,
     verbose: bool = False,
+    collision_free: bool = False,
+    collision_checker: Any | None = None,
+    collision_world: Any | None = None,
+    collision_weight: float = 1e4,
+    collision_margin: float = 0.02,
 ) -> (
     Tuple[
         Float[Array, "n_samples n_act"],
@@ -1164,6 +1342,19 @@ def direct_sample_box_region_cuda(
         n_act, seeds_per_launch, memory_limit_gb, restarts_per_target
     )
 
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        self_pair_i,
+        self_pair_j,
+        kernel_collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    enable_collision = bool(collision_free and kernel_collision_enabled)
+
     def step_fn(*, seeds, init_points, box_mins_pp, box_maxs_pp, rng_seed):
         del rng_seed  # ls_ik_cuda is deterministic given seeds.
         return _direct_region_batch_select_jit(
@@ -1174,6 +1365,14 @@ def direct_sample_box_region_cuda(
             box_mins=box_mins_pp,
             box_maxs=box_maxs_pp,
             fixed_mask=fixed_mask,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
             target_jnt=target_jnt,
             target_link_index=int(target_link_index),
             max_iter=max_iter,
@@ -1181,6 +1380,9 @@ def direct_sample_box_region_cuda(
             ori_weight=ori_weight,
             lambda_init=lambda_init,
             eps_pos=eps_pos,
+            enable_collision=enable_collision,
+            collision_weight=float(collision_weight),
+            collision_margin=float(collision_margin),
         )
 
     return _run_region_sampler_loop(

@@ -1,5 +1,8 @@
 """Sample Panda IK configurations with end-effector coverage inside a box region.
 
+Includes optional collision avoidance against a draggable sphere obstacle plus
+self-collision pruning, both handled in-kernel by the CUDA region-IK solver.
+
 Prerequisite:
     bash src/pyroffi/cuda_kernels/build_brownian_motion_ik_cuda.sh
 """
@@ -14,8 +17,9 @@ import jax.numpy as jnp
 import numpy as np
 import pyroffi as pk
 import viser
+import yourdfpy
+from pyroffi.collision import RobotCollisionSpherized, Sphere
 from pyroffi.optimization_engines import brownian_motion_sample_box_region_cuda
-from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
 
 
@@ -97,16 +101,23 @@ def main() -> None:
             f"use <= {max_tpb_by_smem}."
         )
 
-    urdf = load_robot_description("panda_description")
+    urdf = yourdfpy.URDF.load(
+        "resources/panda/panda_spherized.urdf",
+        mesh_dir="resources/panda/meshes",
+    )
     robot = pk.Robot.from_urdf(urdf)
+    robot_coll = RobotCollisionSpherized.from_urdf(urdf)
 
     target_link_name = "panda_hand"
     target_link_index = robot.links.names.index(target_link_name)
 
-    hand_joint_names = ("panda_finger_joint1", "panda_finger_joint2")
-    fixed_joint_mask = jnp.array(
-        [name in hand_joint_names for name in robot.joints.actuated_names],
-        dtype=jnp.int32,
+    fixed_joint_mask = jnp.zeros(
+        (robot.joints.num_actuated_joints,), dtype=jnp.int32
+    )
+
+    sphere_radius = 0.06
+    sphere_coll_template = Sphere.from_center_and_radius(
+        np.array([0.0, 0.0, 0.0]), np.array([sphere_radius])
     )
 
     previous_cfg = (robot.joints.lower_limits + robot.joints.upper_limits) / 2.0
@@ -147,10 +158,24 @@ def main() -> None:
     size_y = server.gui.add_slider("Box Size Y", min=0.02, max=0.8, step=0.01, initial_value=float(box_dims[1]))
     size_z = server.gui.add_slider("Box Size Z", min=0.02, max=0.8, step=0.01, initial_value=float(box_dims[2]))
     auto_resolve = server.gui.add_checkbox("Auto Resolve On Box Change", initial_value=False)
+    collision_enabled = server.gui.add_checkbox("Collision Avoidance", initial_value=True)
+    collision_weight = server.gui.add_number(
+        "Collision Weight", initial_value=1e3, step=1e2
+    )
+    collision_margin = server.gui.add_slider(
+        "Collision Margin (m)", min=0.0, max=0.1, step=0.005, initial_value=0.02
+    )
     resolve_btn = server.gui.add_button("Resolve Samples")
     status_md = server.gui.add_markdown("Preparing solver...")
     idx_slider = server.gui.add_slider("Sample Index", min=0, max=0, step=1, initial_value=0)
     play = server.gui.add_checkbox("Play", initial_value=True)
+
+    sphere_handle = server.scene.add_transform_controls(
+        "/obstacle", scale=0.15, position=(0.55, 0.0, 0.55),
+    )
+    server.scene.add_mesh_trimesh(
+        "/obstacle/mesh", mesh=sphere_coll_template.to_trimesh()
+    )
 
     solve_nonce = 0
     needs_solve = True
@@ -189,11 +214,24 @@ def main() -> None:
         box_max_jax = jnp.asarray(box_max_np, dtype=jnp.float32)
         _set_status("Solving...")
 
+        sphere_world = sphere_coll_template.transform_from_wxyz_position(
+            wxyz=np.array(sphere_handle.wxyz),
+            position=np.array(sphere_handle.position),
+        )
+        coll_kwargs = dict(
+            collision_free=bool(collision_enabled.value),
+            collision_checker=robot_coll,
+            collision_world=sphere_world,
+            collision_weight=float(collision_weight.value),
+            collision_margin=float(collision_margin.value),
+        )
+
         if solve_nonce == 0:
             rng_key_warmup = jax.random.PRNGKey(0)
             t0 = time.perf_counter()
             warm_cfgs, _, _, _ = brownian_motion_sample_box_region_cuda(
-                rng_key=rng_key_warmup, box_min=box_min_jax, box_max=box_max_jax, **call_kwargs
+                rng_key=rng_key_warmup, box_min=box_min_jax, box_max=box_max_jax,
+                **coll_kwargs, **call_kwargs,
             )
             warm_cfgs.block_until_ready()
             warmup_ms = (time.perf_counter() - t0) * 1000.0
@@ -203,7 +241,8 @@ def main() -> None:
         rng_key_run = jax.random.PRNGKey(solve_nonce)
         t0 = time.perf_counter()
         cfgs, ee_points, target_points, errors = brownian_motion_sample_box_region_cuda(
-            rng_key=rng_key_run, box_min=box_min_jax, box_max=box_max_jax, **call_kwargs
+            rng_key=rng_key_run, box_min=box_min_jax, box_max=box_max_jax,
+            **coll_kwargs, **call_kwargs,
         )
         cfgs.block_until_ready()
         solve_ms = (time.perf_counter() - t0) * 1000.0
@@ -257,6 +296,7 @@ def main() -> None:
     resolve_btn.on_click(_request_solve)
 
     last_box = np.concatenate([box_center, box_dims], axis=0)
+    last_sphere_pos = np.array(sphere_handle.position, dtype=np.float32)
     _draw_box()
 
     print(f"Viewer running at http://{args.host}:{args.port}")
@@ -273,6 +313,12 @@ def main() -> None:
             last_box = current_box
             _draw_box()
             if auto_resolve.value:
+                needs_solve = True
+
+        current_sphere_pos = np.array(sphere_handle.position, dtype=np.float32)
+        if not np.allclose(current_sphere_pos, last_sphere_pos):
+            last_sphere_pos = current_sphere_pos
+            if auto_resolve.value and collision_enabled.value:
                 needs_solve = True
 
         if needs_solve:

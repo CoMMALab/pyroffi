@@ -6,6 +6,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -225,6 +226,14 @@ void hit_and_run_ik_kernel(
     const int*   __restrict__ ancestor_masks,
     const float* __restrict__ box_mins,   // (n_problems * 3) — per-problem box min
     const float* __restrict__ box_maxs,   // (n_problems * 3) — per-problem box max
+    const float* __restrict__ robot_spheres_local,    // (n_rs, 4)
+    const int*   __restrict__ robot_sphere_joint_idx, // (n_rs,)
+    const float* __restrict__ world_spheres,    // (Ms, 4)
+    const float* __restrict__ world_capsules,   // (Mc, 7)
+    const float* __restrict__ world_boxes,      // (Mb, 15)
+    const float* __restrict__ world_halfspaces, // (Mh, 6)
+    const int*   __restrict__ self_pair_i,      // (n_self,)
+    const int*   __restrict__ self_pair_j,      // (n_self,)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -235,8 +244,12 @@ void hit_and_run_ik_kernel(
     float*       __restrict__ out_targets,
     int n_problems, int n_samples, int n_joints, int n_act, int target_jnt,
     int max_iter, int n_iterations,
+    int n_robot_spheres, int n_world_spheres, int n_world_capsules,
+    int n_world_boxes, int n_world_halfspaces, int n_self_pairs,
+    int enable_collision,
     float pos_weight, float ori_weight, float lambda_init,
-    float eps_pos, float eps_ori, float noise_std)
+    float eps_pos, float eps_ori, float noise_std,
+    float collision_weight, float collision_margin)
 {
     __shared__ float s_twists[MAX_JOINTS * 6];
     __shared__ float s_parent_tf[MAX_JOINTS * 7];
@@ -316,6 +329,100 @@ void hit_and_run_ik_kernel(
     };
     (void)noise_std;
     float lam = lambda_init;
+
+    // Collision-penalty closure: scalar penalty over robot/world spheres,
+    // capsules, boxes, halfspaces, plus self-pair pruned list. Mirrors the
+    // LS / MPPI / SQP / HJCD pattern. T_eval is reused as scratch FK output.
+    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
+        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+
+        fk_single(
+            cfg_eval,
+            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+            T_eval, n_joints, n_act);
+
+        float sphere_world[MAX_ROBOT_SPHERES * 4];
+        for (int i = 0; i < n_robot_spheres; i++) {
+            const int jidx = robot_sphere_joint_idx[i];
+            if (jidx < 0 || jidx >= n_joints) {
+                sphere_world[i*4 + 3] = -1.0f;
+                continue;
+            }
+            const float* sp = robot_spheres_local + i * 4;
+            float local_p[3] = {sp[0], sp[1], sp[2]};
+            apply_se3_point(T_eval + jidx * 7, local_p, sphere_world + i * 4);
+            sphere_world[i*4 + 3] = sp[3];
+        }
+
+        float pen = 0.0f;
+        for (int i = 0; i < n_robot_spheres; i++) {
+            const float rr = sphere_world[i*4 + 3];
+            if (rr < 0.0f) continue;
+            const float wx = sphere_world[i*4 + 0];
+            const float wy = sphere_world[i*4 + 1];
+            const float wz = sphere_world[i*4 + 2];
+
+            for (int m = 0; m < n_world_spheres; m++) {
+                const float* o = world_spheres + m * 4;
+                const float d = sphere_sphere_dist(wx, wy, wz, rr,
+                                                   o[0], o[1], o[2], o[3]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_capsules; m++) {
+                const float* o = world_capsules + m * 7;
+                const float d = sphere_capsule_dist(wx, wy, wz, rr,
+                                                    o[0], o[1], o[2], o[3], o[4], o[5], o[6]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_boxes; m++) {
+                const float* o = world_boxes + m * 15;
+                const float d = sphere_box_dist(wx, wy, wz, rr,
+                                                o[0], o[1], o[2],
+                                                o[3], o[4], o[5],
+                                                o[6], o[7], o[8],
+                                                o[9], o[10], o[11],
+                                                o[12], o[13], o[14]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_halfspaces; m++) {
+                const float* o = world_halfspaces + m * 6;
+                const float d = sphere_halfspace_dist(wx, wy, wz, rr,
+                                                      o[0], o[1], o[2], o[3], o[4], o[5]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+        }
+
+        for (int i = 0; i < n_self_pairs; i++) {
+            const int a = self_pair_i[i];
+            const int b = self_pair_j[i];
+            if (a < 0 || a >= n_robot_spheres || b < 0 || b >= n_robot_spheres) continue;
+            const float ra = sphere_world[a*4 + 3];
+            const float rb = sphere_world[b*4 + 3];
+            if (ra < 0.0f || rb < 0.0f) continue;
+            const float d = sphere_sphere_dist(
+                sphere_world[a*4+0], sphere_world[a*4+1], sphere_world[a*4+2], ra,
+                sphere_world[b*4+0], sphere_world[b*4+1], sphere_world[b*4+2], rb);
+            if (d < collision_margin) {
+                const float diff = d - collision_margin;
+                pen += diff * diff;
+            }
+        }
+
+        return collision_weight * pen;
+    };
 
     for (int a = lane_id; a < n_act; a += 32)
         cfg[a] = best_cfg[a] = seeds[global_chain_idx * n_act + a];
@@ -432,15 +539,17 @@ void hit_and_run_ik_kernel(
                 curr_err += rw * rw;
             }
 
+            if (norm3(r) < eps_pos && norm3(r+3) < eps_ori) break;
+
+            // Build J from current T_world before collision_penalty stomps it.
+            build_jacobian(J, T_world, s_twists, s_act_idx, s_mimic_mul,
+                          s_mimic_act_idx, s_ancestor_mask, target_jnt, n_joints, n_act);
+            curr_err += collision_penalty(cfg, T_world);
+
             if (curr_err < best_err) {
                 best_err = curr_err;
                 for (int a = 0; a < n_act; a++) best_cfg[a] = cfg[a];
             }
-
-            if (norm3(r) < eps_pos && norm3(r+3) < eps_ori) break;
-
-            build_jacobian(J, T_world, s_twists, s_act_idx, s_mimic_mul,
-                          s_mimic_act_idx, s_ancestor_mask, target_jnt, n_joints, n_act);
 
             lm_step(cfg, J, r, W, col_scale, A, rhs, s_lower, s_upper, s_fixed_mask,
                    n_act, lam);
@@ -455,6 +564,7 @@ void hit_and_run_ik_kernel(
                 float rw = r_t[k] * W[k];
                 trial_err += rw * rw;
             }
+            trial_err += collision_penalty(cfg, T_world);
 
             const bool improved = trial_err < curr_err * (1.0f - 1e-4f);
             if (improved) lam = fmaxf(lam * 0.5f, 1e-10f);
@@ -500,6 +610,14 @@ static ffi::Error HitAndRunIkCudaImpl(
     ffi::Buffer<ffi::DataType::S32> ancestor_masks,
     ffi::Buffer<ffi::DataType::F32> box_mins,   // (n_problems, 3) — per-problem
     ffi::Buffer<ffi::DataType::F32> box_maxs,   // (n_problems, 3) — per-problem
+    ffi::Buffer<ffi::DataType::F32> robot_spheres_local,
+    ffi::Buffer<ffi::DataType::S32> robot_sphere_joint_idx,
+    ffi::Buffer<ffi::DataType::F32> world_spheres,
+    ffi::Buffer<ffi::DataType::F32> world_capsules,
+    ffi::Buffer<ffi::DataType::F32> world_boxes,
+    ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -513,6 +631,9 @@ static ffi::Error HitAndRunIkCudaImpl(
     float   eps_pos,
     float   eps_ori,
     float   noise_std,
+    int64_t enable_collision,
+    float   collision_weight,
+    float   collision_margin,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_cfg,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_err,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_ee_points,
@@ -522,6 +643,12 @@ static ffi::Error HitAndRunIkCudaImpl(
     const int n_samples  = static_cast<int>(seeds.dimensions()[1]);
     const int n_act      = static_cast<int>(seeds.dimensions()[2]);
     const int n_joints   = static_cast<int>(twists.dimensions()[0]);
+    const int n_robot_spheres   = static_cast<int>(robot_spheres_local.dimensions()[0]);
+    const int n_world_spheres   = static_cast<int>(world_spheres.dimensions()[0]);
+    const int n_world_capsules  = static_cast<int>(world_capsules.dimensions()[0]);
+    const int n_world_boxes     = static_cast<int>(world_boxes.dimensions()[0]);
+    const int n_world_halfspaces= static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs      = static_cast<int>(self_pair_i.dimensions()[0]);
 
     if (n_act > MAX_ACT || n_joints > MAX_JOINTS) {
         return ffi::Error(
@@ -558,6 +685,14 @@ static ffi::Error HitAndRunIkCudaImpl(
         ancestor_masks.typed_data(),
         box_mins.typed_data(),
         box_maxs.typed_data(),
+        robot_spheres_local.typed_data(),
+        robot_sphere_joint_idx.typed_data(),
+        world_spheres.typed_data(),
+        world_capsules.typed_data(),
+        world_boxes.typed_data(),
+        world_halfspaces.typed_data(),
+        self_pair_i.typed_data(),
+        self_pair_j.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -570,8 +705,12 @@ static ffi::Error HitAndRunIkCudaImpl(
         static_cast<int>(target_jnt),
         static_cast<int>(max_iter),
         static_cast<int>(n_iterations),
+        n_robot_spheres, n_world_spheres, n_world_capsules,
+        n_world_boxes, n_world_halfspaces, n_self_pairs,
+        static_cast<int>(enable_collision),
         pos_weight, ori_weight, lambda_init,
-        eps_pos, eps_ori, noise_std);
+        eps_pos, eps_ori, noise_std,
+        collision_weight, collision_margin);
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -597,6 +736,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // ancestor_masks
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_mins  (n_problems, 3)
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_maxs  (n_problems, 3)
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // robot_spheres_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // robot_sphere_joint_idx
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_spheres
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_capsules
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_boxes
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask
@@ -610,6 +757,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<float>("eps_pos")
         .Attr<float>("eps_ori")
         .Attr<float>("noise_std")
+        .Attr<int64_t>("enable_collision")
+        .Attr<float>("collision_weight")
+        .Attr<float>("collision_margin")
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out_cfg
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out_err
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out_ee_points

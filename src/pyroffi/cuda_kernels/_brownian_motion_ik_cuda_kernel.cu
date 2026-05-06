@@ -36,6 +36,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -352,6 +353,14 @@ void brownian_motion_ik_kernel(
     const float* __restrict__ target_quat,
     const float* __restrict__ box_mins,   // (n_problems * 3) — per-problem box min
     const float* __restrict__ box_maxs,   // (n_problems * 3) — per-problem box max
+    const float* __restrict__ robot_spheres_local,    // (n_rs, 4)
+    const int*   __restrict__ robot_sphere_joint_idx, // (n_rs,)
+    const float* __restrict__ world_spheres,    // (Ms, 4)
+    const float* __restrict__ world_capsules,   // (Mc, 7)
+    const float* __restrict__ world_boxes,      // (Mb, 15)
+    const float* __restrict__ world_halfspaces, // (Mh, 6)
+    const int*   __restrict__ self_pair_i,      // (n_self,)
+    const int*   __restrict__ self_pair_j,      // (n_self,)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -362,8 +371,12 @@ void brownian_motion_ik_kernel(
     float*       __restrict__ out_target_points,
     int n_problems, int n_seeds, int n_joints, int n_act,
     int target_jnt, int max_iter,
+    int n_robot_spheres, int n_world_spheres, int n_world_capsules,
+    int n_world_boxes, int n_world_halfspaces, int n_self_pairs,
+    int enable_collision,
     float pos_weight, float ori_weight, float lambda_init, float eps_pos,
-    float noise_std, int n_brownian_steps, int fk_check_freq)
+    float noise_std, int n_brownian_steps, int fk_check_freq,
+    float collision_weight, float collision_margin)
 {
     // ── Static kinematics in shared memory (shared across the whole block) ──
     __shared__ float s_twists[MAX_JOINTS * 6];
@@ -459,6 +472,97 @@ void brownian_motion_ik_kernel(
     };
     const float lam = lambda_init;
 
+    // Lane-0-only collision penalty over robot/world spheres, capsules, boxes,
+    // halfspaces, plus self-pair pruned list. T_eval is overwritten by fk_single.
+    // Other lanes return 0.0f and must not call this. Mirrors LS / MPPI pattern.
+    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
+        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+
+        fk_single(
+            cfg_eval,
+            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+            T_eval, n_joints, n_act);
+
+        float sphere_world[MAX_ROBOT_SPHERES * 4];
+        for (int i = 0; i < n_robot_spheres; i++) {
+            const int jidx = robot_sphere_joint_idx[i];
+            if (jidx < 0 || jidx >= n_joints) {
+                sphere_world[i*4 + 3] = -1.0f;
+                continue;
+            }
+            const float* sp = robot_spheres_local + i * 4;
+            float local_p[3] = {sp[0], sp[1], sp[2]};
+            apply_se3_point(T_eval + jidx * 7, local_p, sphere_world + i * 4);
+            sphere_world[i*4 + 3] = sp[3];
+        }
+
+        float pen = 0.0f;
+        for (int i = 0; i < n_robot_spheres; i++) {
+            const float rr = sphere_world[i*4 + 3];
+            if (rr < 0.0f) continue;
+            const float wx = sphere_world[i*4 + 0];
+            const float wy = sphere_world[i*4 + 1];
+            const float wz = sphere_world[i*4 + 2];
+            for (int m = 0; m < n_world_spheres; m++) {
+                const float* o = world_spheres + m * 4;
+                const float d = sphere_sphere_dist(wx, wy, wz, rr,
+                                                   o[0], o[1], o[2], o[3]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_capsules; m++) {
+                const float* o = world_capsules + m * 7;
+                const float d = sphere_capsule_dist(wx, wy, wz, rr,
+                                                    o[0], o[1], o[2], o[3], o[4], o[5], o[6]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_boxes; m++) {
+                const float* o = world_boxes + m * 15;
+                const float d = sphere_box_dist(wx, wy, wz, rr,
+                                                o[0], o[1], o[2],
+                                                o[3], o[4], o[5],
+                                                o[6], o[7], o[8],
+                                                o[9], o[10], o[11],
+                                                o[12], o[13], o[14]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+            for (int m = 0; m < n_world_halfspaces; m++) {
+                const float* o = world_halfspaces + m * 6;
+                const float d = sphere_halfspace_dist(wx, wy, wz, rr,
+                                                      o[0], o[1], o[2], o[3], o[4], o[5]);
+                if (d < collision_margin) {
+                    const float diff = d - collision_margin;
+                    pen += diff * diff;
+                }
+            }
+        }
+        for (int i = 0; i < n_self_pairs; i++) {
+            const int a = self_pair_i[i];
+            const int b = self_pair_j[i];
+            if (a < 0 || a >= n_robot_spheres || b < 0 || b >= n_robot_spheres) continue;
+            const float ra = sphere_world[a*4 + 3];
+            const float rb = sphere_world[b*4 + 3];
+            if (ra < 0.0f || rb < 0.0f) continue;
+            const float d = sphere_sphere_dist(
+                sphere_world[a*4+0], sphere_world[a*4+1], sphere_world[a*4+2], ra,
+                sphere_world[b*4+0], sphere_world[b*4+1], sphere_world[b*4+2], rb);
+            if (d < collision_margin) {
+                const float diff = d - collision_margin;
+                pen += diff * diff;
+            }
+        }
+        return collision_weight * pen;
+    };
+
     // ─── Phase 1: GN Boundary Reach ────────────────────────────────────────
     for (int iter = 0; iter < max_iter; iter++) {
 
@@ -471,6 +575,8 @@ void brownian_motion_ik_kernel(
         __syncwarp();
 
         // Residual + box distance (serial, lane 0; few ops).
+        // Defer best-update until after build_jacobian_warp (which needs a
+        // clean w_T_world) so collision_penalty can safely stomp T_world.
         if (lane == 0) {
             float target_T[7] = {
                 s_target_quat[0], s_target_quat[1], s_target_quat[2], s_target_quat[3],
@@ -481,10 +587,6 @@ void brownian_motion_ik_kernel(
             const float  d  = box_dist_sq(ee, w_box_min, w_box_max);
             w_scratch[1] = d;
             w_scratch[2] = norm3(w_r);
-            if (d < w_scratch[0]) {
-                w_scratch[0] = d;
-                for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
-            }
         }
         __syncwarp();
 
@@ -498,6 +600,17 @@ void brownian_motion_ik_kernel(
                                 s_mimic_mul, s_mimic_act_idx, s_ancestor_mask,
                                 n_joints, n_act, target_jnt, lane);
         }
+
+        // Collision-aware best-update (lane 0; stomps w_T_world, but w_J is built).
+        if (lane == 0) {
+            const float coll = collision_penalty(w_cfg, w_T_world);
+            const float total_err = w_scratch[1] + coll;
+            if (total_err < w_scratch[0]) {
+                w_scratch[0] = total_err;
+                for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
+            }
+        }
+        __syncwarp();
 
         // GN step (warp-parallel).
         gn_step_warp(w_J, w_r, w_cfg, w_col_scale, w_A, w_rhs,
@@ -523,16 +636,25 @@ void brownian_motion_ik_kernel(
         compute_r_from_T_world(w_T_world, target_jnt, target_T2, w_r);
         const float* ee0 = w_T_world + target_jnt * 7 + 4;
         const float  d0  = box_dist_sq(ee0, w_box_min, w_box_max);
-        if (d0 < w_scratch[0]) {
-            w_scratch[0] = d0;
-            for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
-        }
+        // Defer best-update; needs build_jacobian_warp (consumes T_world) first.
+        w_scratch[1] = d0;
     }
     __syncwarp();
 
     build_jacobian_warp(w_J, w_T_world, s_twists, s_act_idx,
                         s_mimic_mul, s_mimic_act_idx, s_ancestor_mask,
                         n_joints, n_act, target_jnt, lane);
+
+    // Collision-aware best-update (lane 0; stomps w_T_world, w_J already built).
+    if (lane == 0) {
+        const float coll = collision_penalty(w_cfg, w_T_world);
+        const float total_err = w_scratch[1] + coll;
+        if (total_err < w_scratch[0]) {
+            w_scratch[0] = total_err;
+            for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
+        }
+    }
+    __syncwarp();
 
     // ─── Phase 2: Null-Space Brownian Shuffle ─────────────────────────────
     for (int step = 0; step < n_brownian_steps; step++) {
@@ -604,13 +726,18 @@ void brownian_motion_ik_kernel(
                 const float* T_ee = w_T_world + target_jnt * 7;
                 const float  d    = box_dist_sq(T_ee + 4, w_box_min, w_box_max);
                 w_scratch[1] = d;
-                if (d < w_scratch[0]) {
-                    w_scratch[0] = d;
-                    for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
-                }
-                // Nearest point on box boundary for corrective target.
+                // Nearest point on box boundary for corrective target — must be
+                // captured before collision_penalty stomps w_T_world.
                 for (int k = 0; k < 3; k++)
                     w_scratch[6+k] = clampf(T_ee[4+k], w_box_min[k], w_box_max[k]);
+                // Collision-aware best-update (stomps w_T_world; w_J persists from
+                // last build_jacobian_warp call so subsequent null-space step is OK).
+                const float coll = collision_penalty(w_cfg, w_T_world);
+                const float total_err = d + coll;
+                if (total_err < w_scratch[0]) {
+                    w_scratch[0] = total_err;
+                    for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
+                }
             }
             __syncwarp();
 
@@ -655,8 +782,12 @@ void brownian_motion_ik_kernel(
                 if (lane == 0) {
                     const float* T_ee_c = w_T_world + target_jnt * 7;
                     const float  d_c    = box_dist_sq(T_ee_c + 4, w_box_min, w_box_max);
-                    if (d_c < w_scratch[0]) {
-                        w_scratch[0] = d_c;
+                    // Collision-aware best-update (stomps w_T_world; w_J was just
+                    // rebuilt by the last gn_step_warp's build_jacobian_warp call).
+                    const float coll = collision_penalty(w_cfg, w_T_world);
+                    const float total_err = d_c + coll;
+                    if (total_err < w_scratch[0]) {
+                        w_scratch[0] = total_err;
                         for (int a = 0; a < n_act; a++) w_best_cfg[a] = w_cfg[a];
                     }
                 }
@@ -712,6 +843,14 @@ static ffi::Error BrownianMotionIkCudaImpl(
     ffi::Buffer<ffi::DataType::F32> target_quat,
     ffi::Buffer<ffi::DataType::F32> box_mins,   // (n_problems, 3) — per-problem
     ffi::Buffer<ffi::DataType::F32> box_maxs,   // (n_problems, 3) — per-problem
+    ffi::Buffer<ffi::DataType::F32> robot_spheres_local,
+    ffi::Buffer<ffi::DataType::S32> robot_sphere_joint_idx,
+    ffi::Buffer<ffi::DataType::F32> world_spheres,
+    ffi::Buffer<ffi::DataType::F32> world_capsules,
+    ffi::Buffer<ffi::DataType::F32> world_boxes,
+    ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -726,6 +865,9 @@ static ffi::Error BrownianMotionIkCudaImpl(
     int64_t n_brownian_steps,
     int64_t fk_check_freq,
     int64_t threads_per_block,
+    int64_t enable_collision,
+    float   collision_weight,
+    float   collision_margin,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_cfg,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_err,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_ee_points,
@@ -735,6 +877,12 @@ static ffi::Error BrownianMotionIkCudaImpl(
     const int n_seeds    = static_cast<int>(seeds.dimensions()[1]);
     const int n_act      = static_cast<int>(seeds.dimensions()[2]);
     const int n_joints   = static_cast<int>(twists.dimensions()[0]);
+    const int n_robot_spheres   = static_cast<int>(robot_spheres_local.dimensions()[0]);
+    const int n_world_spheres   = static_cast<int>(world_spheres.dimensions()[0]);
+    const int n_world_capsules  = static_cast<int>(world_capsules.dimensions()[0]);
+    const int n_world_boxes     = static_cast<int>(world_boxes.dimensions()[0]);
+    const int n_world_halfspaces= static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs      = static_cast<int>(self_pair_i.dimensions()[0]);
 
     if (n_act > MAX_ACT || n_joints > MAX_JOINTS) {
         return ffi::Error(
@@ -815,6 +963,14 @@ static ffi::Error BrownianMotionIkCudaImpl(
         target_quat.typed_data(),
         box_mins.typed_data(),
         box_maxs.typed_data(),
+        robot_spheres_local.typed_data(),
+        robot_sphere_joint_idx.typed_data(),
+        world_spheres.typed_data(),
+        world_capsules.typed_data(),
+        world_boxes.typed_data(),
+        world_halfspaces.typed_data(),
+        self_pair_i.typed_data(),
+        self_pair_j.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -829,13 +985,17 @@ static ffi::Error BrownianMotionIkCudaImpl(
         n_act,
         static_cast<int>(target_jnt),
         static_cast<int>(max_iter),
+        n_robot_spheres, n_world_spheres, n_world_capsules,
+        n_world_boxes, n_world_halfspaces, n_self_pairs,
+        static_cast<int>(enable_collision),
         pos_weight,
         ori_weight,
         lambda_init,
         eps_pos,
         noise_std,
         static_cast<int>(n_brownian_steps),
-        static_cast<int>(fk_check_freq));
+        static_cast<int>(fk_check_freq),
+        collision_weight, collision_margin);
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -864,6 +1024,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // target_quat
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_mins  (n_problems, 3)
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // box_maxs  (n_problems, 3)
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // robot_spheres_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // robot_sphere_joint_idx
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_spheres
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_capsules
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_boxes
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask
@@ -878,6 +1046,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int64_t>("n_brownian_steps")
         .Attr<int64_t>("fk_check_freq")
         .Attr<int64_t>("threads_per_block")
+        .Attr<int64_t>("enable_collision")
+        .Attr<float>("collision_weight")
+        .Attr<float>("collision_margin")
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out_cfg
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out_err
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out_ee_points
