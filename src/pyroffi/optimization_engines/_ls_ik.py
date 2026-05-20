@@ -166,6 +166,14 @@ def _prepare_ls_collision_buffers_uncached(
     if len(rs_list) == 0:
         return empty_rs, empty_idx, empty_ws, empty_wc, empty_wb, empty_wh, empty_pair, empty_pair, False
 
+    # Guard against CUDA kernel stack-buffer overflow: MAX_ROBOT_SPHERES = 256.
+    _MAX_ROBOT_SPHERES = 256
+    assert len(rs_list) <= _MAX_ROBOT_SPHERES, (
+        f"Robot has {len(rs_list)} collision spheres but the CUDA kernel only supports "
+        f"up to {_MAX_ROBOT_SPHERES} (MAX_ROBOT_SPHERES). Increase MAX_ROBOT_SPHERES in "
+        f"_ik_cuda_helpers.cuh and recompile, or reduce the number of spheres in the URDF."
+    )
+
     # Expand active_idx (link-level pairs) into flat (sphere_a, sphere_b)
     # pairs. The kernel sums (d - margin)^2 over each pair, so duplicating per
     # sphere within a link pair is a stronger barrier than the JAX min-distance

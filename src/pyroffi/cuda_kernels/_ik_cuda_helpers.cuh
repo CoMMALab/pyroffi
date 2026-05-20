@@ -36,7 +36,7 @@
 #endif
 
 #ifndef MAX_ROBOT_SPHERES
-#define MAX_ROBOT_SPHERES 64
+#define MAX_ROBOT_SPHERES 256
 #endif
 
 #ifndef MAX_PARTICLES
