@@ -36,6 +36,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
+from ._implicit_diff import differentiable_ik_solution
 from ..collision._cuda_collision import _extract_world_arrays
 
 
@@ -442,6 +443,13 @@ def ls_ik_solve(
     Returns:
         Best joint configuration found, shape ``(n_actuated_joints,)``.
     """
+    # The implicit-diff wrapper on the returned solution supplies the gradient
+    # w.r.t. the targets; detach the solver's own view of them so the iterative
+    # optimisation is not differentiated (keep ``target_poses_grad`` for the
+    # wrapper).  See optimization_engines/_implicit_diff.py.
+    target_poses_grad = target_poses
+    target_poses = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses)
+
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
     upper  = robot.joints.upper_limits
@@ -515,7 +523,9 @@ def ls_ik_solve(
 
     errors   = jax.vmap(weighted_err)(all_cfgs)   # (num_seeds,)
     best_idx = jnp.argmin(errors)
-    return all_cfgs[best_idx]
+    return differentiable_ik_solution(
+        all_cfgs[best_idx], robot, target_link_indices, target_poses_grad
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +759,11 @@ def ls_ik_solve_cuda(
     if isinstance(target_poses, jaxlie.SE3):
         target_poses = (target_poses,)
     target_poses_t = tuple(target_poses)
+    # The solver (CUDA FFI + post-refinement) consumes ``target_poses_t``; detach
+    # it so autodiff does not try to differentiate the opaque FFI.  The gradient
+    # w.r.t. the targets is supplied by ``differentiable_ik_solution`` on the
+    # returned solution, using the un-detached ``target_poses`` below.
+    target_poses_t = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses_t)
 
     n_act  = robot.joints.num_actuated_joints
 
@@ -852,7 +867,9 @@ def ls_ik_solve_cuda(
             constraint_weights=post_constraint_weights,
         )
 
-    return winner
+    return differentiable_ik_solution(
+        winner, robot, target_link_indices, target_poses
+    )
 
 
 # ---------------------------------------------------------------------------

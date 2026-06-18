@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax_dataclasses as jdc
 import jaxlie
@@ -89,20 +91,7 @@ class Robot:
         assert cfg.shape == (*batch_axes, self.joints.num_actuated_joints)
 
         if use_cuda:
-            from .cuda_kernels._fk_cuda import fk_cuda
-            Ts_world_joint = fk_cuda(
-                cfg=cfg,
-                twists=self.joints.twists,
-                parent_tf=self.joints.parent_transforms,
-                parent_idx=self.joints.parent_indices,
-                act_idx=self.joints.actuated_indices,
-                mimic_mul=self.joints.mimic_multiplier,
-                mimic_off=self.joints.mimic_offset,
-                mimic_act_idx=self.joints.mimic_act_indices,
-                topo_inv=self.joints._topo_sort_inv,
-                fk_level_starts=self.joints.fk_level_starts,
-                fk_level_joints=self.joints.fk_level_joints,
-            )
+            Ts_world_joint = _fk_cuda_differentiable(cfg, self, unroll_fk)
         else:
             Ts_world_joint = self._forward_kinematics_joints(cfg, unroll_fk)
 
@@ -261,3 +250,53 @@ class Robot:
         )  # This is the link poses indexed by parent *joint* index.
 
         return Ts_world_link_joint_indexed
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(2,))
+def _fk_cuda_differentiable(
+    cfg: Float[Array, "*batch actuated_count"],
+    robot: Robot,
+    unroll_fk: bool,
+) -> Float[Array, "*batch joint_count 7"]:
+    """Differentiable wrapper around the CUDA FK kernel.
+
+    The FFI call is opaque to autodiff, so this ``custom_jvp`` provides:
+      * primal  → the fast CUDA kernel (used on undifferentiated forward calls),
+      * jvp rule → the differentiable pure-JAX FK ``_forward_kinematics_joints``,
+                   which computes the identical ``(*batch, n_joints, 7)`` value.
+
+    ``robot`` is an explicit (rather than closed-over) argument so the rule has
+    no closed-over tracers and JAX can transpose it for reverse mode.  The FFI is
+    confined to the primal function, so it is never invoked on a tangent-carrying
+    input.  Both ``jax.jvp`` and ``jax.grad`` work; differentiated calls evaluate
+    the JAX FK (the FFI itself is not differentiable).
+    """
+    from .cuda_kernels._fk_cuda import fk_cuda
+
+    return fk_cuda(
+        cfg=cfg,
+        twists=robot.joints.twists,
+        parent_tf=robot.joints.parent_transforms,
+        parent_idx=robot.joints.parent_indices,
+        act_idx=robot.joints.actuated_indices,
+        mimic_mul=robot.joints.mimic_multiplier,
+        mimic_off=robot.joints.mimic_offset,
+        mimic_act_idx=robot.joints.mimic_act_indices,
+        topo_inv=robot.joints._topo_sort_inv,
+        fk_level_starts=robot.joints.fk_level_starts,
+        fk_level_joints=robot.joints.fk_level_joints,
+    )
+
+
+@_fk_cuda_differentiable.defjvp
+def _fk_cuda_differentiable_jvp(unroll_fk, primals, tangents):
+    cfg, robot = primals
+    dcfg, drobot = tangents
+    primal_out, tangent_out = jax.jvp(
+        lambda c, r: r._forward_kinematics_joints(c, unroll_fk),
+        (cfg, robot),
+        (dcfg, drobot),
+    )
+    # Match the CUDA primal's dtype (float32; the JAX reference may run in x64).
+    f32 = jnp.float32
+    return primal_out.astype(f32), tangent_out.astype(f32)

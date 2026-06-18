@@ -81,6 +81,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _ik_residual
+from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _ls_ik_single
 
 
@@ -335,6 +336,11 @@ def make_learned_ik_solve(
             latent_scale: Scale applied to latent samples before inverse flow
                           (paper default 0.25; lower → more accurate, less diverse).
         """
+        # Detach the solver's view of the targets; the implicit-diff wrapper on
+        # the returned solution supplies the gradient w.r.t. them.
+        target_poses_grad = target_poses
+        target_poses = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses)
+
         lower = robot.joints.lower_limits
         upper = robot.joints.upper_limits
         mid   = (lower + upper) * 0.5
@@ -388,7 +394,9 @@ def make_learned_ik_solve(
 
         errors   = jax.vmap(weighted_err)(all_cfgs)
         best_idx = jnp.argmin(errors)
-        return all_cfgs[best_idx]
+        return differentiable_ik_solution(
+            all_cfgs[best_idx], robot, target_link_indices, target_poses_grad
+        )
 
     return learned_ik_solve
 

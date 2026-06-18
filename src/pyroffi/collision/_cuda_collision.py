@@ -680,9 +680,41 @@ class CUDARobotCollisionChecker:
         """
         self._ensure_world_cache(world_geom)
         self._ensure_jit(robot)
-        return self._jit_world(
-            jnp.asarray(cfg), self._ws, self._wc, self._wb, self._wh
-        )
+        cfg = jnp.asarray(cfg)
+
+        # The two-phase coarse checker uses lax.cond on a coarse pass and is
+        # non-differentiable by design (see make_cuda_checker docstring).
+        if self._coarse_inner is not None:
+            return self._jit_world(cfg, self._ws, self._wc, self._wb, self._wh)
+
+        # The FFI kernel is opaque to autodiff.  Expose a custom_jvp whose
+        # primal is the CUDA distance matrix and whose tangent comes from the
+        # differentiable pure-JAX inner model, which computes the same
+        # (*batch, N, M) signed-distance quantity.  custom_jvp covers both
+        # forward (jax.jvp) and reverse (jax.grad, via transposition) modes.
+        @jax.custom_jvp
+        def _world_dist(c: Array) -> Array:
+            return self._jit_world(c, self._ws, self._wc, self._wb, self._wh)
+
+        @_world_dist.defjvp
+        def _world_dist_jvp(primals, tangents):
+            (c,) = primals
+            (dc,) = tangents
+            # The jvp rule is pure JAX (no FFI): the differentiable inner model
+            # provides both the primal value and its tangent, so JAX can
+            # transpose for reverse mode.  The CUDA kernel is used only on
+            # undifferentiated forward calls (the custom_jvp primal function).
+            primal_out, tangent_out = jax.jvp(
+                lambda q: self._inner.compute_world_collision_distance(
+                    robot, q, world_geom
+                ),
+                (c,),
+                (dc,),
+            )
+            f32 = jnp.float32
+            return primal_out.astype(f32), tangent_out.astype(f32)
+
+        return _world_dist(cfg)
 
     def compute_self_collision_distance(
         self,
@@ -698,7 +730,31 @@ class CUDARobotCollisionChecker:
             Positive = separated, negative = penetration.
         """
         self._ensure_jit(robot)
-        return self._jit_self(jnp.asarray(cfg))
+        cfg = jnp.asarray(cfg)
+
+        # Two-phase coarse checker is non-differentiable by design.
+        if self._coarse_inner is not None:
+            return self._jit_self(cfg)
+
+        # primal = CUDA kernel; tangent = differentiable pure-JAX inner model.
+        @jax.custom_jvp
+        def _self_dist(c: Array) -> Array:
+            return self._jit_self(c)
+
+        @_self_dist.defjvp
+        def _self_dist_jvp(primals, tangents):
+            (c,) = primals
+            (dc,) = tangents
+            # Pure-JAX jvp rule (see _world_dist_jvp) so reverse mode transposes.
+            primal_out, tangent_out = jax.jvp(
+                lambda q: self._inner.compute_self_collision_distance(robot, q),
+                (c,),
+                (dc,),
+            )
+            f32 = jnp.float32
+            return primal_out.astype(f32), tangent_out.astype(f32)
+
+        return _self_dist(cfg)
 
 
 # ---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
+from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _prepare_ls_collision_buffers
 
 # Consecutive non-improving LM steps before a random kick is applied.
@@ -497,6 +498,13 @@ def hjcd_solve(
     Returns:
         Best joint configuration found, shape ``(n_actuated_joints,)``.
     """
+    # The implicit-diff wrapper on the returned solution supplies the gradient
+    # w.r.t. the targets; detach the solver's own view of them so the iterative
+    # optimisation is not differentiated (keep ``target_poses_grad`` for the
+    # wrapper).  See optimization_engines/_implicit_diff.py.
+    target_poses_grad = target_poses
+    target_poses = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses)
+
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
     upper  = robot.joints.upper_limits
@@ -627,7 +635,9 @@ def hjcd_solve(
     refine_errors = jax.vmap(winner_err)(refine_cfgs)
 
     best_idx = jnp.argmin(refine_errors)
-    return refine_cfgs[best_idx]
+    return differentiable_ik_solution(
+        refine_cfgs[best_idx], robot, target_link_indices, target_poses_grad
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +943,11 @@ def hjcd_solve_cuda(
     if isinstance(target_poses, jaxlie.SE3):
         target_poses = (target_poses,)
     target_poses_t = tuple(target_poses)
+    # The solver (CUDA FFI + post-refinement) consumes ``target_poses_t``; detach
+    # it so autodiff does not try to differentiate the opaque FFI.  The gradient
+    # w.r.t. the targets is supplied by ``differentiable_ik_solution`` on the
+    # returned solution, using the un-detached ``target_poses`` below.
+    target_poses_t = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses_t)
 
     n_act  = robot.joints.num_actuated_joints
 
@@ -1041,7 +1056,9 @@ def hjcd_solve_cuda(
             constraint_weights=post_constraint_weights,
         )
 
-    return winner
+    return differentiable_ik_solution(
+        winner, robot, target_link_indices, target_poses
+    )
 
 
 # ---------------------------------------------------------------------------
