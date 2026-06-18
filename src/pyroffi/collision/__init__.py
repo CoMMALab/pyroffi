@@ -14,5 +14,10 @@ from ._neural_collision import NeuralRobotCollision as NeuralRobotCollision
 from ._neural_collision import (
     NeuralRobotCollisionSpherized as NeuralRobotCollisionSpherized,
 )
+from ._cuda_collision import (
+    CUDADifferentiableSDFCollisionChecker as CUDADifferentiableSDFCollisionChecker,
+)
 from ._cuda_collision import CUDARobotCollisionChecker as CUDARobotCollisionChecker
+from ._cuda_collision import CUDABinaryCollisionChecker as CUDABinaryCollisionChecker
 from ._cuda_collision import make_cuda_checker as make_cuda_checker
+from ._cuda_collision import make_cuda_binary_checker as make_cuda_binary_checker

@@ -53,6 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 bash "${SCRIPT_DIR}/build_fk_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_collision_cuda.sh" "${BUILD_ARGS[@]}"
+bash "${SCRIPT_DIR}/build_collision_binary_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_hjcd_ik_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_ls_ik_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_brownian_motion_ik_cuda.sh" "${BUILD_ARGS[@]}"

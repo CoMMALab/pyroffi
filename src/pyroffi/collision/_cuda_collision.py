@@ -55,6 +55,10 @@ from ..cuda_kernels._collision_cuda_ffi import (
     collision_self_sphere,
     collision_self_capsule,
 )
+from ..cuda_kernels._collision_binary_cuda_ffi import (
+    _load_and_register as _load_and_register_binary,
+    collision_binary,
+)
 
 if TYPE_CHECKING:
     from pyroffi._robot import Robot
@@ -172,7 +176,7 @@ def _extract_world_arrays(
 # Main class
 # ---------------------------------------------------------------------------
 
-class CUDARobotCollisionChecker:
+class CUDADifferentiableSDFCollisionChecker:
     """CUDA-accelerated drop-in replacement for RobotCollision / RobotCollisionSpherized.
 
     Uses CUDA kernels via the JAX FFI interface (XLA custom calls), matching
@@ -764,8 +768,8 @@ class CUDARobotCollisionChecker:
 def make_cuda_checker(
     inner: Union[RobotCollision, RobotCollisionSpherized],
     coarse_inner: Optional[Union[RobotCollision, RobotCollisionSpherized]] = None,
-) -> CUDARobotCollisionChecker:
-    """Wrap a JAX collision model in the CUDA/JAX-FFI backend.
+) -> CUDADifferentiableSDFCollisionChecker:
+    """Wrap a JAX collision model in the differentiable CUDA/JAX-FFI SDF backend.
 
     Args:
         inner: Fine-resolution collision model (capsule or spherized).
@@ -775,6 +779,272 @@ def make_cuda_checker(
             all-positive (+1) distance matrix is returned.  This breaks SDF
             differentiability — do not pass this to trajopt.
 
+            NOTE: this ``lax.cond`` guard operates at the *batch* level and
+            cannot early-exit individual configurations.  For true per-config
+            early-exit binary edge validation use
+            :class:`CUDABinaryCollisionChecker` instead.
+
     Raises ``RuntimeError`` if the compiled library is not found.
     """
-    return CUDARobotCollisionChecker(inner, coarse_inner=coarse_inner)
+    return CUDADifferentiableSDFCollisionChecker(inner, coarse_inner=coarse_inner)
+
+
+# Backwards-compatible alias: the differentiable SDF checker was historically
+# named ``CUDARobotCollisionChecker``.
+CUDARobotCollisionChecker = CUDADifferentiableSDFCollisionChecker
+
+
+# ---------------------------------------------------------------------------
+# Binary collision checker (pRRTC-style fused FK + early-exit edge validation)
+# ---------------------------------------------------------------------------
+
+
+def _spherized_local_geometry(model: RobotCollisionSpherized) -> np.ndarray:
+    """Extract link-LOCAL sphere geometry from a spherized model.
+
+    Returns a float32 array ``[K, 4]`` of (x, y, z, r) in link-local frames,
+    laid out with ``k = s * N + n`` (sphere ``s`` of link ``n``; N = num_links),
+    matching the binary kernel's expected layout.  Padding spheres keep their
+    radius < 0 sentinel so the kernel skips them.
+    """
+    # coll has batch axes (N, S): centers [N, S, 3], radii [N, S].
+    centers = np.asarray(model.coll.pose.translation(), dtype=np.float32)  # [N, S, 3]
+    radii = np.asarray(model.coll.radius, dtype=np.float32)                # [N, S]
+    N, S = radii.shape
+    local = np.concatenate([centers, radii[..., None]], axis=-1)           # [N, S, 4]
+    local = np.transpose(local, (1, 0, 2)).reshape(S * N, 4)               # [S*N, 4]
+    return np.ascontiguousarray(local, dtype=np.float32)
+
+
+class CUDABinaryCollisionChecker:
+    """Fused FK + *binary* collision checker for fast edge validation.
+
+    This is the binary counterpart to :class:`CUDADifferentiableSDFCollisionChecker`.
+    It mirrors pRRTC's SIMT collision checker (https://github.com/CoMMALab/pRRTC):
+
+      * **Fused FK** — forward kinematics is computed *inside* the collision
+        kernel (one CUDA block per configuration); no intermediate sphere-position
+        array is written to global memory.
+      * **Two-stage approx→fine** — an optional coarse sphere model (one enclosing
+        sphere per link) is checked first.  A coarse "clear" proves the fine
+        geometry is clear and skips the fine pass; where the coarse model reports
+        a possible collision, only the flagged links are re-checked with the fine
+        geometry.
+      * **Per-config early exit** — the instant any fine sphere is in collision
+        the block stops and the configuration is reported invalid.
+
+    Returns a boolean per configuration: ``True`` == collision-free (valid),
+    ``False`` == in collision (world OR self).  This is NOT differentiable — it is
+    intended for sampling-based planning / edge validation, not trajectory
+    optimisation.  Use the SDF checker for anything that needs gradients.
+
+    Only sphere-based models (:class:`RobotCollisionSpherized`) are supported, as
+    in pRRTC.
+
+    Soundness requirement: the coarse model must geometrically *enclose* the fine
+    model (each coarse sphere covers the fine spheres of its link).  Otherwise the
+    coarse guard can produce false negatives (missed collisions).  The
+    ``panda_spherized_coarse.urdf`` style of one-enclosing-sphere-per-link models
+    satisfy this.
+
+    Usage::
+
+        fine   = RobotCollisionSpherized.from_urdf(urdf, srdf_path=srdf)
+        coarse = RobotCollisionSpherized.from_urdf(coarse_urdf, srdf_path=srdf)
+        checker = CUDABinaryCollisionChecker(fine, coarse_inner=coarse)
+        checker.set_world(world_geom)
+
+        free = checker.check_collision_free(robot, cfg, world_geom)   # bool [*batch]
+        ok   = checker.check_edges_collision_free(robot, edge_cfgs, world_geom)
+    """
+
+    def __init__(
+        self,
+        inner: RobotCollisionSpherized,
+        coarse_inner: Optional[RobotCollisionSpherized] = None,
+    ) -> None:
+        _load_and_register_binary()
+
+        if not isinstance(inner, RobotCollisionSpherized):
+            raise NotImplementedError(
+                "CUDABinaryCollisionChecker only supports sphere-based models "
+                "(RobotCollisionSpherized), matching pRRTC.  Got "
+                f"{type(inner).__name__}."
+            )
+        if coarse_inner is not None and not isinstance(
+            coarse_inner, RobotCollisionSpherized
+        ):
+            raise NotImplementedError(
+                "coarse_inner must also be a RobotCollisionSpherized; got "
+                f"{type(coarse_inner).__name__}."
+            )
+        if coarse_inner is not None and coarse_inner.num_links != inner.num_links:
+            raise ValueError(
+                "Fine and coarse models must share the same link set "
+                f"(num_links {inner.num_links} != {coarse_inner.num_links}); "
+                "the coarse guard indexes flags by link."
+            )
+
+        self._inner = inner
+        self._coarse_inner = coarse_inner
+
+        # Static link-local sphere geometry (config-independent), device-resident.
+        self._f_local = jnp.asarray(_spherized_local_geometry(inner))  # [Kf, 4]
+        if coarse_inner is not None:
+            self._c_local = jnp.asarray(_spherized_local_geometry(coarse_inner))
+            self._c_pair_i = jnp.asarray(coarse_inner.active_idx_i, dtype=jnp.int32)
+            self._c_pair_j = jnp.asarray(coarse_inner.active_idx_j, dtype=jnp.int32)
+        else:
+            # Empty coarse geometry → kernel runs the fine pass directly.
+            self._c_local = jnp.zeros((0, 4), dtype=jnp.float32)
+            self._c_pair_i = jnp.zeros((0,), dtype=jnp.int32)
+            self._c_pair_j = jnp.zeros((0,), dtype=jnp.int32)
+
+        self._f_pair_i = jnp.asarray(inner.active_idx_i, dtype=jnp.int32)
+        self._f_pair_j = jnp.asarray(inner.active_idx_j, dtype=jnp.int32)
+
+        # World geometry cache (mirrors the SDF checker).
+        self._ws = None
+        self._wc = None
+        self._wb = None
+        self._wh = None
+        self._cached_world_id = None
+
+        # JIT cache keyed on robot identity.
+        self._cached_robot_id = None
+        self._jit_binary = None
+
+        logger.info(
+            f"CUDABinaryCollisionChecker wrapping {type(inner).__name__} with "
+            f"{inner.num_links} links"
+            + (
+                f", coarse model {type(coarse_inner).__name__} "
+                f"with {coarse_inner.num_links} links."
+                if coarse_inner is not None
+                else " (no coarse guard — fine pass runs directly)."
+            )
+        )
+
+    # ── Metadata forwarding ────────────────────────────────────────────────
+
+    @property
+    def num_links(self) -> int:
+        return self._inner.num_links
+
+    @property
+    def link_names(self) -> tuple[str, ...]:
+        return self._inner.link_names
+
+    # ── World geometry caching ─────────────────────────────────────────────
+
+    def set_world(self, world_geom: CollGeom) -> None:
+        """Pre-upload world geometry to the device (call once, before the loop)."""
+        ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
+        self._ws = jnp.array(ws_np)
+        self._wc = jnp.array(wc_np)
+        self._wb = jnp.array(wb_np)
+        self._wh = jnp.array(wh_np)
+        self._cached_world_id = id(world_geom)
+
+    def _ensure_world_cache(self, world_geom: CollGeom) -> None:
+        if id(world_geom) != self._cached_world_id:
+            self.set_world(world_geom)
+
+    # ── JIT cache ──────────────────────────────────────────────────────────
+
+    def _ensure_jit(self, robot: "Robot") -> None:
+        if id(robot) == self._cached_robot_id:
+            return
+        _robot = robot
+
+        def _impl(cfg_flat, ws, wc, wb, wh):
+            j = _robot.joints
+            return collision_binary(
+                cfg_flat,
+                twists=j.twists,
+                parent_tf=j.parent_transforms,
+                parent_idx=j.parent_indices,
+                act_idx=j.actuated_indices,
+                mimic_mul=j.mimic_multiplier,
+                mimic_off=j.mimic_offset,
+                mimic_act_idx=j.mimic_act_indices,
+                topo_inv=j._topo_sort_inv,
+                link_parent_joint=_robot.links.parent_joint_indices,
+                f_local=self._f_local,
+                c_local=self._c_local,
+                world_spheres=ws,
+                world_capsules=wc,
+                world_boxes=wb,
+                world_halfspaces=wh,
+                f_pair_i=self._f_pair_i,
+                f_pair_j=self._f_pair_j,
+                c_pair_i=self._c_pair_i,
+                c_pair_j=self._c_pair_j,
+            )
+
+        self._jit_binary = jax.jit(_impl)
+        self._cached_robot_id = id(robot)
+
+    # ── Public API ─────────────────────────────────────────────────────────
+
+    def check_collision_free(
+        self,
+        robot: "Robot",
+        cfg: Float[Array, "*batch actuated_count"],
+        world_geom: CollGeom,
+    ) -> Array:
+        """Return a boolean per configuration: ``True`` if collision-free.
+
+        Checks both world and self collision in a single fused kernel with
+        per-config early exit.  Output shape is ``cfg.shape[:-1]`` (the batch
+        axes); a single un-batched config returns a scalar boolean array.
+        """
+        self._ensure_world_cache(world_geom)
+        self._ensure_jit(robot)
+
+        cfg = jnp.asarray(cfg)
+        batch_axes = cfg.shape[:-1]
+        n_act = cfg.shape[-1]
+        B = int(np.prod(batch_axes)) if batch_axes else 1
+        cfg_flat = cfg.reshape(B, n_act)
+
+        free = self._jit_binary(cfg_flat, self._ws, self._wc, self._wb, self._wh)
+        free = free.reshape(batch_axes) if batch_axes else free.reshape(())
+        return free != 0
+
+    def check_edges_collision_free(
+        self,
+        robot: "Robot",
+        edge_cfgs: Float[Array, "*batch granularity actuated_count"],
+        world_geom: CollGeom,
+    ) -> Array:
+        """Validate edges: ``True`` if *every* discretised point is collision-free.
+
+        ``edge_cfgs`` holds the already-discretised configurations along each
+        edge in its second-to-last axis (granularity G).  Returns a boolean of
+        shape ``edge_cfgs.shape[:-2]`` — one verdict per edge (logical AND over
+        the G points).
+        """
+        edge_cfgs = jnp.asarray(edge_cfgs)
+        *edge_axes, G, n_act = edge_cfgs.shape
+        flat = edge_cfgs.reshape(-1, n_act)
+        free = self.check_collision_free(robot, flat, world_geom)
+        free = free.reshape(*edge_axes, G)
+        return jnp.all(free, axis=-1)
+
+
+def make_cuda_binary_checker(
+    inner: RobotCollisionSpherized,
+    coarse_inner: Optional[RobotCollisionSpherized] = None,
+) -> CUDABinaryCollisionChecker:
+    """Build a pRRTC-style fused FK + binary collision checker.
+
+    Args:
+        inner: Fine-resolution spherized collision model.
+        coarse_inner: Optional coarse (one-enclosing-sphere-per-link) spherized
+            model used as the early-exit guard.  Must enclose ``inner`` and share
+            its link set.  When omitted, the fine pass runs directly.
+
+    Raises ``RuntimeError`` if the compiled library is not found.
+    """
+    return CUDABinaryCollisionChecker(inner, coarse_inner=coarse_inner)
