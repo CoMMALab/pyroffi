@@ -3,7 +3,7 @@
 The companion shared library ``_hjcd_ik_cuda_lib.so`` must be compiled from
 ``_hjcd_ik_cuda_kernel.cu`` before this module can be imported:
 
-    bash src/pyroffi/cuda_kernels/build_hjcd_ik_cuda.sh
+    bash build_kernels/build_hjcd_ik_cuda.sh
 
 Provides two primitives called by the CUDA path in ``_hjcd_ik.py``:
 
@@ -40,7 +40,7 @@ def _load_and_register() -> None:
     if not lib_path.exists():
         raise RuntimeError(
             f"CUDA IK library not found at {lib_path}.\n"
-            "Compile it first with:  bash src/pyroffi/cuda_kernels/build_hjcd_ik_cuda.sh\n"
+            "Compile it first with:  bash build_kernels/build_hjcd_ik_cuda.sh\n"
         )
     lib = ctypes.CDLL(str(lib_path))
 

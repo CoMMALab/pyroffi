@@ -28,7 +28,7 @@
  *   - Inner projected gradient loop in float32.
  *
  * Build with:
- *   bash src/pyroffi/cuda_kernels/build_sqp_ik_cuda.sh
+ *   bash build_kernels/build_sqp_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

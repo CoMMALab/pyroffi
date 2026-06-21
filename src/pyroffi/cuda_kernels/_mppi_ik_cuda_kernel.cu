@@ -25,7 +25,7 @@
  *   6. Removed cudaStreamSynchronize (XLA owns stream scheduling).
  *
  * Build with:
- *   bash src/pyroffi/cuda_kernels/build_mppi_ik_cuda.sh
+ *   bash build_kernels/build_mppi_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

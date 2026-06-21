@@ -21,7 +21,7 @@
  *   - Replaces serial thread-0 softmax with parallel reduction
  *
  * Build with:
- *   bash src/pyroffi/cuda_kernels/build_stomp_trajopt_cuda.sh
+ *   bash build_kernels/build_stomp_trajopt_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

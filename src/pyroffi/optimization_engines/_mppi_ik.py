@@ -770,7 +770,7 @@ def mppi_ik_solve_cuda(
     """CUDA MPPI+L-BFGS IK: coarse particle search then gradient refinement.
 
     Requires ``_mppi_ik_cuda_lib.so`` compiled from ``_mppi_ik_cuda_kernel.cu``:
-        bash src/pyroffi/cuda_kernels/build_mppi_ik_cuda.sh
+        bash build_kernels/build_mppi_ik_cuda.sh
 
     Stage 1 (MPPI)
         At each of ``n_mppi_iters`` iterations, ``n_particles`` Gaussian

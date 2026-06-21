@@ -12,7 +12,7 @@
  * SE(3) math and the single-thread FK device function live in
  * _fk_cuda_helpers.cuh so that _ik_cuda_kernel.cu can reuse them.
  *
- * Build with:  bash src/pyroffi/cuda_kernels/build_fk_cuda.sh
+ * Build with:  bash build_kernels/build_fk_cuda.sh
  */
 
 #include "_fk_cuda_helpers.cuh"

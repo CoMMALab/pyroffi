@@ -2,13 +2,14 @@
 # Build _svgd_region_ik_cuda_lib.so from _svgd_region_ik_cuda_kernel.cu.
 #
 # Usage (from repo root):
-#   bash src/pyroffi/cuda_kernels/build_svgd_region_ik_cuda.sh
+#   bash build_kernels/build_svgd_region_ik_cuda.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/_svgd_region_ik_cuda_kernel.cu"
-OUT="${SCRIPT_DIR}/_svgd_region_ik_cuda_lib.so"
+KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
+SRC="${KERNELS_DIR}/_svgd_region_ik_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/_svgd_region_ik_cuda_lib.so"
 
 JAXLIB_INC="$(python -c "
 import os, jaxlib
@@ -29,7 +30,7 @@ nvcc \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \
-  -I"${SCRIPT_DIR}" \
+  -I"${KERNELS_DIR}" \
   -I"${JAXLIB_INC}" \
   -o "${OUT}" \
   "${SRC}"

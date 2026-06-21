@@ -3,7 +3,7 @@
 The companion shared library ``_collision_binary_cuda_lib.so`` must be compiled
 from ``_collision_binary_cuda_kernel.cu`` first:
 
-    bash src/pyroffi/cuda_kernels/build_collision_binary_cuda.sh
+    bash build_kernels/build_collision_binary_cuda.sh
 
 Requires JAX >= 0.4.14 (for jax.ffi).
 
@@ -35,7 +35,7 @@ def _load_and_register() -> None:
         raise RuntimeError(
             f"CUDA binary-collision library not found at {lib_path}.\n"
             "Compile it first with:\n"
-            "  bash src/pyroffi/cuda_kernels/build_collision_binary_cuda.sh\n"
+            "  bash build_kernels/build_collision_binary_cuda.sh\n"
             "(This produces _collision_binary_cuda_lib.so alongside the kernel source.)"
         )
     lib = ctypes.CDLL(str(lib_path))

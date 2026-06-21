@@ -20,7 +20,7 @@
  *   - All kernel launches are associated with the caller's CUDA stream so
  *     there are no implicit device synchronisations.
  *
- * Build with:  bash src/pyroffi/cuda_kernels/build_hjcd_ik_cuda.sh
+ * Build with:  bash build_kernels/build_hjcd_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

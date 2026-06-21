@@ -2,7 +2,7 @@
 
 Compile the companion shared library first:
 
-    bash src/pyroffi/cuda_kernels/build_brownian_motion_ik_cuda.sh
+    bash build_kernels/build_brownian_motion_ik_cuda.sh
 
 The kernel accepts per-problem box bounds (box_mins / box_maxs with shape
 (n_problems, 3)), enabling multiple distinct regions to be solved in a
@@ -30,7 +30,7 @@ def _load_and_register() -> None:
     if not lib_path.exists():
         raise RuntimeError(
             f"Brownian-motion IK CUDA library not found at {lib_path}.\n"
-            "Compile it first with: bash src/pyroffi/cuda_kernels/build_brownian_motion_ik_cuda.sh\n"
+            "Compile it first with: bash build_kernels/build_brownian_motion_ik_cuda.sh\n"
         )
 
     lib = ctypes.CDLL(str(lib_path))

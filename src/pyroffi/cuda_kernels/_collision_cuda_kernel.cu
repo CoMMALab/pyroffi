@@ -35,7 +35,7 @@
  *   positive → separated
  *   negative → penetration
  *
- * Build: bash src/pyroffi/cuda_kernels/build_collision_cuda.sh
+ * Build: bash build_kernels/build_collision_cuda.sh
  */
 
 #include "xla/ffi/api/ffi.h"

@@ -895,7 +895,7 @@ def hjcd_solve_cuda(
         implicit device synchronisations.
 
     Requires ``_hjcd_ik_cuda_lib.so`` to be compiled first:
-        bash src/pyroffi/cuda_kernels/build_hjcd_ik_cuda.sh
+        bash build_kernels/build_hjcd_ik_cuda.sh
 
     Kinematic constraints
         Because the CUDA kernel cannot call arbitrary Python/JAX functions,

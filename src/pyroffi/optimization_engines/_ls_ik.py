@@ -707,7 +707,7 @@ def ls_ik_solve_cuda(
     the JAX solver but with no Python overhead per step.
 
     Requires ``_ls_ik_cuda_lib.so`` compiled from ``_ls_ik_cuda_kernel.cu``:
-        bash src/pyroffi/cuda_kernels/build_ls_ik_cuda.sh
+        bash build_kernels/build_ls_ik_cuda.sh
 
     Multi-EE support
         Pass multiple end-effectors via ``target_link_indices`` (tuple) and

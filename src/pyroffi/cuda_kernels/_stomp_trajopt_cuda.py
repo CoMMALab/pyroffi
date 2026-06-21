@@ -3,7 +3,7 @@
 The companion shared library ``_stomp_trajopt_cuda_lib.so`` must be compiled
 from ``_stomp_trajopt_cuda_kernel.cu`` before this module can be imported:
 
-    bash src/pyroffi/cuda_kernels/build_stomp_trajopt_cuda.sh
+    bash build_kernels/build_stomp_trajopt_cuda.sh
 
 Provides:
 
@@ -45,7 +45,7 @@ def _load_and_register() -> None:
         raise RuntimeError(
             f"STOMP TrajOpt CUDA library not found at {lib_path}.\n"
             "Compile it first with:\n"
-            "  bash src/pyroffi/cuda_kernels/build_stomp_trajopt_cuda.sh\n"
+            "  bash build_kernels/build_stomp_trajopt_cuda.sh\n"
         )
     lib = ctypes.CDLL(str(lib_path))
 

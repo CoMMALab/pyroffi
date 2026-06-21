@@ -3,7 +3,7 @@
 The companion shared library ``_svgd_region_ik_cuda_lib.so`` must be compiled from
 ``_svgd_region_ik_cuda_kernel.cu`` before this module can be imported:
 
-    bash src/pyroffi/cuda_kernels/build_svgd_region_ik_cuda.sh
+    bash build_kernels/build_svgd_region_ik_cuda.sh
 
 Provides one primitive:
 
@@ -56,7 +56,7 @@ def _load_and_register() -> None:
     if not lib_path.exists():
         raise RuntimeError(
             f"SVGD region-IK CUDA library not found at {lib_path}.\n"
-            "Compile it first with:  bash src/pyroffi/cuda_kernels/build_svgd_region_ik_cuda.sh\n"
+            "Compile it first with:  bash build_kernels/build_svgd_region_ik_cuda.sh\n"
         )
     lib = ctypes.CDLL(str(lib_path))
 

@@ -2,7 +2,7 @@
  * Hit-and-run NLP sampling CUDA kernel.
  *
  * Build with:
- *   bash src/pyroffi/cuda_kernels/build_hit_and_run_ik_cuda.sh
+ *   bash build_kernels/build_hit_and_run_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

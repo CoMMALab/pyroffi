@@ -19,7 +19,7 @@
  *   - Normal-equation matrix and Cholesky solve in float64.
  *
  * Build with:
- *   bash src/pyroffi/cuda_kernels/build_ls_ik_cuda.sh
+ *   bash build_kernels/build_ls_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

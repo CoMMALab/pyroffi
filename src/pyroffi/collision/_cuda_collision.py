@@ -30,7 +30,7 @@ Robot geometry passed into CUDA (SoA layout for coalesced loads):
   sphere-robot radii   [B, K]
 
 Requires the compiled shared library _collision_cuda_lib.so:
-  bash src/pyroffi/cuda_kernels/build_collision_cuda.sh
+  bash build_kernels/build_collision_cuda.sh
 """
 
 from __future__ import annotations
@@ -217,7 +217,7 @@ class CUDADifferentiableSDFCollisionChecker:
 
     Notes:
         - Requires the compiled _collision_cuda_lib.so.
-          Build with: bash src/pyroffi/cuda_kernels/build_collision_cuda.sh
+          Build with: bash build_kernels/build_collision_cuda.sh
         - World geometry must be a flat collection (no leading batch dims).
         - FK is performed by the CUDA FK kernel (via ``robot.forward_kinematics(use_cuda=True)``);
           geometry transforms and distance computation both run on CUDA/device.

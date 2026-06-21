@@ -5,7 +5,7 @@
  * runs a diagonal-Gauss-Newton / LM update inside the kernel.
  *
  * Build with:
- *   bash src/pyroffi/cuda_kernels/build_ls_trajopt_cuda.sh
+ *   bash build_kernels/build_ls_trajopt_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Build _stomp_trajopt_cuda_lib.so from _stomp_trajopt_cuda_kernel.cu.
+# Build _collision_cuda_lib.so from _collision_cuda_kernel.cu.
 #
 # Usage (from repo root):
-#   bash src/pyroffi/cuda_kernels/build_stomp_trajopt_cuda.sh
-#   bash src/pyroffi/cuda_kernels/build_stomp_trajopt_cuda.sh --debug
+#   bash build_kernels/build_collision_cuda.sh
+#   bash build_kernels/build_collision_cuda.sh --debug
 #
 # Requirements:
 #   - nvcc (CUDA toolkit)
 #   - jaxlib >= 0.4.14 installed in the active Python environment
 #     (provides the xla/ffi/api/ffi.h headers)
+#
+# Optional env vars:
+#   GPU_ARCH   override the target architecture, e.g. GPU_ARCH=-arch=sm_80
 
 set -euo pipefail
 
@@ -39,19 +42,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-MAX_JOINTS_FLAG=""
 if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
   if ! [[ "${MAX_JOINTS_OVERRIDE}" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: --max-joints must be a positive integer, got '${MAX_JOINTS_OVERRIDE}'"
     exit 1
   fi
-  MAX_JOINTS_FLAG="-DMAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
-  echo "Overriding MAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
+  echo "Note: --max-joints=${MAX_JOINTS_OVERRIDE} ignored for collision kernel build"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/_stomp_trajopt_cuda_kernel.cu"
-OUT="${SCRIPT_DIR}/_stomp_trajopt_cuda_lib.so"
+KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
+SRC="${KERNELS_DIR}/_collision_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/_collision_cuda_lib.so"
 
 # Locate the jaxlib include directory that ships xla/ffi/api/ffi.h.
 JAXLIB_INC="$(python -c \
@@ -65,7 +67,6 @@ fi
 
 # GPU architecture flag.
 # -arch=native (CUDA 11.6+) targets the installed GPU automatically.
-# Override for a specific arch: GPU_ARCH=-arch=sm_80 bash build_stomp_trajopt_cuda.sh
 GPU_ARCH="${GPU_ARCH:--arch=native}"
 
 NVCC_OPT="-O3"
@@ -77,7 +78,6 @@ fi
 nvcc \
   ${NVCC_OPT} \
   -std=c++17 \
-  ${MAX_JOINTS_FLAG} \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \

@@ -14,9 +14,16 @@ Compares four backends across two operations and several batch sizes:
                          skipped and all-+1 distances are returned.
                          NOT differentiable — do not use in trajopt.
 
+    Binary checkers (bool per config — for sampling-based planning / edges):
+    CUDA-Binary        — CUDABinaryCollisionChecker (fused FK, GPU)
+    CUDA-Binary-Coarse — CUDABinaryCollisionChecker with coarse-first guard
+    VAMP-CPU           — VAMPCPUCollisionChecker (JIT-compiled VAMP fkcc, CPU)
+
   Operations:
     compute_world_collision_distance(robot, cfg, world_geom)
     compute_self_collision_distance(robot, cfg)
+    check_collision_free(robot, cfg, world_geom)            [binary backends]
+    check_edges_collision_free(robot, edges, world_geom)    [binary backends]
 
   Metrics (per backend × batch size):
     ms/call  — wall-clock milliseconds for the full batched call
@@ -29,7 +36,7 @@ Usage:
 
 Prerequisites:
     pip install robot_descriptions
-    bash src/pyroffi/cuda_kernels/build_collision_cuda.sh  (for CUDA backends)
+    bash build_kernels/build_collision_cuda.sh  (for CUDA backends)
     (pynvml optional, for GPU monitoring: pip install nvidia-ml-py)
 
 Neural training:
@@ -57,6 +64,7 @@ from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 from pyroffi.collision import (
     CUDARobotCollisionChecker,
+    CUDABinaryCollisionChecker,
     NeuralRobotCollision,
     RobotCollision,
     RobotCollisionSpherized,
@@ -65,6 +73,19 @@ from pyroffi.collision import (
     Capsule,
     HalfSpace,
 )
+
+try:
+    from pyroffi.collision import VAMPCPUCollisionChecker
+except Exception:  # cricket not built
+    VAMPCPUCollisionChecker = None
+
+# yourdfpy 0.0.58 is incompatible with numpy >= 2 (float() on size-1 arrays);
+# install a process-local shim so URDF loading works.  No-op when unneeded.
+try:
+    import _yourdfpy_compat
+    _yourdfpy_compat.apply()
+except Exception:
+    pass
 
 # Optional GPU monitoring
 try:
@@ -86,6 +107,7 @@ ROBOT_NAME = "panda"
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPHERIZED_URDF       = _REPO_ROOT / "resources" / "panda" / "panda_spherized.urdf"
 COARSE_SPHERIZED_URDF = _REPO_ROOT / "resources" / "panda" / "panda_spherized_coarse.urdf"
+PANDA_SRDF           = _REPO_ROOT / "resources" / "panda" / "panda.srdf"
 
 # Number of random configs to use as the test set
 N_WARMUP = 3          # JIT / kernel warm-up calls (results discarded)
@@ -93,6 +115,10 @@ N_TIMED  = 7          # timed repetitions; median is reported
 
 # Batch sizes to sweep
 BATCH_SIZES = [1, 64, 512, 2048]
+
+# Number of discretised points per edge for the *CUDA* binary edge check (VAMP
+# discretises internally at the robot resolution, so it only takes endpoints).
+EDGE_GRANULARITY = 16
 
 # World scene: a small set of obstacles (Sphere + Capsule + Box)
 N_WORLD_SPHERES    = 4
@@ -324,6 +350,66 @@ def _bench_backend(
 
     return results
 
+
+def _bench_binary_backend(
+    label: str,
+    checker,
+    robot,
+    world_geom,
+    cfgs_by_batch: dict[int, jnp.ndarray],
+    op_tag: str = "binary",
+) -> list[BenchResult]:
+    """Benchmark a *binary* collision checker's ``check_collision_free``.
+
+    Binary checkers (CUDA-Binary, VAMP-CPU) return one bool per configuration
+    rather than a distance matrix.  ``robot`` is passed through for API parity
+    (VAMP ignores it — FK is baked into its JIT binary)."""
+    results = []
+    for B, cfgs in cfgs_by_batch.items():
+        try:
+            fn = lambda c=cfgs: checker.check_collision_free(robot, c, world_geom)
+            logger.debug(f"    {label} {op_tag} B={B}: warming up ({N_WARMUP}×)...")
+            _warmup(fn)
+            _, t_s, pk_gpu, pk_vram = _time_fn_gpu(fn)
+            results.append(BenchResult(
+                label=label, batch_size=B, op=op_tag,
+                ms_call=t_s * 1e3, ms_cfg=t_s * 1e3 / B,
+                peak_gpu=pk_gpu, peak_vram=pk_vram,
+            ))
+        except Exception as exc:
+            logger.warning(f"  {label} {op_tag} B={B}: SKIPPED ({exc})")
+    return results
+
+
+def _bench_edges_backend(
+    label: str,
+    checker,
+    robot,
+    world_geom,
+    edges_by_batch: dict[int, jnp.ndarray],
+    op_tag: str = "edges",
+) -> list[BenchResult]:
+    """Benchmark batch edge validation (``check_edges_collision_free``).
+
+    ``edges_by_batch[B]`` is shaped for the checker's convention: ``[E, G, n]``
+    pre-discretised points for the CUDA checker, ``[E, 2, n]`` endpoints for
+    VAMP.  ``ms_cfg`` reports per-edge time."""
+    results = []
+    for E, edges in edges_by_batch.items():
+        try:
+            fn = lambda e=edges: checker.check_edges_collision_free(robot, e, world_geom)
+            logger.debug(f"    {label} {op_tag} E={E}: warming up ({N_WARMUP}×)...")
+            _warmup(fn)
+            _, t_s, pk_gpu, pk_vram = _time_fn_gpu(fn)
+            results.append(BenchResult(
+                label=label, batch_size=E, op=op_tag,
+                ms_call=t_s * 1e3, ms_cfg=t_s * 1e3 / E,
+                peak_gpu=pk_gpu, peak_vram=pk_vram,
+            ))
+        except Exception as exc:
+            logger.warning(f"  {label} {op_tag} E={E}: SKIPPED ({exc})")
+    return results
+
 # ---------------------------------------------------------------------------
 # Table formatting  (mirrors bench_ik.py style)
 # ---------------------------------------------------------------------------
@@ -428,13 +514,19 @@ def main(args) -> None:
     print("=" * 80)
 
     # ── Robot (capsule model) ──────────────────────────────────────────────
+    # The capsule model + distance backends pull in trimesh/scipy convex-hull
+    # fitting; --binary-only skips all of that and benchmarks just the binary
+    # checkers (which only need sphere primitives / the JIT'd VAMP binary).
     print("\nLoading robot ...")
-    urdf      = load_robot_description(f"{args.robot}_description")
-    robot_cap = pk.Robot.from_urdf(urdf)
-    n_act_cap = robot_cap.joints.num_actuated_joints
-    lo_cap    = np.asarray(robot_cap.joints.lower_limits)
-    hi_cap    = np.asarray(robot_cap.joints.upper_limits)
-    print(f"  {args.robot}_description : {n_act_cap} actuated DOF")
+    urdf = robot_cap = None
+    lo_cap = hi_cap = None
+    if not args.binary_only:
+        urdf      = load_robot_description(f"{args.robot}_description")
+        robot_cap = pk.Robot.from_urdf(urdf)
+        n_act_cap = robot_cap.joints.num_actuated_joints
+        lo_cap    = np.asarray(robot_cap.joints.lower_limits)
+        hi_cap    = np.asarray(robot_cap.joints.upper_limits)
+        print(f"  {args.robot}_description : {n_act_cap} actuated DOF")
 
     # ── Robot (sphere model) — separate URDF with sphere primitives ────────
     sph_urdf_path = args.spherized_urdf
@@ -462,8 +554,10 @@ def main(args) -> None:
 
     # ── Collision models ───────────────────────────────────────────────────
     print("\nBuilding collision models ...")
-    coll_cap = RobotCollision.from_urdf(urdf)
-    print(f"  RobotCollision          : {coll_cap.num_links} links")
+    coll_cap = None
+    if not args.binary_only:
+        coll_cap = RobotCollision.from_urdf(urdf)
+        print(f"  RobotCollision          : {coll_cap.num_links} links")
 
     coll_sph = RobotCollisionSpherized.from_urdf(urdf_sph)
     print(f"  RobotCollisionSpherized : {coll_sph.num_links} links")
@@ -475,19 +569,20 @@ def main(args) -> None:
 
     cuda_available = False
     cuda_cap = cuda_sph = cuda_sph_coarse = None
-    try:
-        cuda_cap = CUDARobotCollisionChecker(coll_cap)
-        cuda_sph = CUDARobotCollisionChecker(coll_sph)
-        if coll_sph_coarse is not None:
-            cuda_sph_coarse = CUDARobotCollisionChecker(coll_sph, coarse_inner=coll_sph_coarse)
-        cuda_available = True
-        print("  CUDARobotCollisionChecker: OK (JAX FFI library loaded)")
-        if cuda_sph_coarse is not None:
-            print("  CUDARobotCollisionChecker (coarse-first): OK")
-        else:
-            print("  CUDARobotCollisionChecker (coarse-first): SKIP (no coarse URDF)")
-    except RuntimeError as e:
-        print(f"  CUDARobotCollisionChecker: SKIP ({e})")
+    if not args.binary_only:
+        try:
+            cuda_cap = CUDARobotCollisionChecker(coll_cap)
+            cuda_sph = CUDARobotCollisionChecker(coll_sph)
+            if coll_sph_coarse is not None:
+                cuda_sph_coarse = CUDARobotCollisionChecker(coll_sph, coarse_inner=coll_sph_coarse)
+            cuda_available = True
+            print("  CUDARobotCollisionChecker: OK (JAX FFI library loaded)")
+            if cuda_sph_coarse is not None:
+                print("  CUDARobotCollisionChecker (coarse-first): OK")
+            else:
+                print("  CUDARobotCollisionChecker (coarse-first): SKIP (no coarse URDF)")
+        except RuntimeError as e:
+            print(f"  CUDARobotCollisionChecker: SKIP ({e})")
 
     # ── World scene ────────────────────────────────────────────────────────
     print("\nBuilding world scene ...")
@@ -509,15 +604,17 @@ def main(args) -> None:
     # ── Random configs per batch size (one set per DOF count) ─────────────
     print("\nGenerating configs ...")
     max_B = max(BATCH_SIZES)
-    cfgs_cap_np = rng.uniform(lo_cap, hi_cap, (max_B, lo_cap.shape[0])).astype(np.float32)
     cfgs_sph_np = rng.uniform(lo_sph, hi_sph, (max_B, lo_sph.shape[0])).astype(np.float32)
-
-    cfgs_cap_by_batch: dict[int, jnp.ndarray] = {B: jnp.array(cfgs_cap_np[:B]) for B in BATCH_SIZES}
     cfgs_sph_by_batch: dict[int, jnp.ndarray] = {B: jnp.array(cfgs_sph_np[:B]) for B in BATCH_SIZES}
+
+    cfgs_cap_by_batch: dict[int, jnp.ndarray] = {}
+    if not args.binary_only:
+        cfgs_cap_np = rng.uniform(lo_cap, hi_cap, (max_B, lo_cap.shape[0])).astype(np.float32)
+        cfgs_cap_by_batch = {B: jnp.array(cfgs_cap_np[:B]) for B in BATCH_SIZES}
 
     # ── Neural SDF (one model per primitive type) ───────────────────────────
     neural_models: dict[str, NeuralRobotCollision] = {}
-    if not args.skip_neural:
+    if not args.binary_only and not args.skip_neural:
         print(f"\nTraining NeuralRobotCollision per primitive type "
               f"(samples={args.neural_samples}, epochs={NEURAL_EPOCHS}) ...")
         neural_base = NeuralRobotCollision.from_existing(
@@ -546,110 +643,200 @@ def main(args) -> None:
 
     all_results: list[BenchResult] = []
 
-    # --- Self-collision benchmarks (primitive-independent) -----------------
-    print("\n  Self-collision benchmarks ...")
+    # --- Distance backends (capsule / sphere / neural; --binary-only skips) -
+    if not args.binary_only:
+        # --- Self-collision benchmarks (primitive-independent) -------------
+        print("\n  Self-collision benchmarks ...")
 
-    print("    JAX-Capsule self ...")
-    all_results += _bench_backend(
-        "JAX-Capsule", coll_cap, robot_cap, world_geom, cfgs_cap_by_batch,
-        skip_world=True, use_vmap=True,
-    )
-
-    print("    JAX-Sphere self ...")
-    all_results += _bench_backend(
-        "JAX-Sphere", coll_sph, robot_sph, world_geom, cfgs_sph_by_batch,
-        skip_world=True, use_vmap=True,
-    )
-
-    if neural_models:
-        # Neural self-collision delegates to JAX-Capsule (same kernel)
-        import copy
-        for r in all_results:
-            if r.label == "JAX-Capsule" and r.op == "self":
-                nr = copy.copy(r)
-                nr.label = "JAX-Neural"
-                all_results.append(nr)
-
-    if cuda_available:
-        print("    CUDA-Capsule self ...")
+        print("    JAX-Capsule self ...")
         all_results += _bench_backend(
-            "CUDA-Capsule", cuda_cap, robot_cap, world_geom, cfgs_cap_by_batch,
-            skip_world=True,
+            "JAX-Capsule", coll_cap, robot_cap, world_geom, cfgs_cap_by_batch,
+            skip_world=True, use_vmap=True,
         )
-        print("    CUDA-Sphere self ...")
+
+        print("    JAX-Sphere self ...")
         all_results += _bench_backend(
-            "CUDA-Sphere", cuda_sph, robot_sph, world_geom, cfgs_sph_by_batch,
-            skip_world=True,
+            "JAX-Sphere", coll_sph, robot_sph, world_geom, cfgs_sph_by_batch,
+            skip_world=True, use_vmap=True,
         )
-        if cuda_sph_coarse is not None:
-            print("    CUDA-Sphere-Coarse self ...")
+
+        if neural_models:
+            # Neural self-collision delegates to JAX-Capsule (same kernel)
+            import copy
+            for r in all_results:
+                if r.label == "JAX-Capsule" and r.op == "self":
+                    nr = copy.copy(r)
+                    nr.label = "JAX-Neural"
+                    all_results.append(nr)
+
+        if cuda_available:
+            print("    CUDA-Capsule self ...")
             all_results += _bench_backend(
-                "CUDA-Sphere-Coarse", cuda_sph_coarse, robot_sph, world_geom,
-                cfgs_sph_by_batch, skip_world=True,
+                "CUDA-Capsule", cuda_cap, robot_cap, world_geom, cfgs_cap_by_batch,
+                skip_world=True,
             )
-
-    # --- World-collision benchmarks (per primitive type) --------------------
-    for prim_name, (prim_geom, prim_count) in world_primitives.items():
-        print(f"\n  World-collision benchmarks  (obstacle={prim_name}, M={prim_count}) ...")
-        op_tag = f"world-{prim_name}"
-
-        print(f"    JAX-Capsule ...")
-        all_results += _bench_backend(
-            "JAX-Capsule", coll_cap, robot_cap, prim_geom, cfgs_cap_by_batch,
-            skip_self=True, use_vmap=True, world_op_tag=op_tag,
-        )
-
-        print(f"    JAX-Sphere ...")
-        all_results += _bench_backend(
-            "JAX-Sphere", coll_sph, robot_sph, prim_geom, cfgs_sph_by_batch,
-            skip_self=True, use_vmap=True, world_op_tag=op_tag,
-        )
-
-        if prim_name in neural_models:
-            print(f"    JAX-Neural ...")
+            print("    CUDA-Sphere self ...")
             all_results += _bench_backend(
-                "JAX-Neural", neural_models[prim_name], robot_cap, prim_geom,
-                cfgs_cap_by_batch,
+                "CUDA-Sphere", cuda_sph, robot_sph, world_geom, cfgs_sph_by_batch,
+                skip_world=True,
+            )
+            if cuda_sph_coarse is not None:
+                print("    CUDA-Sphere-Coarse self ...")
+                all_results += _bench_backend(
+                    "CUDA-Sphere-Coarse", cuda_sph_coarse, robot_sph, world_geom,
+                    cfgs_sph_by_batch, skip_world=True,
+                )
+
+        # --- World-collision benchmarks (per primitive type) --------------
+        for prim_name, (prim_geom, prim_count) in world_primitives.items():
+            print(f"\n  World-collision benchmarks  (obstacle={prim_name}, M={prim_count}) ...")
+            op_tag = f"world-{prim_name}"
+
+            print(f"    JAX-Capsule ...")
+            all_results += _bench_backend(
+                "JAX-Capsule", coll_cap, robot_cap, prim_geom, cfgs_cap_by_batch,
                 skip_self=True, use_vmap=True, world_op_tag=op_tag,
             )
 
-        if cuda_available:
-            print(f"    CUDA-Capsule ...")
+            print(f"    JAX-Sphere ...")
             all_results += _bench_backend(
-                "CUDA-Capsule", cuda_cap, robot_cap, prim_geom, cfgs_cap_by_batch,
-                skip_self=True, world_op_tag=op_tag,
+                "JAX-Sphere", coll_sph, robot_sph, prim_geom, cfgs_sph_by_batch,
+                skip_self=True, use_vmap=True, world_op_tag=op_tag,
             )
-            print(f"    CUDA-Sphere ...")
-            all_results += _bench_backend(
-                "CUDA-Sphere", cuda_sph, robot_sph, prim_geom, cfgs_sph_by_batch,
-                skip_self=True, world_op_tag=op_tag,
-            )
-            if cuda_sph_coarse is not None:
-                print(f"    CUDA-Sphere-Coarse ...")
+
+            if prim_name in neural_models:
+                print(f"    JAX-Neural ...")
                 all_results += _bench_backend(
-                    "CUDA-Sphere-Coarse", cuda_sph_coarse, robot_sph, prim_geom,
-                    cfgs_sph_by_batch, skip_self=True, world_op_tag=op_tag,
+                    "JAX-Neural", neural_models[prim_name], robot_cap, prim_geom,
+                    cfgs_cap_by_batch,
+                    skip_self=True, use_vmap=True, world_op_tag=op_tag,
                 )
+
+            if cuda_available:
+                print(f"    CUDA-Capsule ...")
+                all_results += _bench_backend(
+                    "CUDA-Capsule", cuda_cap, robot_cap, prim_geom, cfgs_cap_by_batch,
+                    skip_self=True, world_op_tag=op_tag,
+                )
+                print(f"    CUDA-Sphere ...")
+                all_results += _bench_backend(
+                    "CUDA-Sphere", cuda_sph, robot_sph, prim_geom, cfgs_sph_by_batch,
+                    skip_self=True, world_op_tag=op_tag,
+                )
+                if cuda_sph_coarse is not None:
+                    print(f"    CUDA-Sphere-Coarse ...")
+                    all_results += _bench_backend(
+                        "CUDA-Sphere-Coarse", cuda_sph_coarse, robot_sph, prim_geom,
+                        cfgs_sph_by_batch, skip_self=True, world_op_tag=op_tag,
+                    )
+
+    # --- Binary collision-check benchmarks (bool per config / per edge) ------
+    # These are a different operation from the distance backends above: the
+    # binary checkers return collision-free verdicts and are intended for
+    # sampling-based planning / edge validation.  World is restricted to spheres
+    # (the VAMP backend has no half-space primitive and we keep the comparison
+    # apples-to-apples across backends).
+    if not args.skip_binary:
+        print("\n  Binary collision-check benchmarks (op=binary, world=Sphere) ...")
+        bin_world = world_spheres
+
+        bin_checkers: list[tuple] = []
+        # CUDA binary checkers reuse the fine (and coarse) spherized models.
+        try:
+            cuda_bin = CUDABinaryCollisionChecker(coll_sph)
+            bin_checkers.append(("CUDA-Binary", cuda_bin, robot_sph, cfgs_sph_by_batch))
+            if coll_sph_coarse is not None:
+                cuda_bin_coarse = CUDABinaryCollisionChecker(
+                    coll_sph, coarse_inner=coll_sph_coarse
+                )
+                bin_checkers.append(
+                    ("CUDA-Binary-Coarse", cuda_bin_coarse, robot_sph, cfgs_sph_by_batch)
+                )
+            print("    CUDABinaryCollisionChecker: OK")
+        except Exception as exc:
+            print(f"    CUDABinaryCollisionChecker: SKIP ({exc})")
+
+        # VAMP CPU checker — JIT-compiled from the spherized URDF (its own DOF).
+        vamp_cfgs_by_batch = None
+        if VAMPCPUCollisionChecker is not None and not args.skip_vamp:
+            try:
+                t0 = time.perf_counter()
+                vamp = VAMPCPUCollisionChecker(args.spherized_urdf, srdf_path=args.srdf)
+                print(f"    VAMPCPUCollisionChecker: OK (dim={vamp.dimension}, "
+                      f"built/loaded in {time.perf_counter()-t0:.2f}s)")
+                nv = vamp.dimension
+                vamp_np = rng.uniform(-1.5, 1.5, (max_B, nv)).astype(np.float32)
+                vamp_cfgs_by_batch = {B: jnp.array(vamp_np[:B]) for B in BATCH_SIZES}
+                bin_checkers.append(("VAMP-CPU", vamp, None, vamp_cfgs_by_batch))
+            except Exception as exc:
+                print(f"    VAMPCPUCollisionChecker: SKIP ({exc})")
+
+        for label, checker, robot_arg, cfgs_bb in bin_checkers:
+            print(f"    {label} binary ...")
+            all_results += _bench_binary_backend(
+                label, checker, robot_arg, bin_world, cfgs_bb
+            )
+
+        # ── Edge validation ─────────────────────────────────────────────────
+        print(f"\n  Edge-validation benchmarks (op=edges, G={EDGE_GRANULARITY} for "
+              f"CUDA; VAMP discretises internally) ...")
+        for label, checker, robot_arg, cfgs_bb in bin_checkers:
+            # Build edges from consecutive config pairs in this checker's DOF.
+            n_dof = cfgs_bb[max(BATCH_SIZES)].shape[-1]
+            a_np = rng.uniform(-1.2, 1.2, (max_B, n_dof)).astype(np.float32)
+            b_np = rng.uniform(-1.2, 1.2, (max_B, n_dof)).astype(np.float32)
+            edges_bb = {}
+            for E in BATCH_SIZES:
+                a = a_np[:E]
+                b = b_np[:E]
+                if label.startswith("VAMP"):
+                    edges_bb[E] = jnp.asarray(np.stack([a, b], axis=1))     # [E,2,n]
+                else:
+                    ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
+                    edges_bb[E] = jnp.asarray(
+                        a[:, None, :] * (1 - ts)[None, :, None]
+                        + b[:, None, :] * ts[None, :, None]
+                    )                                                       # [E,G,n]
+            print(f"    {label} edges ...")
+            all_results += _bench_edges_backend(
+                label, checker, robot_arg, bin_world, edges_bb
+            )
 
     # ── Print tables ───────────────────────────────────────────────────────
     print("\n\n")
-    for prim_name in world_primitives:
-        op_tag = f"world-{prim_name}"
-        _print_table(f"World collision distance  (obstacle={prim_name})", all_results, op_tag)
-    _print_table("Self-collision distance",  all_results, "self")
+    if not args.binary_only:
+        for prim_name in world_primitives:
+            op_tag = f"world-{prim_name}"
+            _print_table(f"World collision distance  (obstacle={prim_name})", all_results, op_tag)
+        _print_table("Self-collision distance",  all_results, "self")
+    if not args.skip_binary:
+        _print_table("Binary collision check  (bool/config, world=Sphere)",
+                     all_results, "binary")
+        _print_table("Edge validation  (bool/edge, world=Sphere)",
+                     all_results, "edges")
 
     # Speed-up tables
     print("\n\n")
     print("=" * 80)
     print("  Speed-up summary")
     print("=" * 80)
-    for prim_name in world_primitives:
-        op_tag = f"world-{prim_name}"
-        _print_speedup_table(all_results, op_tag, baseline_label="JAX-Capsule")
-    _print_speedup_table(all_results, "self",  baseline_label="JAX-Capsule")
+    if not args.binary_only:
+        for prim_name in world_primitives:
+            op_tag = f"world-{prim_name}"
+            _print_speedup_table(all_results, op_tag, baseline_label="JAX-Capsule")
+        _print_speedup_table(all_results, "self",  baseline_label="JAX-Capsule")
+    if not args.skip_binary:
+        # Binary checkers form their own family; compare against the CPU VAMP
+        # baseline (falls back to "—" if VAMP was skipped).
+        _print_speedup_table(all_results, "binary", baseline_label="VAMP-CPU")
+        _print_speedup_table(all_results, "edges",  baseline_label="VAMP-CPU")
 
     # ── Numerical agreement check ──────────────────────────────────────────
-    if cuda_available:
+    # Guarded: the prebuilt CUDA *distance* kernel may not match the local GPU
+    # arch ("no kernel image"), in which case we skip the check rather than
+    # crashing the whole benchmark.
+    try:
+      if cuda_available:
         print("\n\n" + "=" * 80)
         print("  Numerical agreement check  (batch=64, max abs diff)")
         print("=" * 80)
@@ -749,6 +936,10 @@ def main(args) -> None:
             print(f"  self           coarse-clear: {n_clear_self}/{n_total_self} "
                   f"({100*n_clear_self/n_total_self:.0f}%)"
                   f"  — fine kernel skipped for {n_clear_self} configs")
+    except Exception as exc:
+        print(f"\n  Numerical agreement check SKIPPED ({type(exc).__name__}: {exc})")
+        print("  (Likely a CUDA distance-kernel arch mismatch — rebuild with "
+              "bash build_kernels/build_collision_cuda.sh)")
 
     print("\nDone.")
 
@@ -768,8 +959,18 @@ if __name__ == "__main__":
                         type=pathlib.Path,
                         help="Path to the coarse spherized URDF for CUDA-Sphere-Coarse "
                              f"(default: {COARSE_SPHERIZED_URDF})")
+    parser.add_argument("--srdf",            default=str(PANDA_SRDF),
+                        type=pathlib.Path,
+                        help=f"SRDF for the VAMP CPU checker (default: {PANDA_SRDF})")
     parser.add_argument("--skip-neural",     action="store_true",
                         help="Skip neural SDF training and benchmarking")
+    parser.add_argument("--skip-binary",     action="store_true",
+                        help="Skip binary collision-check + edge-validation benchmarks")
+    parser.add_argument("--skip-vamp",       action="store_true",
+                        help="Skip the VAMP CPU backend (still runs CUDA binary checkers)")
+    parser.add_argument("--binary-only",     action="store_true",
+                        help="Only run the binary collision-check + edge benchmarks "
+                             "(skips the capsule/sphere/neural distance backends)")
     parser.add_argument("--neural-samples",  type=int, default=NEURAL_SAMPLES,
                         help=f"Training set size for neural SDF (default: {NEURAL_SAMPLES})")
     args = parser.parse_args()

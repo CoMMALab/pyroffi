@@ -2,11 +2,11 @@
 # Build all CUDA kernels.
 #
 # Usage (from repo root):
-#   bash src/pyroffi/cuda_kernels/build_all.sh
-#   bash src/pyroffi/cuda_kernels/build_all.sh --debug
+#   bash build_kernels/build_all.sh
+#   bash build_kernels/build_all.sh --debug
 #
 # Override GPU arch for all kernels:
-#   GPU_ARCH=-arch=sm_80 bash src/pyroffi/cuda_kernels/build_all.sh
+#   GPU_ARCH=-arch=sm_80 bash build_kernels/build_all.sh
 
 set -euo pipefail
 

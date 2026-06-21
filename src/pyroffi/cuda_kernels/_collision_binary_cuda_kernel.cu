@@ -36,7 +36,7 @@
  * World geometry arrays match _collision_cuda_kernel.cu / _cuda_collision.py:
  *   spheres   [Ms, 4], capsules [Mc, 7], boxes [Mb, 15], halfspaces [Mh, 6].
  *
- * Build: bash src/pyroffi/cuda_kernels/build_collision_binary_cuda.sh
+ * Build: bash build_kernels/build_collision_binary_cuda.sh
  */
 
 #include "xla/ffi/api/ffi.h"

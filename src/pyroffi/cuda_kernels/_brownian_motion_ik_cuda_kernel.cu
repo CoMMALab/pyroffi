@@ -32,7 +32,7 @@
  *   6. Build with --use_fast_math for hardware SFU (sqrtf, rsqrtf, etc.).
  *
  * Build:
- *   bash src/pyroffi/cuda_kernels/build_brownian_motion_ik_cuda.sh
+ *   bash build_kernels/build_brownian_motion_ik_cuda.sh
  */
 
 #include "_ik_cuda_helpers.cuh"

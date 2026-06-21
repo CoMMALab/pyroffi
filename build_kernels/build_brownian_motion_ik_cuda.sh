@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build _chomp_trajopt_cuda_lib.so from _chomp_trajopt_cuda_kernel.cu.
+# Build _brownian_motion_ik_cuda_lib.so from _brownian_motion_ik_cuda_kernel.cu.
 #
 # Usage (from repo root):
-#   bash src/pyroffi/cuda_kernels/build_chomp_trajopt_cuda.sh
-#   bash src/pyroffi/cuda_kernels/build_chomp_trajopt_cuda.sh --debug
+#   bash build_kernels/build_brownian_motion_ik_cuda.sh
+#   bash build_kernels/build_brownian_motion_ik_cuda.sh --debug
 
 set -euo pipefail
 
@@ -45,11 +45,11 @@ if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/_chomp_trajopt_cuda_kernel.cu"
-OUT="${SCRIPT_DIR}/_chomp_trajopt_cuda_lib.so"
+KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
+SRC="${KERNELS_DIR}/_brownian_motion_ik_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/_brownian_motion_ik_cuda_lib.so"
 
-JAXLIB_INC="$(python -c \
-  "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
+JAXLIB_INC="$(python -c "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
 
 if [ ! -f "${JAXLIB_INC}/xla/ffi/api/ffi.h" ]; then
   echo "ERROR: xla/ffi/api/ffi.h not found under ${JAXLIB_INC}"
@@ -59,7 +59,7 @@ fi
 
 GPU_ARCH="${GPU_ARCH:--arch=native}"
 
-NVCC_OPT="-O3"
+NVCC_OPT="-O3 --use_fast_math"
 if [ "${DEBUG}" -eq 1 ]; then
   NVCC_OPT="-O0 -G -lineinfo"
   echo "Building in DEBUG mode (with -G for Nsight Compute)..."
@@ -72,6 +72,7 @@ nvcc \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \
+  -I"${KERNELS_DIR}" \
   -I"${JAXLIB_INC}" \
   -o "${OUT}" \
   "${SRC}"

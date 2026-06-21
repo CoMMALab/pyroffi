@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Build _brownian_motion_ik_cuda_lib.so from _brownian_motion_ik_cuda_kernel.cu.
+# Build _fk_cuda.so from _fk_cuda_kernel.cu.
 #
 # Usage (from repo root):
-#   bash src/pyroffi/cuda_kernels/build_brownian_motion_ik_cuda.sh
-#   bash src/pyroffi/cuda_kernels/build_brownian_motion_ik_cuda.sh --debug
+#   bash build_kernels/build_fk_cuda.sh
+#   bash build_kernels/build_fk_cuda.sh --debug
+#
+# Requirements:
+#   - nvcc (CUDA toolkit)
+#   - jaxlib >= 0.4.14 installed in the active Python environment
+#     (provides the xla/ffi/api/ffi.h headers)
 
 set -euo pipefail
 
@@ -40,15 +45,18 @@ if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
     echo "ERROR: --max-joints must be a positive integer, got '${MAX_JOINTS_OVERRIDE}'"
     exit 1
   fi
-  MAX_JOINTS_FLAG="-DMAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
-  echo "Overriding MAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
+  MAX_JOINTS_FLAG="-DFK_MAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
+  echo "Overriding FK_MAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/_brownian_motion_ik_cuda_kernel.cu"
-OUT="${SCRIPT_DIR}/_brownian_motion_ik_cuda_lib.so"
+KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
+SRC="${KERNELS_DIR}/_fk_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/_fk_cuda_lib.so"
 
-JAXLIB_INC="$(python -c "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
+# Locate the jaxlib include directory that ships xla/ffi/api/ffi.h.
+JAXLIB_INC="$(python -c \
+  "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
 
 if [ ! -f "${JAXLIB_INC}/xla/ffi/api/ffi.h" ]; then
   echo "ERROR: xla/ffi/api/ffi.h not found under ${JAXLIB_INC}"
@@ -56,9 +64,12 @@ if [ ! -f "${JAXLIB_INC}/xla/ffi/api/ffi.h" ]; then
   exit 1
 fi
 
+# GPU architecture flag.
+# -arch=native (CUDA 11.6+) targets the installed GPU automatically.
+# Override for a specific arch: GPU_ARCH=-arch=sm_80 bash build_fk_cuda.sh
 GPU_ARCH="${GPU_ARCH:--arch=native}"
 
-NVCC_OPT="-O3 --use_fast_math"
+NVCC_OPT="-O3"
 if [ "${DEBUG}" -eq 1 ]; then
   NVCC_OPT="-O0 -G -lineinfo"
   echo "Building in DEBUG mode (with -G for Nsight Compute)..."
@@ -71,7 +82,6 @@ nvcc \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \
-  -I"${SCRIPT_DIR}" \
   -I"${JAXLIB_INC}" \
   -o "${OUT}" \
   "${SRC}"

@@ -573,7 +573,7 @@ def sqp_ik_solve_cuda(
     limits as hard QP constraints.
 
     Requires ``_sqp_ik_cuda_lib.so`` compiled from ``_sqp_ik_cuda_kernel.cu``:
-        bash src/pyroffi/cuda_kernels/build_sqp_ik_cuda.sh
+        bash build_kernels/build_sqp_ik_cuda.sh
 
     Multi-EE support
         Pass multiple end-effectors via ``target_link_indices`` (tuple) and
