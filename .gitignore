@@ -20,3 +20,5 @@ resources/learned_ik/*
 pRRTC
 src/pyroffi/cuda_kernels/*.so
 src/pyroffi/cuda_kernels/*.o
+NVIDIA*.sh
+NVIDIA-OptiX-SDK-9.1.0-linux64-x86_64

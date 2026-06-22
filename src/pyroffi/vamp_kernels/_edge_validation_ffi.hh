@@ -38,6 +38,8 @@
 #include <xla/ffi/api/ffi.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include <vamp/vector.hh>
@@ -116,6 +118,87 @@ namespace vamp::binding::jax
         return env;
     }
 
+    // FNV-1a over a raw byte range, chained into a running hash.
+    inline auto hash_bytes(const void *data, std::size_t nbytes, std::uint64_t h) noexcept
+        -> std::uint64_t
+    {
+        const auto *p = static_cast<const unsigned char *>(data);
+        for (std::size_t i = 0; i < nbytes; ++i)
+        {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
+
+    // Content hash of the world buffers (obstacle counts, raw float payloads, and
+    // CAPT radii).  Two calls with byte-identical worlds hash equal, so the
+    // memoised Environment below is reused; the 64-bit FNV-1a collision risk
+    // (~2^-64) is negligible for a perf cache over fixed-layout buffers.
+    inline auto world_hash(
+        const float *spheres, std::size_t n_spheres,
+        const float *capsules, std::size_t n_capsules,
+        const float *cuboids, std::size_t n_cuboids,
+        const float *points, std::size_t n_points,
+        float capt_r_min, float capt_r_max, float capt_r_point) noexcept -> std::uint64_t
+    {
+        std::uint64_t h = 1469598103934665603ULL;  // FNV offset basis
+        const std::size_t sizes[4] = {n_spheres, n_capsules, n_cuboids, n_points};
+        h = hash_bytes(sizes, sizeof(sizes), h);
+        h = hash_bytes(spheres, n_spheres * 4 * sizeof(float), h);
+        h = hash_bytes(capsules, n_capsules * 7 * sizeof(float), h);
+        h = hash_bytes(cuboids, n_cuboids * 15 * sizeof(float), h);
+        h = hash_bytes(points, n_points * 3 * sizeof(float), h);
+        const float attrs[3] = {capt_r_min, capt_r_max, capt_r_point};
+        h = hash_bytes(attrs, sizeof(attrs), h);
+        return h;
+    }
+
+    // Build (or reuse) the SIMD Environment for these world buffers.
+    //
+    // The JIT-compiled handler is called repeatedly against the *same* static
+    // world during planning / benchmarking, yet each call would otherwise rebuild
+    // the obstacle vectors, re-sort, and reconstruct the CAPT affordance tree
+    // (O(n log n)) before a single config is checked — pure per-call overhead.
+    // We memoise the last-built EnvironmentVector keyed by ``world_hash`` so an
+    // unchanged world is free after the first call.
+    //
+    // The cached Environment is heap-allocated and *intentionally never freed*:
+    // (1) a previously-returned reference may still be in use by a concurrent
+    //     kernel when the world changes, and (2) it keeps the cache statics
+    //     trivially destructible — a function-local ``static`` with a non-trivial
+    //     destructor (e.g. a ``shared_ptr``) makes the compiler emit an
+    //     ``__cxa_atexit(__dso_handle)`` registration that cricket's ORC JIT
+    //     cannot relocate.  Worlds change rarely, so the leak is bounded.
+    inline auto environment_for(
+        const float *spheres, std::size_t n_spheres,
+        const float *capsules, std::size_t n_capsules,
+        const float *cuboids, std::size_t n_cuboids,
+        const float *points, std::size_t n_points,
+        float capt_r_min, float capt_r_max, float capt_r_point) -> const EnvironmentVector &
+    {
+        const std::uint64_t h = world_hash(
+            spheres, n_spheres, capsules, n_capsules, cuboids, n_cuboids,
+            points, n_points, capt_r_min, capt_r_max, capt_r_point);
+
+        static std::mutex mtx;                          // trivially destructible
+        static std::uint64_t cached_hash = 0;
+        static const EnvironmentVector *cached = nullptr;  // leaked; never freed
+
+        std::lock_guard<std::mutex> lock(mtx);
+        if (cached != nullptr and cached_hash == h)
+        {
+            return *cached;
+        }
+
+        const EnvironmentF env_f = build_environment(
+            spheres, n_spheres, capsules, n_capsules, cuboids, n_cuboids,
+            points, n_points, capt_r_min, capt_r_max, capt_r_point);
+        cached = new EnvironmentVector(env_f);
+        cached_hash = h;
+        return *cached;
+    }
+
     // Build a robot Configuration from a dense [dim] row.
     //
     // We must NOT construct directly from the raw row pointer: a FloatVector
@@ -152,13 +235,12 @@ namespace vamp::binding::jax
         const float *a_data = a.typed_data();
         bool *r_data = r->typed_data();
 
-        const EnvironmentF env_f = build_environment(
+        const EnvironmentVector &env = environment_for(
             spheres.typed_data(), spheres.dimensions()[0],
             capsules.typed_data(), capsules.dimensions()[0],
             cuboids.typed_data(), cuboids.dimensions()[0],
             points.typed_data(), points.dimensions()[0],
             capt_r_min, capt_r_max, capt_r_point);
-        const EnvironmentVector env(env_f);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1000)
@@ -199,13 +281,12 @@ namespace vamp::binding::jax
         const float *b_data = b.typed_data();
         bool *r_data = r->typed_data();
 
-        const EnvironmentF env_f = build_environment(
+        const EnvironmentVector &env = environment_for(
             spheres.typed_data(), spheres.dimensions()[0],
             capsules.typed_data(), capsules.dimensions()[0],
             cuboids.typed_data(), cuboids.dimensions()[0],
             points.typed_data(), points.dimensions()[0],
             capt_r_min, capt_r_max, capt_r_point);
-        const EnvironmentVector env(env_f);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1000)
@@ -214,13 +295,13 @@ namespace vamp::binding::jax
         {
             const auto ca = make_configuration<Robot>(&a_data[i * Robot::dimension]);
             const auto cb = make_configuration<Robot>(&b_data[i * Robot::dimension]);
-            // validate_motion samples the open interval (0, 1] — it checks the
-            // goal but assumes the start is already valid (the usual planner
-            // contract).  We additionally validate the start config so a "valid"
-            // edge means *both* endpoints and the interior are collision-free,
-            // matching the CUDA check_edges_collision_free semantics.
+            // validate_motion samples the open interval (0, 1]: it checks the goal
+            // and the interior but assumes the start is already valid (the usual
+            // planner contract, and what VAMP's own validate_motion[_batch] does).
+            // A "valid" edge therefore guarantees the goal endpoint and interior
+            // are collision-free; callers needing the start checked should
+            // validate it separately (check_collision_free).
             r_data[i] =
-                vamp::planning::validate_motion<Robot, rake, Robot::resolution>(ca, ca, env) and
                 vamp::planning::validate_motion<Robot, rake, Robot::resolution>(ca, cb, env);
         }
 

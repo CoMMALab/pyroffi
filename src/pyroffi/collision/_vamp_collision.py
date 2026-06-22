@@ -495,10 +495,12 @@ class VAMPCPUCollisionChecker:
         holds the two endpoints in its second-to-last axis (shape ``[*batch, 2,
         n_act]``); the return shape is ``edge_cfgs.shape[:-2]``.
 
-        Both endpoints and the interior are validated, so a ``True`` verdict
-        implies both endpoints are collision-free (the handler explicitly checks
-        the start config, since VAMP's ``validate_motion`` otherwise samples only
-        ``(0, 1]`` and assumes a pre-validated start).
+        VAMP samples the open interval ``(0, 1]``: the goal endpoint and the
+        interior are validated, but the start is assumed pre-validated (the usual
+        planner contract, matching VAMP's own ``validate_motion``).  A ``True``
+        verdict therefore implies the *goal* endpoint and interior are
+        collision-free; validate the start separately with
+        :meth:`check_collision_free` if you need it.
         """
         ws, wc, wb, wp, capt = self._world_args(world_geom, point_cloud, capt)
         edge_cfgs = jnp.asarray(edge_cfgs, dtype=jnp.float32)

@@ -59,11 +59,11 @@ def main() -> None:
     print(f"[edges] {int(valid.sum())}/{E} edges collision-free")
     print(f"  {dt * 1e3:.2f} ms/call  ({dt * 1e6 / E:.2f} us/edge) for {E} edges")
 
-    # Sanity: a valid edge must have both endpoints collision-free.
-    a_free = np.asarray(checker.check_collision_free(None, a, world))
+    # Sanity: VAMP samples (0, 1], so a valid edge must have its *goal* endpoint
+    # collision-free (the start is assumed pre-validated by the planner).
     b_free = np.asarray(checker.check_collision_free(None, b, world))
-    assert np.all(~valid | (a_free & b_free))
-    print("  consistency OK: no edge is valid with a colliding endpoint")
+    assert np.all(~valid | b_free)
+    print("  consistency OK: no edge is valid with a colliding goal endpoint")
 
     # ── Point-cloud (CAPT) obstacle ─────────────────────────────────────────
     far = Sphere.from_center_and_radius(

@@ -79,6 +79,11 @@ try:
 except Exception:  # cricket not built
     VAMPCPUCollisionChecker = None
 
+try:
+    from pyroffi.collision import RoboGPUCollisionChecker
+except Exception:
+    RoboGPUCollisionChecker = None
+
 # yourdfpy 0.0.58 is incompatible with numpy >= 2 (float() on size-1 arrays);
 # install a process-local shim so URDF loading works.  No-op when unneeded.
 try:
@@ -114,11 +119,15 @@ N_WARMUP = 3          # JIT / kernel warm-up calls (results discarded)
 N_TIMED  = 7          # timed repetitions; median is reported
 
 # Batch sizes to sweep
-BATCH_SIZES = [1, 64, 512, 2048]
+BATCH_SIZES = [1, 64, 512, 2048, 4096, 8192, 16384]
 
 # Number of discretised points per edge for the *CUDA* binary edge check (VAMP
 # discretises internally at the robot resolution, so it only takes endpoints).
 EDGE_GRANULARITY = 16
+
+# RoboGPU point-cloud scene parameters
+N_POINT_CLOUD  = 8192   # environment points in the point cloud
+POINT_CLOUD_R_ENV = 0.01  # sphere radius per environment point (metres)
 
 # World scene: a small set of obstacles (Sphere + Capsule + Box)
 N_WORLD_SPHERES    = 4
@@ -792,6 +801,7 @@ def main(args) -> None:
                 if label.startswith("VAMP"):
                     edges_bb[E] = jnp.asarray(np.stack([a, b], axis=1))     # [E,2,n]
                 else:
+                    # CUDA-Binary and RoboGPU both take pre-discretised [E,G,n]
                     ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
                     edges_bb[E] = jnp.asarray(
                         a[:, None, :] * (1 - ts)[None, :, None]
@@ -801,6 +811,81 @@ def main(args) -> None:
             all_results += _bench_edges_backend(
                 label, checker, robot_arg, bin_world, edges_bb
             )
+
+    # ── Isolated point-cloud comparison: RoboGPU (GPU) vs CAPT (CPU) ─────────
+    # Both backends process the SAME point cloud (RoboGPU via an OptiX BVH, CAPT
+    # via VAMP's Collision-Affording Point Tree), so this is the apples-to-apples
+    # head-to-head.  The regular world is empty (one far-away sphere) to isolate
+    # the cost of the point-cloud query.
+    if not args.skip_pointcloud:
+        print(f"\n  Point-cloud benchmarks: RoboGPU vs CAPT "
+              f"(Mp={args.pc_points}, r_env={args.pc_r_env}) ...")
+        # Empty regular world so only the point-cloud path is exercised.
+        empty_world = Sphere.from_center_and_radius(
+            center=jnp.array([[100.0, 100.0, 100.0]]), radius=jnp.array([0.01]))
+        pc_np = rng.uniform(-0.6, 0.6, (args.pc_points, 3)).astype(np.float32)
+        pc_j = jnp.array(pc_np)
+
+        pc_checkers: list[tuple] = []
+
+        if RoboGPUCollisionChecker is not None and not args.skip_robogpu:
+            try:
+                t0 = time.perf_counter()
+                robogpu = RoboGPUCollisionChecker(
+                    coll_sph, edge_granularity=EDGE_GRANULARITY)
+                robogpu.set_world(empty_world, point_cloud=pc_j, r_env=args.pc_r_env)
+                print(f"    RoboGPU: OK (built in {time.perf_counter()-t0:.2f}s)")
+                pc_checkers.append(
+                    ("RoboGPU", robogpu, robot_sph, cfgs_sph_by_batch))
+            except Exception as exc:
+                print(f"    RoboGPU: SKIP ({exc})")
+
+        capt_cfgs_by_batch = None
+        if VAMPCPUCollisionChecker is not None and not args.skip_vamp:
+            try:
+                t0 = time.perf_counter()
+                capt = VAMPCPUCollisionChecker(args.spherized_urdf, srdf_path=args.srdf)
+                # CAPT: env points inflated by r_env; robot sphere radius range
+                # spans [0, pc_r_env*?] — VAMP uses its own internal spherization,
+                # so capt_r_max only bounds the broadphase, set generously.
+                capt.set_world(
+                    empty_world, point_cloud=pc_j,
+                    capt_r_min=0.0, capt_r_max=0.2, capt_r_point=args.pc_r_env)
+                nv = capt.dimension
+                capt_np = rng.uniform(-1.5, 1.5, (max_B, nv)).astype(np.float32)
+                capt_cfgs_by_batch = {B: jnp.array(capt_np[:B]) for B in BATCH_SIZES}
+                print(f"    CAPT: OK (dim={nv}, built/loaded in "
+                      f"{time.perf_counter()-t0:.2f}s)")
+                pc_checkers.append(("CAPT", capt, None, capt_cfgs_by_batch))
+            except Exception as exc:
+                print(f"    CAPT: SKIP ({exc})")
+
+        # Binary check on the point cloud.
+        for label, checker, robot_arg, cfgs_bb in pc_checkers:
+            print(f"    {label} pc-binary ...")
+            all_results += _bench_binary_backend(
+                label, checker, robot_arg, empty_world, cfgs_bb, op_tag="pc-binary")
+
+        # Edge validation on the point cloud.
+        print(f"\n  Point-cloud edge validation (G={EDGE_GRANULARITY} for RoboGPU; "
+              f"CAPT discretises internally) ...")
+        for label, checker, robot_arg, cfgs_bb in pc_checkers:
+            n_dof = cfgs_bb[max(BATCH_SIZES)].shape[-1]
+            a_np = rng.uniform(-1.2, 1.2, (max_B, n_dof)).astype(np.float32)
+            b_np = rng.uniform(-1.2, 1.2, (max_B, n_dof)).astype(np.float32)
+            edges_bb = {}
+            for E in BATCH_SIZES:
+                a, b = a_np[:E], b_np[:E]
+                if label == "CAPT":
+                    edges_bb[E] = jnp.asarray(np.stack([a, b], axis=1))     # [E,2,n]
+                else:
+                    ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
+                    edges_bb[E] = jnp.asarray(
+                        a[:, None, :] * (1 - ts)[None, :, None]
+                        + b[:, None, :] * ts[None, :, None])                # [E,G,n]
+            print(f"    {label} pc-edges ...")
+            all_results += _bench_edges_backend(
+                label, checker, robot_arg, empty_world, edges_bb, op_tag="pc-edges")
 
     # ── Print tables ───────────────────────────────────────────────────────
     print("\n\n")
@@ -814,6 +899,11 @@ def main(args) -> None:
                      all_results, "binary")
         _print_table("Edge validation  (bool/edge, world=Sphere)",
                      all_results, "edges")
+    if not args.skip_pointcloud:
+        _print_table("Point-cloud collision check  (bool/config, RoboGPU vs CAPT)",
+                     all_results, "pc-binary")
+        _print_table("Point-cloud edge validation  (bool/edge, RoboGPU vs CAPT)",
+                     all_results, "pc-edges")
 
     # Speed-up tables
     print("\n\n")
@@ -830,6 +920,11 @@ def main(args) -> None:
         # baseline (falls back to "—" if VAMP was skipped).
         _print_speedup_table(all_results, "binary", baseline_label="VAMP-CPU")
         _print_speedup_table(all_results, "edges",  baseline_label="VAMP-CPU")
+    if not args.skip_pointcloud:
+        # Isolated head-to-head: RoboGPU (GPU OptiX) vs CAPT (CPU VAMP) on the
+        # same point cloud.  Baseline is CAPT so >1× means RoboGPU is faster.
+        _print_speedup_table(all_results, "pc-binary", baseline_label="CAPT")
+        _print_speedup_table(all_results, "pc-edges",  baseline_label="CAPT")
 
     # ── Numerical agreement check ──────────────────────────────────────────
     # Guarded: the prebuilt CUDA *distance* kernel may not match the local GPU
@@ -968,6 +1063,15 @@ if __name__ == "__main__":
                         help="Skip binary collision-check + edge-validation benchmarks")
     parser.add_argument("--skip-vamp",       action="store_true",
                         help="Skip the VAMP CPU backend (still runs CUDA binary checkers)")
+    parser.add_argument("--skip-robogpu",    action="store_true",
+                        help="Skip the RoboGPU OptiX backend")
+    parser.add_argument("--skip-pointcloud", action="store_true",
+                        help="Skip the isolated RoboGPU-vs-CAPT point-cloud benchmark")
+    parser.add_argument("--pc-points",       type=int, default=N_POINT_CLOUD,
+                        help=f"Number of random environment points in the RoboGPU "
+                             f"point cloud (default: {N_POINT_CLOUD})")
+    parser.add_argument("--pc-r-env",        type=float, default=POINT_CLOUD_R_ENV,
+                        help=f"Sphere radius for each env point (default: {POINT_CLOUD_R_ENV})")
     parser.add_argument("--binary-only",     action="store_true",
                         help="Only run the binary collision-check + edge benchmarks "
                              "(skips the capsule/sphere/neural distance backends)")
