@@ -45,10 +45,10 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
 
-DEVICE_SRC="${KERNELS_DIR}/_robogpu_optix_programs.cu"
-HOST_SRC="${KERNELS_DIR}/_robogpu_collision_host.cu"
-PTX_OUT="${KERNELS_DIR}/_robogpu_optix_programs.ptx"
-SO_OUT="${KERNELS_DIR}/_robogpu_collision_lib.so"
+DEVICE_SRC="${KERNELS_DIR}/collision/_robogpu_optix_programs.cu"
+HOST_SRC="${KERNELS_DIR}/collision/_robogpu_collision_host.cu"
+PTX_OUT="${KERNELS_DIR}/collision/_robogpu_optix_programs.ptx"
+SO_OUT="${KERNELS_DIR}/collision/_robogpu_collision_lib.so"
 
 # ── Locate jaxlib XLA FFI headers ──────────────────────────────────────────
 

@@ -43,6 +43,17 @@
 
 namespace ffi = xla::ffi;
 
+// ── Multi-GPU safety ──────────────────────────────────────────────────────────
+//
+// Under jax.pmap, one host thread drives each visible GPU and the same FFI
+// handler runs concurrently on every device. Any host-side cache (e.g. a CUDA
+// graph exec containing device-specific pointers) must therefore be kept
+// *per-device* — a single shared cache would let one device replay another
+// device's graph (illegal access) and race on the cache struct. We index every
+// cache by the current CUDA device ordinal, so each pmap worker only ever
+// touches its own slot.
+static constexpr int PYROFFI_MAX_GPUS = 16;
+
 // ── Grid / tile constants ─────────────────────────────────────────────────────
 
 /// Threads per block along the robot (K or N) dimension.
@@ -538,7 +549,13 @@ static ffi::Error CollisionWorldSphereImpl(
             B = K = Ms = Mc = Mb = Mh = -1;
         }
     };
-    static GraphCache cache;
+    static GraphCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    GraphCache& cache = cache_pool[_dev];
 
     if (B > 0 && K > 0 && M > 0) {
         const float* sc = sphere_centers.typed_data();
@@ -707,7 +724,13 @@ static ffi::Error CollisionWorldSphereReducedImpl(
             B = K = N = Ms = Mc = Mb = Mh = -1;
         }
     };
-    static GraphCache cache;
+    static GraphCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    GraphCache& cache = cache_pool[_dev];
 
     if (B > 0 && N > 0 && M > 0) {
         const float* sc = sphere_centers.typed_data();
@@ -873,7 +896,13 @@ static ffi::Error CollisionWorldCapsuleImpl(
             B = N = Ms = Mc = Mb = Mh = -1;
         }
     };
-    static GraphCache cache;
+    static GraphCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    GraphCache& cache = cache_pool[_dev];
 
     if (B > 0 && N > 0 && M > 0) {
         const float* cp = caps.typed_data();
@@ -1032,7 +1061,13 @@ static ffi::Error CollisionSelfSphereImpl(
             B = S = N = P = -1;
         }
     };
-    static GraphCache cache;
+    static GraphCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    GraphCache& cache = cache_pool[_dev];
 
     if (total > 0) {
         const int blocks = (total + 255) / 256;
@@ -1138,7 +1173,13 @@ static ffi::Error CollisionSelfCapsuleImpl(
             B = N = P = -1;
         }
     };
-    static GraphCache cache;
+    static GraphCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    GraphCache& cache = cache_pool[_dev];
 
     if (total > 0) {
         const int blocks = (total + 255) / 256;

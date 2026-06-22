@@ -517,7 +517,7 @@ def ls_trajopt(
         key = jax.random.PRNGKey(0)
 
     if use_cuda and opt_cfg.use_legacy_cuda_kernel:
-        from ..cuda_kernels._ls_trajopt_cuda import ls_trajopt_cuda
+        from ..cuda_kernels.trajopt._ls_trajopt_cuda import ls_trajopt_cuda
 
         best_traj, costs, final_trajs = ls_trajopt_cuda(
             init_trajs=init_trajs,

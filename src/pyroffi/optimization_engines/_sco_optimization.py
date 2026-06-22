@@ -535,7 +535,7 @@ def sco_trajopt(
         final_trajs: All optimized trajectories.                  [B, T, DOF].
     """
     if use_cuda:
-        from ..cuda_kernels._sco_trajopt_cuda import sco_trajopt_cuda
+        from ..cuda_kernels.trajopt._sco_trajopt_cuda import sco_trajopt_cuda
         return sco_trajopt_cuda(
             init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
         )

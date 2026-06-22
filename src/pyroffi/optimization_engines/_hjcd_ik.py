@@ -695,7 +695,7 @@ def _hjcd_solve_cuda_jit(
     constraint_args: tuple = (),
     constraint_weights: Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
+    from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -1116,7 +1116,7 @@ def _hjcd_solve_cuda_batch_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
+    from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits

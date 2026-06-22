@@ -271,7 +271,7 @@ def _fk_cuda_differentiable(
     input.  Both ``jax.jvp`` and ``jax.grad`` work; differentiated calls evaluate
     the JAX FK (the FFI itself is not differentiable).
     """
-    from .cuda_kernels._fk_cuda import fk_cuda
+    from .cuda_kernels.fk._fk_cuda import fk_cuda
 
     return fk_cuda(
         cfg=cfg,

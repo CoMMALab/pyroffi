@@ -47,7 +47,7 @@ from loguru import logger
 
 from ._geometry import Box, Capsule, CollGeom, HalfSpace, Sphere
 from ._robot_collision import RobotCollision, RobotCollisionSpherized
-from ..cuda_kernels._collision_cuda_ffi import (
+from ..cuda_kernels.collision._collision_cuda_ffi import (
     _load_and_register,
     collision_world_sphere,
     collision_world_sphere_reduced,
@@ -55,7 +55,7 @@ from ..cuda_kernels._collision_cuda_ffi import (
     collision_self_sphere,
     collision_self_capsule,
 )
-from ..cuda_kernels._collision_binary_cuda_ffi import (
+from ..cuda_kernels.collision._collision_binary_cuda_ffi import (
     _load_and_register as _load_and_register_binary,
     collision_binary,
 )

@@ -16,6 +16,15 @@ the GUI panel so you can visually confirm they agree with what you see:
 The brute-force per-sphere test (NumPy) is the ground-truth reference for the
 red colouring.
 
+Multi-GPU (pmap)
+  RoboGPU's CUDA/OptiX kernels are device-safe under ``jax.pmap``: each visible
+  GPU keeps its own pipeline/BVH/graph caches, so pmap shards a batch of
+  configurations across all devices automatically.  To show this off, every
+  frame we also fan a batch of perturbed candidate configurations out across all
+  visible GPUs via ``jax.pmap`` and report the aggregate free-count + timing in
+  the GUI.  Candidate ``(device 0, slot 0)`` is the exact dragged config, so its
+  pmap verdict must match the single-device RoboGPU verdict (sanity check).
+
 Run (inside the `pyroffi` conda env):
     # build the kernels first:
     #   bash build_kernels/build_robogpu_collision.sh
@@ -51,6 +60,10 @@ R_ENV = 0.02              # environment point sphere radius
 N_POINTS = 1200           # point-cloud size
 BLOB_CENTER = np.array([0.45, 0.0, 0.55], np.float32)  # small sphere location
 BLOB_RADIUS = 0.10        # small sphere radius
+
+# Multi-GPU pmap demo: candidate configs evaluated per GPU each frame.
+N_PER_DEVICE = 256        # perturbed candidates checked on every visible GPU
+PERTURB_STD = 0.15        # std-dev (rad) of the candidate perturbation
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +126,21 @@ def main() -> None:
     robogpu._jit_fn = None
     robogpu.set_world(far, point_cloud=points_j, r_env=R_ENV)
 
+    # ── Multi-GPU pmap setup ─────────────────────────────────────────────────
+    # A single warmup call builds the checker's jitted FFI function (which closes
+    # over the static robot/world geometry).  We then wrap it in jax.pmap so a
+    # config batch shaped [n_devices, N_PER_DEVICE, n_act] is sharded across every
+    # visible GPU — one shard per device, each running on its own CUDA stream and
+    # per-device kernel caches.
+    n_devices = jax.device_count()
+    n_act = robot.joints.lower_limits.shape[0]
+    mid_cfg = (robot.joints.lower_limits + robot.joints.upper_limits) / 2.0
+    robogpu.check_collision_free(robot, mid_cfg[None, :]).block_until_ready()
+    pmap_check = jax.pmap(robogpu._jit_fn)  # [D, P, n_act] -> [D, P] int32 (1=free)
+    pmap_key = jax.random.PRNGKey(0)
+    print(f"pmap RoboGPU over {n_devices} GPU(s): "
+          f"{n_devices * N_PER_DEVICE} candidates/frame")
+
     capt = None
     try:
         from pyroffi.collision import VAMPCPUCollisionChecker
@@ -165,6 +193,10 @@ def main() -> None:
     g_agree = server.gui.add_text("RoboGPU == reference", "—", disabled=True)
     g_t_rg = server.gui.add_number("RoboGPU (us)", 0.0, disabled=True)
     g_t_capt = server.gui.add_number("CAPT (us)", 0.0, disabled=True)
+    g_pmap = server.gui.add_text(
+        f"pmap free / total ({n_devices} GPUs)", "—", disabled=True)
+    g_t_pmap = server.gui.add_number("pmap batch (us)", 0.0, disabled=True)
+    g_pmap_agree = server.gui.add_text("pmap[0,0] == single", "—", disabled=True)
 
     RED = np.array([220, 40, 40], np.uint8)
     BLUE = np.array([90, 200, 255], np.uint8)
@@ -224,6 +256,26 @@ def main() -> None:
         g_t_rg.value = (time.perf_counter() - t0) * 1e6
         g_rg.value = "free" if rg_free else "COLLISION"
         g_agree.value = "yes" if (rg_free != ref_collision) else "NO — mismatch!"
+
+        # ── Multi-GPU pmap batch: perturbed candidates fanned across all GPUs ──
+        # Build [n_devices, N_PER_DEVICE, n_act].  Slot (0, 0) is the exact dragged
+        # config (zero perturbation) so its verdict must match the single-device
+        # RoboGPU result above — a live correctness check of the pmap path.
+        pmap_key, sub = jax.random.split(pmap_key)
+        noise = PERTURB_STD * jax.random.normal(
+            sub, (n_devices, N_PER_DEVICE, n_act), dtype=jnp.float32)
+        noise = noise.at[0, 0].set(0.0)
+        cands = cfg[None, None, :] + noise
+        t0 = time.perf_counter()
+        verdicts = pmap_check(cands)           # [n_devices, N_PER_DEVICE] int32
+        verdicts.block_until_ready()
+        g_t_pmap.value = (time.perf_counter() - t0) * 1e6
+        verdicts_np = np.asarray(verdicts)
+        n_total = verdicts_np.size
+        n_free = int(verdicts_np.sum())
+        g_pmap.value = f"{n_free} / {n_total}"
+        pmap_ref_free = bool(verdicts_np[0, 0])
+        g_pmap_agree.value = "yes" if (pmap_ref_free == rg_free) else "NO — mismatch!"
 
         # CAPT verdict.
         if capt is not None:

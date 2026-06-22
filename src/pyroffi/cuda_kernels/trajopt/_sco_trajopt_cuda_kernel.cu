@@ -101,6 +101,12 @@ struct ScoTrajoptGraphCache {
 
 namespace ffi = xla::ffi;
 
+// Under jax.pmap each visible GPU runs this handler on its own host thread, so
+// the CUDA graph cache must be kept per-device (indexed by the current device
+// ordinal). A single shared cache would race across device threads and replay
+// one device's graph on another (illegal access).
+static constexpr int PYROFFI_MAX_GPUS = 16;
+
 // ---------------------------------------------------------------------------
 // Compile-time limits
 // ---------------------------------------------------------------------------
@@ -1064,7 +1070,7 @@ void sco_trajopt_kernel(
 // XLA FFI handler — with CUDA graph caching
 // ---------------------------------------------------------------------------
 
-static ScoTrajoptGraphCache s_trajopt_cache;
+static ScoTrajoptGraphCache s_trajopt_cache_pool[PYROFFI_MAX_GPUS];
 
 static ffi::Error ScoTrajoptCudaImpl(
     cudaStream_t stream,
@@ -1101,6 +1107,13 @@ static ffi::Error ScoTrajoptCudaImpl(
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_costs,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_workspace)
 {
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    ScoTrajoptGraphCache& s_trajopt_cache = s_trajopt_cache_pool[_dev];
+
     const int B        = static_cast<int>(init_trajs.dimensions()[0]);
     const int T        = static_cast<int>(init_trajs.dimensions()[1]);
     const int n_act    = static_cast<int>(init_trajs.dimensions()[2]);

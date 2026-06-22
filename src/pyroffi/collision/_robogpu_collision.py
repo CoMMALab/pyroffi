@@ -84,7 +84,7 @@ class RoboGPUCollisionChecker:
         *,
         edge_granularity: int = 16,
     ) -> None:
-        from ..cuda_kernels._robogpu_collision_ffi import _load_and_register
+        from ..cuda_kernels.collision._robogpu_collision_ffi import _load_and_register
         _load_and_register()
 
         if not isinstance(inner, RobotCollisionSpherized):
@@ -183,7 +183,7 @@ class RoboGPUCollisionChecker:
         if cache_id == self._cached_robot_id:
             return
 
-        from ..cuda_kernels._robogpu_collision_ffi import robogpu_collision
+        from ..cuda_kernels.collision._robogpu_collision_ffi import robogpu_collision
 
         _robot = robot
         _f_local   = self._f_local

@@ -52,8 +52,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
-SRC="${KERNELS_DIR}/_collision_cuda_kernel.cu"
-OUT="${KERNELS_DIR}/_collision_cuda_lib.so"
+SRC="${KERNELS_DIR}/collision/_collision_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/collision/_collision_cuda_lib.so"
 
 # Locate the jaxlib include directory that ships xla/ffi/api/ffi.h.
 JAXLIB_INC="$(python -c \
@@ -82,6 +82,7 @@ nvcc \
   --shared \
   --compiler-options "-fPIC" \
   -I"${JAXLIB_INC}" \
+  -I"${KERNELS_DIR}" \
   -o "${OUT}" \
   "${SRC}"
 

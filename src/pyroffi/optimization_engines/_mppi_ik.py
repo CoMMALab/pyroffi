@@ -638,7 +638,7 @@ def _mppi_ik_solve_cuda_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> tuple[Float[Array, "n_act"], Array]:
-    from ..cuda_kernels._mppi_ik_cuda import mppi_ik_cuda
+    from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -983,7 +983,7 @@ def _mppi_ik_solve_cuda_batch_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels._mppi_ik_cuda import mppi_ik_cuda
+    from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits

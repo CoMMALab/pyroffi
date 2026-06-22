@@ -65,5 +65,7 @@ bash "${SCRIPT_DIR}/build_sco_trajopt_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_ls_trajopt_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_chomp_trajopt_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_stomp_trajopt_cuda.sh" "${BUILD_ARGS[@]}"
+bash "${SCRIPT_DIR}/build_robogpu_collision.sh" "${BUILD_ARGS[@]}"
+bash "${SCRIPT_DIR}/build_cricket_jit.sh" 
 
 echo "All CUDA kernels built successfully."

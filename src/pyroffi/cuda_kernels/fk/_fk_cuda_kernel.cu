@@ -21,6 +21,14 @@
 
 namespace ffi = xla::ffi;
 
+// Under jax.pmap each visible GPU is driven by its own host thread running this
+// same handler concurrently. All host-side caches (the per-model __constant__
+// upload tracker and the CUDA graph exec) must therefore be kept per-device and
+// indexed by the current CUDA device ordinal — a shared cache would race across
+// device threads, thrash the constant-memory re-upload, and replay one device's
+// graph on another (illegal access).
+static constexpr int PYROFFI_MAX_GPUS = 16;
+
 // Maximum number of joints supported by the FK shared-memory cache.
 // Increase if your robot has more joints.
 #define FK_MAX_JOINTS 64
@@ -263,7 +271,13 @@ static ffi::Error FkCudaImpl(
         int max_level_width = -1;
         bool valid = false;
     };
-    static ModelCache cache;
+    static ModelCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    ModelCache& cache = cache_pool[_dev];
 
     const int batch    = static_cast<int>(cfg.dimensions()[0]);
     const int n_act    = static_cast<int>(cfg.dimensions()[1]);
@@ -356,7 +370,8 @@ static ffi::Error FkCudaImpl(
 
     (void)topo_inv;
 
-    static FkGraphCache graph_cache;
+    static FkGraphCache graph_cache_pool[PYROFFI_MAX_GPUS];
+    FkGraphCache& graph_cache = graph_cache_pool[_dev];
 
     const int items_per_warp = fk_pick_items_per_warp(cache.max_level_width);
     void* cfg_ptr = const_cast<float*>(cfg.typed_data());

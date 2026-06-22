@@ -15,7 +15,7 @@ def _fk_joints_jax(robot, cfg):
 
 def _fk_joints_cuda(robot, cfg):
     """Return (n_joints, 7) world transforms via CUDA kernel directly."""
-    from pyroffi.cuda_kernels._fk_cuda import fk_cuda
+    from pyroffi.cuda_kernels.fk._fk_cuda import fk_cuda
     return np.array(fk_cuda(
         cfg=cfg,
         twists=robot.joints.twists,
@@ -47,7 +47,7 @@ def diagnose(robot_name: str, batch: int = 1, seed: int = 42):
     fk_jax_jit  = jax.jit(robot._forward_kinematics_joints)
     fk_cuda_raw = jax.jit(lambda c: _fk_joints_cuda_jit(robot, c))
 
-    from pyroffi.cuda_kernels._fk_cuda import fk_cuda
+    from pyroffi.cuda_kernels.fk._fk_cuda import fk_cuda
     fk_cuda_jit = jax.jit(lambda c: fk_cuda(
         cfg=c,
         twists=robot.joints.twists,

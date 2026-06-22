@@ -816,7 +816,7 @@ def stomp_trajopt(
     upper = robot.joints.upper_limits.astype(jnp.float32)
 
     if use_cuda:
-        from ..cuda_kernels._stomp_trajopt_cuda import stomp_trajopt_cuda
+        from ..cuda_kernels.trajopt._stomp_trajopt_cuda import stomp_trajopt_cuda
         best_traj, costs, final_trajs = stomp_trajopt_cuda(
             init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg, key=key
         )

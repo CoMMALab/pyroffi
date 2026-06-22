@@ -46,8 +46,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
-SRC="${KERNELS_DIR}/_hit_and_run_ik_cuda_kernel.cu"
-OUT="${KERNELS_DIR}/_hit_and_run_ik_cuda_lib.so"
+SRC="${KERNELS_DIR}/region_ik/_hit_and_run_ik_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/region_ik/_hit_and_run_ik_cuda_lib.so"
 
 JAXLIB_INC="$(python -c "import os, jaxlib; print(os.path.join(os.path.dirname(jaxlib.__file__), 'include'))")"
 
@@ -74,6 +74,7 @@ nvcc \
   --compiler-options "-fPIC" \
   -I"${KERNELS_DIR}" \
   -I"${JAXLIB_INC}" \
+  -I"${KERNELS_DIR}" \
   -o "${OUT}" \
   "${SRC}"
 

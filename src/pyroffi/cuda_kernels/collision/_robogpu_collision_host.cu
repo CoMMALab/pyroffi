@@ -54,6 +54,26 @@
 namespace ffi = xla::ffi;
 
 // ---------------------------------------------------------------------------
+// Multi-GPU safety
+//
+// Under jax.pmap each visible GPU is driven by its own host thread running this
+// handler concurrently. The OptiX pipeline, BVH cache, and scratch buffer are
+// all bound to a specific CUDA device/context, so they must be kept per-device
+// and indexed by the current device ordinal — sharing them across devices would
+// launch one device's pipeline/BVH against another device's stream and memory.
+// ---------------------------------------------------------------------------
+
+static constexpr int PYROFFI_MAX_GPUS = 16;
+
+// Current CUDA device ordinal, or -1 if it exceeds PYROFFI_MAX_GPUS / errors.
+static int robogpu_current_device() {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return -1;
+    if (dev < 0 || dev >= PYROFFI_MAX_GPUS) return -1;
+    return dev;
+}
+
+// ---------------------------------------------------------------------------
 // Error-checking macros (return ffi::Error on failure)
 // ---------------------------------------------------------------------------
 
@@ -325,8 +345,8 @@ struct OptiXPipeline {
     bool               ready    = false;
 };
 
-static OptiXPipeline g_pipe;
-static std::mutex    g_pipe_mtx;
+static OptiXPipeline g_pipe[PYROFFI_MAX_GPUS];
+static std::mutex    g_pipe_mtx[PYROFFI_MAX_GPUS];
 
 // ---------------------------------------------------------------------------
 // Locate the PTX file alongside the running shared library
@@ -348,16 +368,17 @@ static std::string ptx_file_path() {
 // Initialise OptiX pipeline (idempotent, mutex-protected)
 // ---------------------------------------------------------------------------
 
-static ffi::Error ensure_optix_pipeline() {
-    std::lock_guard<std::mutex> lk(g_pipe_mtx);
-    if (g_pipe.ready) return ffi::Error::Success();
+static ffi::Error ensure_optix_pipeline(int dev) {
+    OptiXPipeline& gp = g_pipe[dev];
+    std::lock_guard<std::mutex> lk(g_pipe_mtx[dev]);
+    if (gp.ready) return ffi::Error::Success();
 
     OPTIX_CHECK(optixInit());
 
     CUcontext cu_ctx = nullptr;
     OptixDeviceContextOptions ctx_opts = {};
     ctx_opts.logCallbackLevel = 1; // errors only
-    OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &ctx_opts, &g_pipe.ctx));
+    OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &ctx_opts, &gp.ctx));
 
     // Load PTX from file.
     std::string ptx_path = ptx_file_path();
@@ -382,9 +403,9 @@ static ffi::Error ensure_optix_pipeline() {
         static_cast<unsigned>(OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM);
 
     char log[2048]; size_t lsz = sizeof(log);
-    OPTIX_CHECK(optixModuleCreate(g_pipe.ctx, &mco, &pco,
+    OPTIX_CHECK(optixModuleCreate(gp.ctx, &mco, &pco,
                                   ptx.c_str(), ptx.size(),
-                                  log, &lsz, &g_pipe.module));
+                                  log, &lsz, &gp.module));
 
     OptixProgramGroupOptions pgo = {};
 
@@ -392,41 +413,41 @@ static ffi::Error ensure_optix_pipeline() {
     {
         OptixProgramGroupDesc d = {};
         d.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        d.raygen.module = g_pipe.module;
+        d.raygen.module = gp.module;
         d.raygen.entryFunctionName = "__raygen__sphere_query";
-        OPTIX_CHECK(optixProgramGroupCreate(g_pipe.ctx, &d, 1, &pgo,
-                                            log, &lsz, &g_pipe.pg_rg));
+        OPTIX_CHECK(optixProgramGroupCreate(gp.ctx, &d, 1, &pgo,
+                                            log, &lsz, &gp.pg_rg));
     }
     // Miss
     {
         OptixProgramGroupDesc d = {};
         d.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        d.miss.module = g_pipe.module;
+        d.miss.module = gp.module;
         d.miss.entryFunctionName = "__miss__sphere";
-        OPTIX_CHECK(optixProgramGroupCreate(g_pipe.ctx, &d, 1, &pgo,
-                                            log, &lsz, &g_pipe.pg_ms));
+        OPTIX_CHECK(optixProgramGroupCreate(gp.ctx, &d, 1, &pgo,
+                                            log, &lsz, &gp.pg_ms));
     }
     // Hit group (intersection + any-hit; no closest-hit)
     {
         OptixProgramGroupDesc d = {};
         d.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        d.hitgroup.moduleIS            = g_pipe.module;
+        d.hitgroup.moduleIS            = gp.module;
         d.hitgroup.entryFunctionNameIS = "__intersection__sphere";
-        d.hitgroup.moduleAH            = g_pipe.module;
+        d.hitgroup.moduleAH            = gp.module;
         d.hitgroup.entryFunctionNameAH = "__anyhit__sphere";
-        OPTIX_CHECK(optixProgramGroupCreate(g_pipe.ctx, &d, 1, &pgo,
-                                            log, &lsz, &g_pipe.pg_hg));
+        OPTIX_CHECK(optixProgramGroupCreate(gp.ctx, &d, 1, &pgo,
+                                            log, &lsz, &gp.pg_hg));
     }
 
-    OptixProgramGroup pgs[] = { g_pipe.pg_rg, g_pipe.pg_ms, g_pipe.pg_hg };
+    OptixProgramGroup pgs[] = { gp.pg_rg, gp.pg_ms, gp.pg_hg };
     OptixPipelineLinkOptions plo = {};
     plo.maxTraceDepth = 1;
-    OPTIX_CHECK(optixPipelineCreate(g_pipe.ctx, &pco, &plo,
-                                    pgs, 3, log, &lsz, &g_pipe.pipeline));
-    OPTIX_CHECK(optixPipelineSetStackSize(g_pipe.pipeline,
+    OPTIX_CHECK(optixPipelineCreate(gp.ctx, &pco, &plo,
+                                    pgs, 3, log, &lsz, &gp.pipeline));
+    OPTIX_CHECK(optixPipelineSetStackSize(gp.pipeline,
         2048, 2048, 2048, 1));
 
-    g_pipe.ready = true;
+    gp.ready = true;
     return ffi::Error::Success();
 }
 
@@ -452,8 +473,8 @@ struct BVHEntry {
     OptixShaderBindingTable sbt = {};
 };
 
-static std::unordered_map<std::string, BVHEntry*> g_bvh_cache;
-static std::mutex                                   g_bvh_mtx;
+static std::unordered_map<std::string, BVHEntry*> g_bvh_cache[PYROFFI_MAX_GPUS];
+static std::mutex                                   g_bvh_mtx[PYROFFI_MAX_GPUS];
 
 // ---------------------------------------------------------------------------
 // Build (or return cached) BVH for a given point cloud
@@ -464,8 +485,10 @@ static BVHEntry* build_bvh(
     const float* d_pc,    // [Mp, 3] device pointer (from JAX buffer)
     int  Mp,
     float r_env,
-    float r_robot_max)
+    float r_robot_max,
+    int  dev)
 {
+    OptiXPipeline& gp = g_pipe[dev];
     BVHEntry* e = new BVHEntry{};
     e->Mp = Mp;
 
@@ -501,7 +524,7 @@ static BVHEntry* build_bvh(
     abo.operation  = OPTIX_BUILD_OPERATION_BUILD;
 
     OptixAccelBufferSizes bs = {};
-    OPTIX_CHECK_VOID(optixAccelComputeMemoryUsage(g_pipe.ctx, &abo, &bi, 1, &bs));
+    OPTIX_CHECK_VOID(optixAccelComputeMemoryUsage(gp.ctx, &abo, &bi, 1, &bs));
 
     CUdeviceptr d_tmp = 0, d_out = 0, d_compact_sz = 0;
     CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_tmp), bs.tempSizeInBytes));
@@ -513,7 +536,7 @@ static BVHEntry* build_bvh(
     emit.result = d_compact_sz;
 
     OptixTraversableHandle raw_handle = {};
-    OPTIX_CHECK_VOID(optixAccelBuild(g_pipe.ctx, stream, &abo,
+    OPTIX_CHECK_VOID(optixAccelBuild(gp.ctx, stream, &abo,
                                      &bi, 1,
                                      d_tmp, bs.tempSizeInBytes,
                                      d_out, bs.outputSizeInBytes,
@@ -526,7 +549,7 @@ static BVHEntry* build_bvh(
                                sizeof(size_t), cudaMemcpyDeviceToHost));
     CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&e->d_gas), compact_sz));
     e->d_gas_size = compact_sz;
-    OPTIX_CHECK_VOID(optixAccelCompact(g_pipe.ctx, stream, raw_handle,
+    OPTIX_CHECK_VOID(optixAccelCompact(gp.ctx, stream, raw_handle,
                                        e->d_gas, compact_sz, &e->handle));
     CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
 
@@ -538,9 +561,9 @@ static BVHEntry* build_bvh(
     RaygenRecord   rg_rec = {};
     MissRecord     ms_rec = {};
     HitGroupRecord hg_rec = {};
-    OPTIX_CHECK_VOID(optixSbtRecordPackHeader(g_pipe.pg_rg, &rg_rec));
-    OPTIX_CHECK_VOID(optixSbtRecordPackHeader(g_pipe.pg_ms, &ms_rec));
-    OPTIX_CHECK_VOID(optixSbtRecordPackHeader(g_pipe.pg_hg, &hg_rec));
+    OPTIX_CHECK_VOID(optixSbtRecordPackHeader(gp.pg_rg, &rg_rec));
+    OPTIX_CHECK_VOID(optixSbtRecordPackHeader(gp.pg_ms, &ms_rec));
+    OPTIX_CHECK_VOID(optixSbtRecordPackHeader(gp.pg_hg, &hg_rec));
     hg_rec.data.env_spheres = reinterpret_cast<const float4*>(e->d_env_spheres);
 
     CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&e->d_sbt_rg), sizeof(rg_rec)));
@@ -567,17 +590,18 @@ static BVHEntry* get_or_build_bvh(
     cudaStream_t stream,
     const float* d_pc, int Mp,
     float r_env, float r_robot_max,
-    const std::string& key)
+    const std::string& key,
+    int dev)
 {
     {
-        std::lock_guard<std::mutex> lk(g_bvh_mtx);
-        auto it = g_bvh_cache.find(key);
-        if (it != g_bvh_cache.end()) return it->second;
+        std::lock_guard<std::mutex> lk(g_bvh_mtx[dev]);
+        auto it = g_bvh_cache[dev].find(key);
+        if (it != g_bvh_cache[dev].end()) return it->second;
     }
-    BVHEntry* e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max);
+    BVHEntry* e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max, dev);
     if (e) {
-        std::lock_guard<std::mutex> lk(g_bvh_mtx);
-        g_bvh_cache.emplace(key, e);
+        std::lock_guard<std::mutex> lk(g_bvh_mtx[dev]);
+        g_bvh_cache[dev].emplace(key, e);
     }
     return e;
 }
@@ -596,24 +620,25 @@ struct ScratchBuffer {
     float4* ptr      = nullptr;
     size_t  capacity = 0;   // in float4 elements
 };
-static ScratchBuffer g_scratch;
-static std::mutex    g_scratch_mtx;
+static ScratchBuffer g_scratch[PYROFFI_MAX_GPUS];
+static std::mutex    g_scratch_mtx[PYROFFI_MAX_GPUS];
 
 // Returns a device buffer of at least `n` float4 elements (nullptr on failure).
-static float4* get_scratch(size_t n) {
-    std::lock_guard<std::mutex> lk(g_scratch_mtx);
-    if (n <= g_scratch.capacity) return g_scratch.ptr;
-    if (g_scratch.ptr) cudaFree(g_scratch.ptr);
+static float4* get_scratch(size_t n, int dev) {
+    ScratchBuffer& sc = g_scratch[dev];
+    std::lock_guard<std::mutex> lk(g_scratch_mtx[dev]);
+    if (n <= sc.capacity) return sc.ptr;
+    if (sc.ptr) cudaFree(sc.ptr);
     // Over-allocate (1.5x) to amortise growth across increasing batch sizes.
     size_t want = n + n / 2;
-    if (cudaMalloc(reinterpret_cast<void**>(&g_scratch.ptr),
+    if (cudaMalloc(reinterpret_cast<void**>(&sc.ptr),
                    want * sizeof(float4)) != cudaSuccess) {
-        g_scratch.ptr = nullptr;
-        g_scratch.capacity = 0;
+        sc.ptr = nullptr;
+        sc.capacity = 0;
         return nullptr;
     }
-    g_scratch.capacity = want;
-    return g_scratch.ptr;
+    sc.capacity = want;
+    return sc.ptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +682,14 @@ static ffi::Error RoboGPUCheckImpl(
     const int Mp    = static_cast<int>(point_cloud.dimensions()[0]);
 
     if (B <= 0) return ffi::Error::Success();
+
+    const int dev = robogpu_current_device();
+    if (dev < 0)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+                          "RoboGPU: failed to query CUDA device, or device "
+                          "ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a "
+                          "larger limit).");
+
     if (J > RGB_MAX_JOINTS || NL > RGB_MAX_LINKS)
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "RoboGPU: J or NL exceeds compile-time bounds "
@@ -666,7 +699,7 @@ static ffi::Error RoboGPUCheckImpl(
 
     // ── Stage 1: CUDA prepare (FK + world geom + self-collision) ─────────────
 
-    float4* d_spheres = get_scratch(static_cast<size_t>(B) * K);
+    float4* d_spheres = get_scratch(static_cast<size_t>(B) * K, dev);
     if (!d_spheres)
         return ffi::Error(ffi::ErrorCode::kInternal,
                           "RoboGPU: scratch allocation failed");
@@ -694,7 +727,7 @@ static ffi::Error RoboGPUCheckImpl(
     // ── Stage 2: OptiX BVH traversal for point cloud ─────────────────────────
     if (Mp > 0) {
         {
-            auto err = ensure_optix_pipeline();
+            auto err = ensure_optix_pipeline(dev);
             if (err.failure()) return err;
         }
 
@@ -711,7 +744,7 @@ static ffi::Error RoboGPUCheckImpl(
         std::string key(keybuf);
 
         BVHEntry* bvh = get_or_build_bvh(
-            stream, point_cloud.typed_data(), Mp, r_env, r_robot_max, key);
+            stream, point_cloud.typed_data(), Mp, r_env, r_robot_max, key, dev);
         if (!bvh)
             return ffi::Error(ffi::ErrorCode::kInternal, "RoboGPU: BVH build failed");
 
@@ -727,7 +760,7 @@ static ffi::Error RoboGPUCheckImpl(
                                    cudaMemcpyHostToDevice, stream));
 
         // OptiX launch — one raygen thread per config.
-        OPTIX_CHECK(optixLaunch(g_pipe.pipeline, stream,
+        OPTIX_CHECK(optixLaunch(g_pipe[dev].pipeline, stream,
                                 bvh->d_launch_params, sizeof(hp),
                                 &bvh->sbt,
                                 static_cast<unsigned>(B), 1, 1));
