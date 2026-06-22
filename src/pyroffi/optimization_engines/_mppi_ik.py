@@ -638,7 +638,7 @@ def _mppi_ik_solve_cuda_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> tuple[Float[Array, "n_act"], Array]:
-    from ..cuda_kernels._mppi_ik_cuda import mppi_ik_cuda
+    from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -770,7 +770,7 @@ def mppi_ik_solve_cuda(
     """CUDA MPPI+L-BFGS IK: coarse particle search then gradient refinement.
 
     Requires ``_mppi_ik_cuda_lib.so`` compiled from ``_mppi_ik_cuda_kernel.cu``:
-        bash src/pyroffi/cuda_kernels/build_mppi_ik_cuda.sh
+        bash build_kernels/build_mppi_ik_cuda.sh
 
     Stage 1 (MPPI)
         At each of ``n_mppi_iters`` iterations, ``n_particles`` Gaussian
@@ -983,7 +983,7 @@ def _mppi_ik_solve_cuda_batch_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels._mppi_ik_cuda import mppi_ik_cuda
+    from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits

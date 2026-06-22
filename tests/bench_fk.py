@@ -18,7 +18,7 @@ Usage:
 Prerequisites:
     1. A CUDA-capable GPU must be available.
     2. The CUDA FK library must be compiled:
-           bash src/pyroffi/cuda_kernels/build_fk_cuda.sh
+           bash build_kernels/build_fk_cuda.sh
     3. Local spherized URDFs must be present under ``resources/``.
 """
 

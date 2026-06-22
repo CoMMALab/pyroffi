@@ -34,10 +34,10 @@ Usage:
 Prerequisites:
     1. A CUDA-capable GPU.
     2. CUDA libraries compiled:
-           bash src/pyroffi/cuda_kernels/build_hjcd_ik_cuda.sh
-           bash src/pyroffi/cuda_kernels/build_ls_ik_cuda.sh
-           bash src/pyroffi/cuda_kernels/build_sqp_ik_cuda.sh
-           bash src/pyroffi/cuda_kernels/build_mppi_ik_cuda.sh
+           bash build_kernels/build_hjcd_ik_cuda.sh
+           bash build_kernels/build_ls_ik_cuda.sh
+           bash build_kernels/build_sqp_ik_cuda.sh
+           bash build_kernels/build_mppi_ik_cuda.sh
     3. robot_descriptions installed:
            pip install robot_descriptions
     4. (Optional) Flax model for Learned-IK:

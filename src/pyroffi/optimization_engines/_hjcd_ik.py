@@ -695,7 +695,7 @@ def _hjcd_solve_cuda_jit(
     constraint_args: tuple = (),
     constraint_weights: Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
+    from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -895,7 +895,7 @@ def hjcd_solve_cuda(
         implicit device synchronisations.
 
     Requires ``_hjcd_ik_cuda_lib.so`` to be compiled first:
-        bash src/pyroffi/cuda_kernels/build_hjcd_ik_cuda.sh
+        bash build_kernels/build_hjcd_ik_cuda.sh
 
     Kinematic constraints
         Because the CUDA kernel cannot call arbitrary Python/JAX functions,
@@ -1116,7 +1116,7 @@ def _hjcd_solve_cuda_batch_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
+    from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits

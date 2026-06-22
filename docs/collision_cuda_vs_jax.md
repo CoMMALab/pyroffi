@@ -393,8 +393,8 @@ Previously the JAX FK was called *inside* the vmap — once per batch element. N
 The CUDA backend requires two compiled shared libraries:
 
 ```bash
-bash src/pyroffi/cuda_kernels/build_fk_cuda.sh         # _fk_cuda_lib.so
-bash src/pyroffi/cuda_kernels/build_collision_cuda.sh  # _collision_cuda_lib.so
+bash build_kernels/build_fk_cuda.sh         # _fk_cuda_lib.so
+bash build_kernels/build_collision_cuda.sh  # _collision_cuda_lib.so
 ```
 
 ---

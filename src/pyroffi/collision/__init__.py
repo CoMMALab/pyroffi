@@ -21,3 +21,7 @@ from ._cuda_collision import CUDARobotCollisionChecker as CUDARobotCollisionChec
 from ._cuda_collision import CUDABinaryCollisionChecker as CUDABinaryCollisionChecker
 from ._cuda_collision import make_cuda_checker as make_cuda_checker
 from ._cuda_collision import make_cuda_binary_checker as make_cuda_binary_checker
+from ._vamp_collision import VAMPCPUCollisionChecker as VAMPCPUCollisionChecker
+from ._vamp_collision import make_vamp_cpu_checker as make_vamp_cpu_checker
+from ._robogpu_collision import RoboGPUCollisionChecker as RoboGPUCollisionChecker
+from ._robogpu_collision import make_robogpu_checker as make_robogpu_checker

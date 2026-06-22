@@ -1,7 +1,7 @@
 """Sample Panda IK configurations with end-effector coverage inside a box region using SVGD.
 
 Prerequisite:
-    bash src/pyroffi/cuda_kernels/build_svgd_region_ik_cuda.sh
+    bash build_kernels/build_svgd_region_ik_cuda.sh
 """
 
 from __future__ import annotations

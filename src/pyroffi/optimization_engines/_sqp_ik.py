@@ -447,7 +447,7 @@ def _sqp_ik_solve_cuda_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels._sqp_ik_cuda import sqp_ik_cuda
+    from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -573,7 +573,7 @@ def sqp_ik_solve_cuda(
     limits as hard QP constraints.
 
     Requires ``_sqp_ik_cuda_lib.so`` compiled from ``_sqp_ik_cuda_kernel.cu``:
-        bash src/pyroffi/cuda_kernels/build_sqp_ik_cuda.sh
+        bash build_kernels/build_sqp_ik_cuda.sh
 
     Multi-EE support
         Pass multiple end-effectors via ``target_link_indices`` (tuple) and
@@ -779,7 +779,7 @@ def _sqp_ik_solve_cuda_batch_jit(
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels._sqp_ik_cuda import sqp_ik_cuda
+    from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits

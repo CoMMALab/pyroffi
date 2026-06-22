@@ -1,7 +1,7 @@
 """Sample Panda IK configurations with end-effector coverage inside a box region using hit-and-run sampling.
 
 Prerequisite:
-    bash src/pyroffi/cuda_kernels/build_hit_and_run_ik_cuda.sh
+    bash build_kernels/build_hit_and_run_ik_cuda.sh
 """
 
 from __future__ import annotations

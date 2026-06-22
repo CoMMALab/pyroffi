@@ -116,7 +116,7 @@ def _brownian_motion_batch_select_jit(
     threads_per_block: int = 128,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """JIT-compiled CUDA batch solve + per-target restart winner selection."""
-    from ..cuda_kernels._brownian_motion_ik_cuda import brownian_motion_ik_cuda
+    from ..cuda_kernels.region_ik._brownian_motion_ik_cuda import brownian_motion_ik_cuda
 
     cfgs, errs, ee_points, target_points = brownian_motion_ik_cuda(
         seeds=seeds,
@@ -196,7 +196,7 @@ def _svgd_region_batch_select_jit(
     threads_per_block: int = 128,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """JIT-compiled SVGD CUDA batch solve + per-target restart winner selection."""
-    from ..cuda_kernels._svgd_region_ik_cuda import svgd_region_ik_cuda
+    from ..cuda_kernels.region_ik._svgd_region_ik_cuda import svgd_region_ik_cuda
 
     cfgs, errs, ee_points, target_points = svgd_region_ik_cuda(
         seeds=seeds,
@@ -895,7 +895,7 @@ def _hit_and_run_batch_select_jit(
     noise_std: float,
     threads_per_block: int = 128,
 ) -> tuple[Array, Array, Array, Array, Array]:
-    from ..cuda_kernels._hit_and_run_ik_cuda import hit_and_run_ik_cuda
+    from ..cuda_kernels.region_ik._hit_and_run_ik_cuda import hit_and_run_ik_cuda
 
     cfgs, errs, ee_points, target_points = hit_and_run_ik_cuda(
         seeds=seeds,

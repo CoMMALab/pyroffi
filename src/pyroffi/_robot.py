@@ -81,7 +81,7 @@ class Robot:
             unroll_fk: If True, unroll the JAX fori_loop over joints (ignored when use_cuda=True).
             use_cuda: If True, dispatch to an external CUDA kernel via the JAX FFI instead of
                 the default JAX implementation.  Requires ``_fk_cuda.so`` to be compiled first
-                (see ``src/pyroffi/cuda_kernels/build_fk_cuda.sh``).
+                (see ``build_kernels/build_fk_cuda.sh``).
 
         Returns:
             The SE(3) transforms of the links, ordered by `self.link.names`,
@@ -271,7 +271,7 @@ def _fk_cuda_differentiable(
     input.  Both ``jax.jvp`` and ``jax.grad`` work; differentiated calls evaluate
     the JAX FK (the FFI itself is not differentiable).
     """
-    from .cuda_kernels._fk_cuda import fk_cuda
+    from .cuda_kernels.fk._fk_cuda import fk_cuda
 
     return fk_cuda(
         cfg=cfg,
