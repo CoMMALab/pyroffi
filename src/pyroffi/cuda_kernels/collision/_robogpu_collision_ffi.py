@@ -79,6 +79,7 @@ def robogpu_collision(
     point_cloud:       Array,  # [Mp, 3]       float32
     r_env:             float,  # env sphere radius per point
     r_robot_max:       float,  # max robot sphere radius (BVH AABB expansion)
+    dynamic:           bool = False,  # refit a persistent BVH instead of rebuilding
 ) -> Array:                    # [B]           int32   1=free, 0=collision
     """Fused FK + binary collision check with OptiX point-cloud BVH traversal.
 
@@ -89,11 +90,19 @@ def robogpu_collision(
 
     Pass ``point_cloud`` with shape ``[0, 3]`` to skip the OptiX stage and
     run only the regular world geometry + self-collision check.
+
+    Set ``dynamic=True`` for streaming point clouds (e.g. a depth camera) whose
+    contents change every frame but whose size and radii stay fixed.  The OptiX
+    BVH is then *refit* in place each call rather than rebuilt, reusing the tree
+    topology — far cheaper and fully asynchronous.  The first call (and any call
+    whose point count or radii differ from the previous one) still does a full
+    build.
     """
     _load_and_register()
     B = cfg.shape[0]
     r_env_np     = np.float32(r_env)
     r_robot_np   = np.float32(r_robot_max)
+    dynamic_np   = np.int32(1 if dynamic else 0)
     return jax.ffi.ffi_call(
         _FFI_TARGET,
         jax.ShapeDtypeStruct((B,), jnp.int32),
@@ -116,7 +125,8 @@ def robogpu_collision(
         world_boxes.astype(jnp.float32),
         world_halfspaces.astype(jnp.float32),
         point_cloud.astype(jnp.float32),
-        # Scalar attributes (consumed by .Attr<float>() in the FFI handler).
+        # Scalar attributes (consumed by .Attr<>() in the FFI handler).
         r_env=r_env_np,
         r_robot_max=r_robot_np,
+        dynamic=dynamic_np,
     )

@@ -109,6 +109,7 @@ class RoboGPUCollisionChecker:
         self._wh: Optional[Array] = None
         self._wp: Array = jnp.zeros((0, 3), dtype=jnp.float32)  # point cloud
         self._r_env: float = 0.01
+        self._dynamic: bool = False  # refit a streamed BVH instead of rebuilding
         self._cached_world_id: Optional[int] = None
 
         # Per-robot JIT cache (keyed by robot object identity).
@@ -133,6 +134,7 @@ class RoboGPUCollisionChecker:
         point_cloud: Optional[Array] = None,
         *,
         r_env: float = 0.01,
+        dynamic: bool = False,
         # CAPT-compatible aliases (ignored — r_env covers all points uniformly)
         capt_r_min: float = 0.0,
         capt_r_max: float = 1.0,
@@ -147,6 +149,12 @@ class RoboGPUCollisionChecker:
                 Pass ``None`` or an empty array to use Stage 1 only.
             r_env: Radius of each environment point sphere.  Also used as
                 ``capt_r_point`` equivalent.  All points share the same radius.
+            dynamic: If True, treat the point cloud as a streaming source: the
+                cloud becomes a runtime argument to the jitted call (so XLA
+                compiles once) and the OptiX BVH is *refit* in place each frame
+                instead of rebuilt.  The point count and ``r_env`` must stay
+                fixed across frames (pad to a constant ``Mp`` when streaming a
+                camera); a change triggers a one-off full rebuild.
         """
         ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
         self._ws = jnp.array(ws_np)
@@ -160,6 +168,7 @@ class RoboGPUCollisionChecker:
         else:
             self._wp = jnp.zeros((0, 3), dtype=jnp.float32)
         self._r_env = float(r_env if r_env > 0.0 else capt_r_point)
+        self._dynamic = bool(dynamic)
 
         # Invalidate robot JIT cache so new world args are picked up.
         self._cached_robot_id = None
@@ -177,9 +186,18 @@ class RoboGPUCollisionChecker:
         world_geom: Optional[CollGeom],
         point_cloud: Optional[Array],
         r_env: float,
+        dynamic: bool,
     ) -> None:
-        """Build and cache a jax.jit'd call for this (robot, world) combination."""
-        cache_id = (id(robot), id(world_geom), id(point_cloud), r_env)
+        """Build and cache a jax.jit'd call for this (robot, world) combination.
+
+        In ``dynamic`` mode the point cloud is a runtime argument of the jitted
+        function (keyed only by shape), so a streamed cloud reuses the compiled
+        executable and the FFI refits the BVH in place.  In static mode the
+        cloud is captured as a constant and keyed by identity.
+        """
+        pc_key = (point_cloud.shape if (dynamic and point_cloud is not None)
+                  else id(point_cloud))
+        cache_id = (id(robot), id(world_geom), pc_key, r_env, dynamic)
         if cache_id == self._cached_robot_id:
             return
 
@@ -211,7 +229,7 @@ class RoboGPUCollisionChecker:
             _pc = self._wp
             _re = self._r_env
 
-        def _impl(cfg_flat):
+        def _call(cfg_flat, pc):
             j = _robot.joints
             return robogpu_collision(
                 cfg_flat,
@@ -231,12 +249,22 @@ class RoboGPUCollisionChecker:
                 world_capsules=_wc,
                 world_boxes=_wb,
                 world_halfspaces=_wh,
-                point_cloud=_pc,
+                point_cloud=pc,
                 r_env=_re,
                 r_robot_max=_r_robot,
+                dynamic=dynamic,
             )
 
-        self._jit_fn = jax.jit(_impl)
+        if dynamic:
+            # Cloud is a runtime arg: compile once, refit the BVH per frame.
+            jitted = jax.jit(_call)
+            self._jit_fn = lambda cfg_flat, pc=None: jitted(
+                cfg_flat, _pc if pc is None else
+                jnp.asarray(pc, dtype=jnp.float32).reshape(-1, 3))
+        else:
+            # Cloud is captured as a constant baked into the executable.
+            jitted = jax.jit(lambda cfg_flat: _call(cfg_flat, _pc))
+            self._jit_fn = lambda cfg_flat, pc=None: jitted(cfg_flat)
         self._cached_robot_id = cache_id
 
     # ── Public API ───────────────────────────────────────────────────────────
@@ -266,8 +294,8 @@ class RoboGPUCollisionChecker:
         cfg_flat = cfg.reshape(B, n_act)
 
         self._ensure_jit(robot, world_geom, point_cloud,
-                         r_env if r_env > 0.0 else self._r_env)
-        out = self._jit_fn(cfg_flat)
+                         r_env if r_env > 0.0 else self._r_env, self._dynamic)
+        out = self._jit_fn(cfg_flat, point_cloud)
         return out.reshape(batch_axes) if batch_axes else out.reshape(())
 
     def check_edges_collision_free(
@@ -299,8 +327,8 @@ class RoboGPUCollisionChecker:
         # Flatten [E, G, n_act] → [E*G, n_act], check all at once, then AND.
         cfg_flat = cfg.reshape(E * G, n_act)
         self._ensure_jit(robot, world_geom, point_cloud,
-                         r_env if r_env > 0.0 else self._r_env)
-        out_flat = self._jit_fn(cfg_flat)  # [E*G] int32
+                         r_env if r_env > 0.0 else self._r_env, self._dynamic)
+        out_flat = self._jit_fn(cfg_flat, point_cloud)  # [E*G] int32
         # A config is free iff ALL G waypoints are free: min over the G axis.
         out_edges = out_flat.reshape(E, G).min(axis=1)  # [E] int32
         return out_edges.reshape(tuple(edge_axes)) if edge_axes else out_edges.reshape(())

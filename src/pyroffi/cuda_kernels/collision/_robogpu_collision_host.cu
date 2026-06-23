@@ -456,13 +456,25 @@ static ffi::Error ensure_optix_pipeline(int dev) {
 // ---------------------------------------------------------------------------
 
 struct BVHEntry {
-    CUdeviceptr            d_gas = 0;       // compacted GAS
+    CUdeviceptr            d_gas = 0;       // GAS output buffer (see `updatable`)
     size_t                 d_gas_size = 0;
     OptixTraversableHandle handle = {};
 
     CUdeviceptr d_env_spheres = 0;  // [Mp, 4] float4 on device
     CUdeviceptr d_aabbs       = 0;  // [Mp] OptixAabb on device
     int         Mp = 0;
+
+    // Dynamic-refit support.  When `updatable` is true the GAS was built with
+    // OPTIX_BUILD_FLAG_ALLOW_UPDATE and is *not* compacted (a compacted GAS
+    // cannot be refit), so `d_gas` is the raw build-output buffer that
+    // optixAccelBuild(UPDATE) rewrites in place.  `d_update_tmp` is the scratch
+    // buffer reused across refits, and the radii are kept so a refit can rerun
+    // build_env_spheres_kernel with the same AABB expansion.
+    bool        updatable        = false;
+    CUdeviceptr d_update_tmp      = 0;
+    size_t      d_update_tmp_size = 0;
+    float       r_env       = 0.f;
+    float       r_robot_max = 0.f;
 
     CUdeviceptr d_launch_params = 0; // per-call (updated each call)
 
@@ -480,17 +492,90 @@ static std::mutex                                   g_bvh_mtx[PYROFFI_MAX_GPUS];
 // Build (or return cached) BVH for a given point cloud
 // ---------------------------------------------------------------------------
 
+// Fill the OptixBuildInput for a custom-primitive (AABB) GAS from an entry.
+// `geo_flags` and `aabb_ptr` must outlive the returned struct (OptiX reads
+// through the pointers), so the caller owns them.
+static OptixBuildInput make_aabb_build_input(
+    const BVHEntry* e, unsigned int& geo_flags, CUdeviceptr& aabb_ptr)
+{
+    geo_flags = OPTIX_GEOMETRY_FLAG_NONE;
+    aabb_ptr  = e->d_aabbs;
+    OptixBuildInput bi = {};
+    bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+    bi.customPrimitiveArray.aabbBuffers   = &aabb_ptr;
+    bi.customPrimitiveArray.numPrimitives = static_cast<unsigned>(e->Mp);
+    bi.customPrimitiveArray.strideInBytes = sizeof(OptixAabb);
+    bi.customPrimitiveArray.flags         = &geo_flags;
+    bi.customPrimitiveArray.numSbtRecords = 1;
+    return bi;
+}
+
+// Free every device buffer owned by an entry and the entry itself.
+static void destroy_bvh(BVHEntry* e) {
+    if (!e) return;
+    if (e->d_gas)           cudaFree(reinterpret_cast<void*>(e->d_gas));
+    if (e->d_env_spheres)   cudaFree(reinterpret_cast<void*>(e->d_env_spheres));
+    if (e->d_aabbs)         cudaFree(reinterpret_cast<void*>(e->d_aabbs));
+    if (e->d_update_tmp)    cudaFree(reinterpret_cast<void*>(e->d_update_tmp));
+    if (e->d_launch_params) cudaFree(reinterpret_cast<void*>(e->d_launch_params));
+    if (e->d_sbt_rg)        cudaFree(reinterpret_cast<void*>(e->d_sbt_rg));
+    if (e->d_sbt_ms)        cudaFree(reinterpret_cast<void*>(e->d_sbt_ms));
+    if (e->d_sbt_hg)        cudaFree(reinterpret_cast<void*>(e->d_sbt_hg));
+    delete e;
+}
+
+// Refit (OPTIX_BUILD_OPERATION_UPDATE) an existing updatable GAS in place.
+//
+// Reuses the BVH topology and only refits node AABBs to the new point cloud —
+// far cheaper than a rebuild and, crucially, fully stream-asynchronous: there
+// is no compacted-size readback, so no cudaStreamSynchronize is needed.  The
+// env-sphere buffer is rewritten in place, so the SBT (which points at it) is
+// unchanged.
+static bool refit_bvh(cudaStream_t stream, const float* d_pc, BVHEntry* e, int dev) {
+    OptiXPipeline& gp = g_pipe[dev];
+
+    const int blk = 256;
+    build_env_spheres_kernel<<<(e->Mp + blk - 1) / blk, blk, 0, stream>>>(
+        d_pc,
+        reinterpret_cast<float4*>(e->d_env_spheres),
+        reinterpret_cast<OptixAabb*>(e->d_aabbs),
+        e->r_env, e->r_env + e->r_robot_max, e->Mp);
+
+    unsigned int geo_flags; CUdeviceptr aabb_ptr;
+    OptixBuildInput bi = make_aabb_build_input(e, geo_flags, aabb_ptr);
+
+    OptixAccelBuildOptions abo = {};
+    abo.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE
+                   | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    abo.operation  = OPTIX_BUILD_OPERATION_UPDATE;
+
+    // In-place update: source and output GAS buffer are the same.
+    OptixResult r = optixAccelBuild(gp.ctx, stream, &abo, &bi, 1,
+                                    e->d_update_tmp, e->d_update_tmp_size,
+                                    e->d_gas, e->d_gas_size,
+                                    &e->handle, nullptr, 0);
+    if (r != OPTIX_SUCCESS) {
+        fprintf(stderr, "RoboGPU refit failed (code=%d)\n", (int)r);
+        return false;
+    }
+    return true;
+}
+
 static BVHEntry* build_bvh(
     cudaStream_t stream,
     const float* d_pc,    // [Mp, 3] device pointer (from JAX buffer)
     int  Mp,
     float r_env,
     float r_robot_max,
-    int  dev)
+    int  dev,
+    bool updatable)
 {
     OptiXPipeline& gp = g_pipe[dev];
     BVHEntry* e = new BVHEntry{};
-    e->Mp = Mp;
+    e->Mp          = Mp;
+    e->updatable   = updatable;
+    e->r_env       = r_env;
+    e->r_robot_max = r_robot_max;
 
     CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&e->d_env_spheres),
                                (size_t)Mp * sizeof(float4)));
@@ -507,55 +592,69 @@ static BVHEntry* build_bvh(
     CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
 
     // GAS build
-    unsigned int geo_flags = OPTIX_GEOMETRY_FLAG_NONE;
-    CUdeviceptr  aabb_ptr  = e->d_aabbs;
-
-    OptixBuildInput bi = {};
-    bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
-    bi.customPrimitiveArray.aabbBuffers   = &aabb_ptr;
-    bi.customPrimitiveArray.numPrimitives = static_cast<unsigned>(Mp);
-    bi.customPrimitiveArray.strideInBytes = sizeof(OptixAabb);
-    bi.customPrimitiveArray.flags         = &geo_flags;
-    bi.customPrimitiveArray.numSbtRecords = 1;
+    unsigned int geo_flags; CUdeviceptr aabb_ptr;
+    OptixBuildInput bi = make_aabb_build_input(e, geo_flags, aabb_ptr);
 
     OptixAccelBuildOptions abo = {};
-    abo.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION
+    // An updatable GAS is kept uncompacted so it can be refit in place; a
+    // static GAS is compacted to minimise traversal memory.
+    abo.buildFlags = (updatable ? OPTIX_BUILD_FLAG_ALLOW_UPDATE
+                                : OPTIX_BUILD_FLAG_ALLOW_COMPACTION)
                    | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     abo.operation  = OPTIX_BUILD_OPERATION_BUILD;
 
     OptixAccelBufferSizes bs = {};
     OPTIX_CHECK_VOID(optixAccelComputeMemoryUsage(gp.ctx, &abo, &bi, 1, &bs));
 
-    CUdeviceptr d_tmp = 0, d_out = 0, d_compact_sz = 0;
+    CUdeviceptr d_tmp = 0, d_out = 0;
     CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_tmp), bs.tempSizeInBytes));
     CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_out), bs.outputSizeInBytes));
-    CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_compact_sz), sizeof(size_t)));
 
-    OptixAccelEmitDesc emit = {};
-    emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    emit.result = d_compact_sz;
+    if (updatable) {
+        // No compaction: keep the build-output buffer as the live GAS and a
+        // persistent refit-scratch buffer for subsequent UPDATE operations.
+        e->d_gas             = d_out;
+        e->d_gas_size        = bs.outputSizeInBytes;
+        e->d_update_tmp_size = bs.tempUpdateSizeInBytes;
+        CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&e->d_update_tmp),
+                                   e->d_update_tmp_size));
 
-    OptixTraversableHandle raw_handle = {};
-    OPTIX_CHECK_VOID(optixAccelBuild(gp.ctx, stream, &abo,
-                                     &bi, 1,
-                                     d_tmp, bs.tempSizeInBytes,
-                                     d_out, bs.outputSizeInBytes,
-                                     &raw_handle, &emit, 1));
-    CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+        OPTIX_CHECK_VOID(optixAccelBuild(gp.ctx, stream, &abo, &bi, 1,
+                                         d_tmp, bs.tempSizeInBytes,
+                                         d_out, bs.outputSizeInBytes,
+                                         &e->handle, nullptr, 0));
+        CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_tmp)));
+    } else {
+        CUdeviceptr d_compact_sz = 0;
+        CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_compact_sz), sizeof(size_t)));
 
-    size_t compact_sz = 0;
-    CUDA_CHECK_VOID(cudaMemcpy(&compact_sz,
-                               reinterpret_cast<void*>(d_compact_sz),
-                               sizeof(size_t), cudaMemcpyDeviceToHost));
-    CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&e->d_gas), compact_sz));
-    e->d_gas_size = compact_sz;
-    OPTIX_CHECK_VOID(optixAccelCompact(gp.ctx, stream, raw_handle,
-                                       e->d_gas, compact_sz, &e->handle));
-    CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+        OptixAccelEmitDesc emit = {};
+        emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+        emit.result = d_compact_sz;
 
-    CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_tmp)));
-    CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_out)));
-    CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_compact_sz)));
+        OptixTraversableHandle raw_handle = {};
+        OPTIX_CHECK_VOID(optixAccelBuild(gp.ctx, stream, &abo,
+                                         &bi, 1,
+                                         d_tmp, bs.tempSizeInBytes,
+                                         d_out, bs.outputSizeInBytes,
+                                         &raw_handle, &emit, 1));
+        CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+
+        size_t compact_sz = 0;
+        CUDA_CHECK_VOID(cudaMemcpy(&compact_sz,
+                                   reinterpret_cast<void*>(d_compact_sz),
+                                   sizeof(size_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&e->d_gas), compact_sz));
+        e->d_gas_size = compact_sz;
+        OPTIX_CHECK_VOID(optixAccelCompact(gp.ctx, stream, raw_handle,
+                                           e->d_gas, compact_sz, &e->handle));
+        CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+
+        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_tmp)));
+        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_out)));
+        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_compact_sz)));
+    }
 
     // Build SBT
     RaygenRecord   rg_rec = {};
@@ -598,11 +697,51 @@ static BVHEntry* get_or_build_bvh(
         auto it = g_bvh_cache[dev].find(key);
         if (it != g_bvh_cache[dev].end()) return it->second;
     }
-    BVHEntry* e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max, dev);
+    BVHEntry* e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max, dev,
+                            /*updatable=*/false);
     if (e) {
         std::lock_guard<std::mutex> lk(g_bvh_mtx[dev]);
         g_bvh_cache[dev].emplace(key, e);
     }
+    return e;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic BVH: a single updatable GAS per device, refit on every call.
+//
+// Intended for streaming point clouds (e.g. a depth camera) where the cloud
+// changes every frame but its size and the query radii stay fixed.  Instead of
+// rebuilding (and recompacting) the BVH each frame — which the pointer-keyed
+// static cache would do, since every frame is a fresh JAX buffer — we keep one
+// persistent updatable GAS and refit it in place.  The refit reuses the
+// existing tree topology, so the per-frame cost drops to an AABB refit and is
+// fully asynchronous on the stream.
+//
+// If the point count or radii change, the topology assumption breaks, so we
+// tear the GAS down and rebuild it (the next frame refits the new tree).
+// ---------------------------------------------------------------------------
+
+static BVHEntry* g_dyn_bvh[PYROFFI_MAX_GPUS] = {};
+
+static BVHEntry* get_or_update_dynamic_bvh(
+    cudaStream_t stream,
+    const float* d_pc, int Mp,
+    float r_env, float r_robot_max,
+    int dev)
+{
+    std::lock_guard<std::mutex> lk(g_bvh_mtx[dev]);
+    BVHEntry* e = g_dyn_bvh[dev];
+
+    const bool reusable = e && e->updatable && e->Mp == Mp
+                       && e->r_env == r_env && e->r_robot_max == r_robot_max;
+    if (reusable) {
+        refit_bvh(stream, d_pc, e, dev);
+        return e;
+    }
+
+    if (e) { destroy_bvh(e); g_dyn_bvh[dev] = nullptr; }
+    e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max, dev, /*updatable=*/true);
+    g_dyn_bvh[dev] = e;
     return e;
 }
 
@@ -667,6 +806,7 @@ static ffi::Error RoboGPUCheckImpl(
     ffi::Buffer<ffi::DataType::F32> point_cloud,       // [Mp, 3]
     float r_env,
     float r_robot_max,
+    int32_t dynamic,                                   // 1 = refit, 0 = rebuild
     ffi::Result<ffi::Buffer<ffi::DataType::S32>> out   // [B]
 ) {
     const int B     = static_cast<int>(cfg.dimensions()[0]);
@@ -743,8 +883,11 @@ static ffi::Error RoboGPUCheckImpl(
                  Mp, (double)r_env, (double)r_robot_max);
         std::string key(keybuf);
 
-        BVHEntry* bvh = get_or_build_bvh(
-            stream, point_cloud.typed_data(), Mp, r_env, r_robot_max, key, dev);
+        BVHEntry* bvh = dynamic
+            ? get_or_update_dynamic_bvh(stream, point_cloud.typed_data(), Mp,
+                                        r_env, r_robot_max, dev)
+            : get_or_build_bvh(stream, point_cloud.typed_data(), Mp,
+                               r_env, r_robot_max, key, dev);
         if (!bvh)
             return ffi::Error(ffi::ErrorCode::kInternal, "RoboGPU: BVH build failed");
 
@@ -797,4 +940,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // point_cloud [Mp, 3]
         .Attr<float>("r_env")
         .Attr<float>("r_robot_max")
+        .Attr<int32_t>("dynamic")                 // 1=refit BVH, 0=rebuild/cache
         .Ret<ffi::Buffer<ffi::DataType::S32>>()); // out [B]
