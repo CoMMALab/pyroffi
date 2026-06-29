@@ -814,17 +814,36 @@ class RobotCollisionSpherized:
         Author: Sai Coumar
         """
 
-        # 1. Transform all spheres to world frame
-        coll = self.at_config(robot, cfg)  # CollGeom: (*batch, n_spheres, num_links)
+        # 1. Transform all spheres to world frame.
+        coll = self.at_config(robot, cfg)  # CollGeom batch axes: (*batch, S, N)
 
-        # 2. Compute pairwise distances
-        dist_matrix = pairwise_collide(coll, coll)
+        # 2. Signed distance between every Sᵢ×Sⱼ sphere pair of each active link
+        #    pair.  A link carries up to S spheres, so the closest contact between
+        #    two links can be between spheres at *different* slot indices.  We
+        #    therefore take the full cross product over both sphere axes; reducing
+        #    only the matched-index (diagonal) spheres — as a naive
+        #    `pairwise_collide(coll, coll)` over the link axis does — silently
+        #    misses cross-index overlaps and under-reports self-collision.
+        centers = coll.pose.translation()  # [*batch, S, N, 3]
+        radii = coll.radius                # [*batch, S, N]
+        li, lj = self.active_idx_i, self.active_idx_j  # [P], [P]
 
-        # 3. Collapse dimensionality by taking the min distance per link pair. If it is in collision, the spheres in the most collision will dominate. If nothing is in collision, it will be activaation_dist for the entire link
-        dist_matrix_links = jnp.min(dist_matrix, axis=0)
-        del dist_matrix
-        # Return same format of active_distances as the capsule implementaiton
-        active_distances = dist_matrix_links[..., self.active_idx_i, self.active_idx_j]
+        ci = centers[..., :, li, :]        # [*batch, S, P, 3]
+        cj = centers[..., :, lj, :]        # [*batch, S, P, 3]
+        ri = radii[..., :, li]             # [*batch, S, P]
+        rj = radii[..., :, lj]             # [*batch, S, P]
+
+        # Broadcast the two sphere axes against each other: [*batch, Si, Sj, P].
+        diff = ci[..., :, None, :, :] - cj[..., None, :, :, :]
+        dist = jnp.linalg.norm(diff, axis=-1) - (ri[..., :, None, :] + rj[..., None, :, :])
+
+        # Padding spheres carry a negative-radius sentinel; mask them out of the
+        # min so they neither create nor mask a contact.
+        valid = (ri[..., :, None, :] >= 0) & (rj[..., None, :, :] >= 0)
+        dist = jnp.where(valid, dist, jnp.inf)
+
+        # 3. Min over both sphere axes → one signed distance per active link pair.
+        active_distances = jnp.min(dist, axis=(-3, -2))  # [*batch, P]
         return active_distances
 
     @staticmethod
