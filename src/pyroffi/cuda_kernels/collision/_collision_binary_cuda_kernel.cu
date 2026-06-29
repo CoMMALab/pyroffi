@@ -49,6 +49,50 @@ namespace ffi = xla::ffi;
 #define BCC_MAX_LINKS  64
 #define BCC_THREADS    64
 
+// Under jax.pmap each visible GPU is driven by its own host thread running this
+// same handler concurrently.  The CUDA graph exec is device-local state, so it
+// must be kept per-device and indexed by the current CUDA device ordinal — a
+// shared cache would race across device threads and replay one device's graph
+// on another (illegal access).  Mirrors _fk_cuda_kernel.cu / _collision_cuda_kernel.cu.
+static constexpr int PYROFFI_MAX_GPUS = 16;
+
+// Single-kernel CUDA graph cache for the binary collision FFI handler.  The
+// captured graph holds exactly one kernel node; on a shape-matching call we only
+// rewrite that node's parameters (pointers + scalar counts) and relaunch,
+// amortising the per-call driver launch overhead.  The shape fingerprint folds
+// in every dimension that affects the grid or the kernel's compile-time-constant
+// loop bounds, so a change forces a clean recapture.
+struct BinaryCollGraphCache {
+    cudaGraphExec_t exec        = nullptr;
+    cudaGraph_t     graph       = nullptr;  // kept alive for node queries
+    cudaGraphNode_t kernel_node = nullptr;
+
+    int B = -1, n_act = -1, J = -1, NL = -1;
+    int Kf = -1, Kc = -1, Pf = -1, Pc = -1;
+    int Ms = -1, Mc = -1, Mb = -1, Mh = -1;
+
+    bool shape_matches(int b, int na, int j, int nl, int kf, int kc,
+                       int pf, int pc, int ms, int mc, int mb, int mh) const noexcept {
+        return b == B && na == n_act && j == J && nl == NL &&
+               kf == Kf && kc == Kc && pf == Pf && pc == Pc &&
+               ms == Ms && mc == Mc && mb == Mb && mh == Mh;
+    }
+
+    void invalidate() noexcept {
+        if (exec)  { cudaGraphExecDestroy(exec);  exec  = nullptr; }
+        if (graph) { cudaGraphDestroy(graph);     graph = nullptr; }
+        kernel_node = nullptr;
+        B = n_act = J = NL = Kf = Kc = Pf = Pc = Ms = Mc = Mb = Mh = -1;
+    }
+
+    void store_shape(int b, int na, int j, int nl, int kf, int kc,
+                     int pf, int pc, int ms, int mc, int mb, int mh) noexcept {
+        B = b; n_act = na; J = j; NL = nl;
+        Kf = kf; Kc = kc; Pf = pf; Pc = pc;
+        Ms = ms; Mc = mc; Mb = mb; Mh = mh;
+    }
+};
+
 // ── Device predicate: robot sphere vs. the whole environment ──────────────────
 //
 // Returns true on the first obstacle found in collision (distance < 0).  Walking
@@ -312,22 +356,119 @@ static ffi::Error CollisionBinaryImpl(
             "increase the bounds and rebuild.");
     }
 
-    binary_collision_kernel<<<B, BCC_THREADS, 0, stream>>>(
-        cfg.typed_data(), twists.typed_data(), parent_tf.typed_data(),
-        parent_idx.typed_data(), act_idx.typed_data(),
-        mimic_mul.typed_data(), mimic_off.typed_data(), mimic_act_idx.typed_data(),
-        topo_inv.typed_data(), link_parent_joint.typed_data(),
-        f_local.typed_data(), c_local.typed_data(),
-        world_spheres.typed_data(), world_capsules.typed_data(),
-        world_boxes.typed_data(), world_halfspaces.typed_data(),
-        f_pair_i.typed_data(), f_pair_j.typed_data(),
-        c_pair_i.typed_data(), c_pair_j.typed_data(),
-        out->typed_data(),
-        B, n_act, J, NL, Kf, Kc, Pf, Pc, Ms, Mc, Mb, Mh);
+    // Per-device graph cache (see BinaryCollGraphCache / PYROFFI_MAX_GPUS).
+    static BinaryCollGraphCache cache_pool[PYROFFI_MAX_GPUS];
+    int _dev = 0;
+    cudaGetDevice(&_dev);
+    if (_dev < 0 || _dev >= PYROFFI_MAX_GPUS)
+        return ffi::Error(ffi::ErrorCode::kInternal,
+            "CUDA device ordinal exceeds PYROFFI_MAX_GPUS (rebuild with a larger limit).");
+    BinaryCollGraphCache& cache = cache_pool[_dev];
 
-    const cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess)
-        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(err));
+    // Kernel argument values, held in locals so their addresses stay valid for
+    // both the capture launch and cudaGraphExecKernelNodeSetParams.  The order
+    // MUST match binary_collision_kernel's parameter list exactly.
+    void* p_cfg   = const_cast<float*>(cfg.typed_data());
+    void* p_tw    = const_cast<float*>(twists.typed_data());
+    void* p_ptf   = const_cast<float*>(parent_tf.typed_data());
+    void* p_pidx  = const_cast<int*>(parent_idx.typed_data());
+    void* p_aidx  = const_cast<int*>(act_idx.typed_data());
+    void* p_mmul  = const_cast<float*>(mimic_mul.typed_data());
+    void* p_moff  = const_cast<float*>(mimic_off.typed_data());
+    void* p_midx  = const_cast<int*>(mimic_act_idx.typed_data());
+    void* p_topo  = const_cast<int*>(topo_inv.typed_data());
+    void* p_lpj   = const_cast<int*>(link_parent_joint.typed_data());
+    void* p_floc  = const_cast<float*>(f_local.typed_data());
+    void* p_cloc  = const_cast<float*>(c_local.typed_data());
+    void* p_ws    = const_cast<float*>(world_spheres.typed_data());
+    void* p_wc    = const_cast<float*>(world_capsules.typed_data());
+    void* p_wb    = const_cast<float*>(world_boxes.typed_data());
+    void* p_wh    = const_cast<float*>(world_halfspaces.typed_data());
+    void* p_fpi   = const_cast<int*>(f_pair_i.typed_data());
+    void* p_fpj   = const_cast<int*>(f_pair_j.typed_data());
+    void* p_cpi   = const_cast<int*>(c_pair_i.typed_data());
+    void* p_cpj   = const_cast<int*>(c_pair_j.typed_data());
+    void* p_out   = out->typed_data();
+    int aB = B, aN = n_act, aJ = J, aNL = NL, aKf = Kf, aKc = Kc,
+        aPf = Pf, aPc = Pc, aMs = Ms, aMc = Mc, aMb = Mb, aMh = Mh;
+    void* kargs[] = {
+        &p_cfg, &p_tw, &p_ptf, &p_pidx, &p_aidx, &p_mmul, &p_moff, &p_midx,
+        &p_topo, &p_lpj, &p_floc, &p_cloc, &p_ws, &p_wc, &p_wb, &p_wh,
+        &p_fpi, &p_fpj, &p_cpi, &p_cpj, &p_out,
+        &aB, &aN, &aJ, &aNL, &aKf, &aKc, &aPf, &aPc, &aMs, &aMc, &aMb, &aMh,
+    };
+
+    const dim3 grid(static_cast<unsigned>(B), 1u, 1u);
+    const dim3 block(BCC_THREADS, 1u, 1u);
+
+    if (!cache.shape_matches(B, n_act, J, NL, Kf, Kc, Pf, Pc, Ms, Mc, Mb, Mh)) {
+        // ── Cold path: capture a fresh single-kernel graph on the XLA stream ──
+        cache.invalidate();
+
+        cudaError_t e = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+
+        binary_collision_kernel<<<grid, block, 0, stream>>>(
+            cfg.typed_data(), twists.typed_data(), parent_tf.typed_data(),
+            parent_idx.typed_data(), act_idx.typed_data(),
+            mimic_mul.typed_data(), mimic_off.typed_data(), mimic_act_idx.typed_data(),
+            topo_inv.typed_data(), link_parent_joint.typed_data(),
+            f_local.typed_data(), c_local.typed_data(),
+            world_spheres.typed_data(), world_capsules.typed_data(),
+            world_boxes.typed_data(), world_halfspaces.typed_data(),
+            f_pair_i.typed_data(), f_pair_j.typed_data(),
+            c_pair_i.typed_data(), c_pair_j.typed_data(),
+            out->typed_data(),
+            B, n_act, J, NL, Kf, Kc, Pf, Pc, Ms, Mc, Mb, Mh);
+
+        e = cudaGetLastError();
+        if (e != cudaSuccess) {
+            cudaStreamEndCapture(stream, nullptr);
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        e = cudaStreamEndCapture(stream, &cache.graph);
+        if (e != cudaSuccess) {
+            cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        size_t n_nodes = 1;
+        e = cudaGraphGetNodes(cache.graph, &cache.kernel_node, &n_nodes);
+        if (e != cudaSuccess || n_nodes == 0) {
+            cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal,
+                (e != cudaSuccess) ? cudaGetErrorString(e)
+                                   : "binary collision graph capture produced no kernel node.");
+        }
+
+        e = cudaGraphInstantiate(&cache.exec, cache.graph, nullptr, nullptr, 0);
+        if (e != cudaSuccess) {
+            cache.invalidate();
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+        }
+
+        cache.store_shape(B, n_act, J, NL, Kf, Kc, Pf, Pc, Ms, Mc, Mb, Mh);
+    } else {
+        // ── Warm path: same shape — rewrite the node's pointers/scalars only ──
+        cudaKernelNodeParams kp = {};
+        kp.func = reinterpret_cast<void*>(&binary_collision_kernel);
+        kp.gridDim = grid;
+        kp.blockDim = block;
+        kp.sharedMemBytes = 0;
+        kp.kernelParams = kargs;
+        kp.extra = nullptr;
+
+        const cudaError_t e =
+            cudaGraphExecKernelNodeSetParams(cache.exec, cache.kernel_node, &kp);
+        if (e != cudaSuccess)
+            return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+    }
+
+    const cudaError_t launch_err = cudaGraphLaunch(cache.exec, stream);
+    if (launch_err != cudaSuccess)
+        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(launch_err));
     return ffi::Error::Success();
 }
 

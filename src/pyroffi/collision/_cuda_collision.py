@@ -58,6 +58,7 @@ from ..cuda_kernels.collision._collision_cuda_ffi import (
 from ..cuda_kernels.collision._collision_binary_cuda_ffi import (
     _load_and_register as _load_and_register_binary,
     collision_binary,
+    eager_pmap_batch,
 )
 
 if TYPE_CHECKING:
@@ -1008,7 +1009,13 @@ class CUDABinaryCollisionChecker:
         B = int(np.prod(batch_axes)) if batch_axes else 1
         cfg_flat = cfg.reshape(B, n_act)
 
-        free = self._jit_binary(cfg_flat, self._ws, self._wc, self._wb, self._wh)
+        # Eager call: split the B configs across all local GPUs (pad-then-trim);
+        # the world arrays are broadcast unchanged to every device.  Inside a
+        # jit/vmap/pmap trace this transparently falls back to a single call
+        # (the surrounding transform owns device placement).
+        free = eager_pmap_batch(
+            self._jit_binary, cfg_flat, self._ws, self._wc, self._wb, self._wh
+        )
         free = free.reshape(batch_axes) if batch_axes else free.reshape(())
         return free != 0
 
