@@ -175,6 +175,71 @@ def _crba_single(dyn: DynamicsInfo, q: Array) -> Array:
     return M
 
 
+def _aba_single(
+    dyn: DynamicsInfo,
+    q: Array,
+    qd: Array,
+    tau: Array,
+    gravity: Array | float,
+) -> Array:
+    """Joint accelerations via the O(n) Articulated Body Algorithm.
+
+    Mirrors GRiD's ABA (Featherstone, Ch. 7), angular-first spatial vectors,
+    including viscous joint damping so it matches the CRBA/RNEA formulation
+    ``qdd = M^-1 (tau - RNEA(q, qd, 0))``.
+    """
+    n = dyn.num_dof
+    order = _topological_dof_order(dyn)
+    Xup = _compute_Xup(dyn, q)
+
+    # Gravity trick: base acceleration = -a_g.
+    a_base = jnp.concatenate(
+        [jnp.zeros(3), jnp.array([0.0, 0.0, 1.0]) * (-jnp.asarray(gravity))]
+    )
+
+    # --- Pass 1: velocities, velocity-product accelerations, bias forces. ---
+    v: list[Array | None] = [None] * n
+    c: list[Array | None] = [None] * n
+    IA: list[Array] = [dyn.I_body[i] for i in range(n)]
+    pA: list[Array | None] = [None] * n
+    for i in order:
+        p = dyn.parent_dof_indices[i]
+        vJ = dyn.S[i] * qd[i]
+        if p == -1:
+            v[i] = vJ
+            c[i] = jnp.zeros(6)
+        else:
+            v[i] = Xup[i] @ v[p] + vJ
+            c[i] = _crm(v[i]) @ vJ
+        pA[i] = _crf(v[i]) @ (dyn.I_body[i] @ v[i])
+
+    # --- Pass 2: articulated inertias and bias forces, tip to base. ---
+    U: list[Array | None] = [None] * n
+    D: list[Array | None] = [None] * n
+    u: list[Array | None] = [None] * n
+    for i in reversed(order):
+        p = dyn.parent_dof_indices[i]
+        U[i] = IA[i] @ dyn.S[i]
+        D[i] = dyn.S[i] @ U[i]
+        u[i] = tau[i] - dyn.damping[i] * qd[i] - dyn.S[i] @ pA[i]
+        if p != -1:
+            Ia = IA[i] - jnp.outer(U[i], U[i]) / D[i]
+            pa = pA[i] + Ia @ c[i] + U[i] * (u[i] / D[i])
+            IA[p] = IA[p] + Xup[i].T @ Ia @ Xup[i]
+            pA[p] = pA[p] + Xup[i].T @ pa
+
+    # --- Pass 3: accelerations, base to tip. ---
+    a: list[Array | None] = [None] * n
+    qdd = jnp.zeros(n)
+    for i in order:
+        p = dyn.parent_dof_indices[i]
+        a_prime = (Xup[i] @ a_base if p == -1 else Xup[i] @ a[p]) + c[i]
+        qdd_i = (u[i] - U[i] @ a_prime) / D[i]
+        qdd = qdd.at[i].set(qdd_i)
+        a[i] = a_prime + dyn.S[i] * qdd_i
+    return qdd
+
+
 def _batched(fn, dyn, *arrays, out_extra_dims: int = 0):
     """Flatten arbitrary leading batch dims, vmap ``fn``, reshape back."""
     n = dyn.num_dof
@@ -218,15 +283,16 @@ def forward_dynamics_jax(
     tau: Float[Array, "*batch n_dof"],
     gravity: float = _DEFAULT_GRAVITY,
 ) -> Float[Array, "*batch n_dof"]:
-    """Joint accelerations from state and torques: qdd = M(q)^-1 (tau - bias).
+    """Joint accelerations from state and torques via the O(n) ABA.
 
     Matches GRiD's forward dynamics formulation
-    ``qdd = Minv @ (u - RNEA(q, qd, 0))``.
+    ``qdd = Minv @ (u - RNEA(q, qd, 0))``, computed with the Articulated Body
+    Algorithm rather than an explicit mass-matrix solve.
     """
-
-    def _fd(d, q_, qd_, tau_):
-        bias = _rnea_single(d, q_, qd_, jnp.zeros_like(q_), gravity)
-        M = _crba_single(d, q_)
-        return jnp.linalg.solve(M, tau_ - bias)
-
-    return _batched(_fd, dyn, q, qd, tau)
+    return _batched(
+        lambda d, q_, qd_, tau_: _aba_single(d, q_, qd_, tau_, gravity),
+        dyn,
+        q,
+        qd,
+        tau,
+    )
