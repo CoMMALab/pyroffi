@@ -8,6 +8,9 @@ from ._mppi_ik import mppi_ik_solve_cuda as mppi_ik_solve_cuda
 from ._region_ik import brownian_motion_sample_box_region_cuda as brownian_motion_sample_box_region_cuda
 from ._region_ik import svgd_sample_box_region_cuda as svgd_sample_box_region_cuda
 from ._region_ik import hit_and_run_sample_box_region_cuda as hit_and_run_sample_box_region_cuda
+from ._region_ik import direct_sample_box_region_cuda as direct_sample_box_region_cuda
+from ._region_ik_jax import direct_sample_box_region_jax as direct_sample_box_region_jax
+from ._region_ik_jax import svgd_sample_box_region_jax as svgd_sample_box_region_jax
 from ._learned_ik import (
     IKFlowNet as IKFlowNet,
     encode_pose as encode_pose,
