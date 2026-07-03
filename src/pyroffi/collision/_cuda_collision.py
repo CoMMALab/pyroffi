@@ -45,7 +45,7 @@ import numpy as np
 from jaxtyping import Array, Float
 from loguru import logger
 
-from ._geometry import Box, Capsule, CollGeom, HalfSpace, Sphere
+from ._geometry import Box, Capsule, CollGeom, HalfSpace, Heightmap, Sphere
 from ._robot_collision import RobotCollision, RobotCollisionSpherized
 from ..cuda_kernels.collision._collision_cuda_ffi import (
     _load_and_register,
@@ -166,9 +166,18 @@ def _extract_world_arrays(
         halfspaces = np.concatenate([normals, points], axis=-1)      # (M, 6)
         return empty_s, empty_c, empty_b, halfspaces
 
+    if isinstance(world_geom, Heightmap):
+        raise NotImplementedError(
+            "Cannot convert a Heightmap to collision-checker world buffers: neither "
+            "the CUDA binary checker nor the VAMP backend has a heightmap primitive. "
+            "Approximate the surface with Boxes (or a point cloud for the VAMP "
+            "backend) before calling set_world()."
+        )
+
     raise NotImplementedError(
-        f"CUDA backend does not support world_geom of type {type(world_geom).__name__}. "
-        "Supported: Sphere, Capsule, Box, HalfSpace."
+        f"Cannot convert world_geom of type {type(world_geom).__name__!r} to "
+        "collision-checker world buffers. Supported geometries: Sphere, Capsule, "
+        "Box, HalfSpace (HalfSpace is CUDA-only; the VAMP backend rejects it)."
     )
 
 
