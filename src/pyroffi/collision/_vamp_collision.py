@@ -187,6 +187,13 @@ def _preload_runtime_libs() -> None:
 # Registered (target_name) per (robot hash, kind) so we only register once.
 _REGISTERED: dict[str, str] = {}
 
+# JIT sessions pinned for the lifetime of the process. XLA FFI targets cannot
+# be unregistered, so the JIT-owned code behind them must never be freed --
+# storing the session only on a checker instance lets a garbage-collected
+# checker take the code with it and leaves later checkers (which skip
+# re-registration via _REGISTERED) calling a dangling pointer.
+_SESSIONS: dict[str, object] = {}
+
 
 class VAMPCPUCollisionChecker:
     """JIT-compiled VAMP CPU collision checker with batch edge validation.
@@ -298,9 +305,8 @@ class VAMPCPUCollisionChecker:
             # Keep the session alive for the process lifetime: the JIT-owned code
             # must outlive every FFI call into it.
             _REGISTERED[self._key] = self._configs_target
-            self._session = session
-        else:
-            self._session = None
+            _SESSIONS[self._key] = session
+        self._session = _SESSIONS[self._key]
 
         # World geometry cache (mirrors the CUDA checkers).
         self._ws = np.zeros((0, 4), dtype=np.float32)

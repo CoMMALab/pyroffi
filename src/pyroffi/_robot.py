@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import functools
-
-import jax
 import jax_dataclasses as jdc
 import jaxlie
 import jaxls
@@ -12,7 +9,10 @@ from jax import numpy as jnp
 from jax.typing import ArrayLike
 from jaxtyping import Float
 
-from ._robot_urdf_parser import JointInfo, LinkInfo, RobotURDFParser
+from loguru import logger
+
+from ._robot_urdf_parser import DynamicsInfo, JointInfo, LinkInfo, RobotURDFParser
+from . import kinematics as _kinematics
 
 
 @jdc.pytree_dataclass
@@ -27,6 +27,10 @@ class Robot:
 
     joint_var_cls: jdc.Static[type[jaxls.Var[Array]]]
     """Variable class for the robot configuration."""
+
+    dynamics: DynamicsInfo | None = None
+    """Rigid body dynamics information (None when the URDF lacks inertials
+    or contains unsupported features such as mimic joints)."""
 
     @staticmethod
     def from_urdf(
@@ -56,10 +60,17 @@ class Robot:
             default_factory=lambda: default_joint_cfg,
         ): ...
 
+        try:
+            dynamics = RobotURDFParser.parse_dynamics(urdf)
+        except NotImplementedError as e:
+            logger.warning(f"Dynamics unavailable for this URDF: {e}")
+            dynamics = None
+
         robot = Robot(
             joints=joints,
             links=links,
             joint_var_cls=JointVar,
+            dynamics=dynamics,
         )
 
         return robot
@@ -87,15 +98,7 @@ class Robot:
             The SE(3) transforms of the links, ordered by `self.link.names`,
             in the format `(*batch, link_count, wxyz_xyz)`.
         """
-        batch_axes = cfg.shape[:-1]
-        assert cfg.shape == (*batch_axes, self.joints.num_actuated_joints)
-
-        if use_cuda:
-            Ts_world_joint = _fk_cuda_differentiable(cfg, self, unroll_fk)
-        else:
-            Ts_world_joint = self._forward_kinematics_joints(cfg, unroll_fk)
-
-        return self._link_poses_from_joint_poses(Ts_world_joint)
+        return _kinematics.forward_kinematics(self, cfg, unroll_fk, use_cuda)
 
     @jdc.jit
     def inverse_kinematics(
@@ -142,18 +145,10 @@ class Robot:
         Returns:
             Best joint configuration found, shape ``(n_actuated_joints,)``.
         """
-        from .optimization_engines._hjcd_ik import hjcd_solve
-
-        if rng_key is None:
-            rng_key = jax.random.PRNGKey(0)
-        if previous_cfg is None:
-            previous_cfg = (self.joints.lower_limits + self.joints.upper_limits) / 2
-
-        target_link_index = self.links.names.index(target_link_name)
-        return hjcd_solve(
-            robot=self,
-            target_link_indices=(target_link_index,),
-            target_poses=(target_pose,),
+        return _kinematics.inverse_kinematics(
+            self,
+            target_link_name,
+            target_pose,
             rng_key=rng_key,
             previous_cfg=previous_cfg,
             num_seeds=num_seeds,
@@ -166,137 +161,54 @@ class Robot:
             fixed_joint_mask=fixed_joint_mask,
         )
 
+    @jdc.jit
+    def inverse_dynamics(
+        self,
+        q: Float[Array, "*batch n_act_joints"],
+        qd: Float[Array, "*batch n_act_joints"],
+        qdd: Float[Array, "*batch n_act_joints"],
+        gravity: jdc.Static[float] = -9.81,
+    ) -> Float[Array, "*batch n_act_joints"]:
+        """Joint torques realizing ``qdd`` at state ``(q, qd)`` (RNEA + viscous damping).
+
+        Pure-JAX implementation; for large batches see
+        ``pyroffi.dynamics.GRiDDynamics`` (CUDA, with analytic gradients).
+        """
+        from . import dynamics as _dynamics
+
+        return _dynamics.inverse_dynamics(self, q, qd, qdd, gravity)
+
+    @jdc.jit
+    def forward_dynamics(
+        self,
+        q: Float[Array, "*batch n_act_joints"],
+        qd: Float[Array, "*batch n_act_joints"],
+        tau: Float[Array, "*batch n_act_joints"],
+        gravity: jdc.Static[float] = -9.81,
+    ) -> Float[Array, "*batch n_act_joints"]:
+        """Joint accelerations produced by torques ``tau`` at state ``(q, qd)``."""
+        from . import dynamics as _dynamics
+
+        return _dynamics.forward_dynamics(self, q, qd, tau, gravity)
+
+    @jdc.jit
+    def mass_matrix(
+        self,
+        q: Float[Array, "*batch n_act_joints"],
+    ) -> Float[Array, "*batch n_act_joints n_act_joints"]:
+        """Joint-space mass matrix M(q) via the composite rigid body algorithm."""
+        from . import dynamics as _dynamics
+
+        return _dynamics.mass_matrix(self, q)
+
     def _link_poses_from_joint_poses(
         self, Ts_world_joint: Float[Array, "*batch actuated_count 7"]
     ) -> Float[Array, "*batch link_count 7"]:
-        (*batch_axes, _, _) = Ts_world_joint.shape
-        # Get the link poses.
-        base_link_mask = self.links.parent_joint_indices == -1
-        parent_joint_indices = jnp.where(
-            base_link_mask, 0, self.links.parent_joint_indices
-        )
-        identity_pose = jaxlie.SE3.identity().wxyz_xyz
-        Ts_world_link = jnp.where(
-            base_link_mask[..., None],
-            identity_pose,
-            Ts_world_joint[..., parent_joint_indices, :],
-        )
-        assert Ts_world_link.shape == (*batch_axes, self.links.num_links, 7)
-        return Ts_world_link
+        return _kinematics.link_poses_from_joint_poses(self, Ts_world_joint)
 
     def _forward_kinematics_joints(
         self,
         cfg: Float[Array, "*batch actuated_count"],
         unroll_fk: jdc.Static[bool] = False,
     ) -> Float[Array, "*batch joint_count 7"]:
-        (*batch_axes, _) = cfg.shape
-        assert cfg.shape == (*batch_axes, self.joints.num_actuated_joints)
-
-        # Calculate full configuration using the dedicated method
-        q_full = self.joints.get_full_config(cfg)
-
-        # Calculate delta transforms using the effective config and twists for all joints.
-        tangents = self.joints.twists * q_full[..., None]
-        assert tangents.shape == (*batch_axes, self.joints.num_joints, 6)
-        delta_Ts = jaxlie.SE3.exp(tangents)  # Shape: (*batch_axes, self.joint.count, 7)
-
-        # Combine constant parent transform with variable joint delta transform.
-        Ts_parent_child = (
-            jaxlie.SE3(self.joints.parent_transforms) @ delta_Ts
-        ).wxyz_xyz
-        assert Ts_parent_child.shape == (*batch_axes, self.joints.num_joints, 7)
-
-        # Topological sort helpers
-        topo_order = jnp.argsort(self.joints._topo_sort_inv)
-        Ts_parent_child_sorted = Ts_parent_child[..., self.joints._topo_sort_inv, :]
-        parent_orig_for_sorted_child = self.joints.parent_indices[
-            self.joints._topo_sort_inv
-        ]
-        idx_parent_joint_sorted = jnp.where(
-            parent_orig_for_sorted_child == -1,
-            -1,
-            topo_order[parent_orig_for_sorted_child],
-        )
-
-        # Compute link transforms relative to world, indexed by sorted *joint* index.
-        def compute_transform(i: int, Ts_world_link_sorted: Array) -> Array:
-            parent_sorted_idx = idx_parent_joint_sorted[i]
-            T_world_parent_link = jnp.where(
-                parent_sorted_idx == -1,
-                jaxlie.SE3.identity().wxyz_xyz,
-                Ts_world_link_sorted[..., parent_sorted_idx, :],
-            )
-            return Ts_world_link_sorted.at[..., i, :].set(
-                (
-                    jaxlie.SE3(T_world_parent_link)
-                    @ jaxlie.SE3(Ts_parent_child_sorted[..., i, :])
-                ).wxyz_xyz
-            )
-
-        Ts_world_link_init_sorted = jnp.zeros((*batch_axes, self.joints.num_joints, 7))
-        Ts_world_link_sorted = jax.lax.fori_loop(
-            lower=0,
-            upper=self.joints.num_joints,
-            body_fun=compute_transform,
-            init_val=Ts_world_link_init_sorted,
-            unroll=unroll_fk,
-        )
-
-        Ts_world_link_joint_indexed = Ts_world_link_sorted[..., topo_order, :]
-        assert Ts_world_link_joint_indexed.shape == (
-            *batch_axes,
-            self.joints.num_joints,
-            7,
-        )  # This is the link poses indexed by parent *joint* index.
-
-        return Ts_world_link_joint_indexed
-
-
-@functools.partial(jax.custom_jvp, nondiff_argnums=(2,))
-def _fk_cuda_differentiable(
-    cfg: Float[Array, "*batch actuated_count"],
-    robot: Robot,
-    unroll_fk: bool,
-) -> Float[Array, "*batch joint_count 7"]:
-    """Differentiable wrapper around the CUDA FK kernel.
-
-    The FFI call is opaque to autodiff, so this ``custom_jvp`` provides:
-      * primal  → the fast CUDA kernel (used on undifferentiated forward calls),
-      * jvp rule → the differentiable pure-JAX FK ``_forward_kinematics_joints``,
-                   which computes the identical ``(*batch, n_joints, 7)`` value.
-
-    ``robot`` is an explicit (rather than closed-over) argument so the rule has
-    no closed-over tracers and JAX can transpose it for reverse mode.  The FFI is
-    confined to the primal function, so it is never invoked on a tangent-carrying
-    input.  Both ``jax.jvp`` and ``jax.grad`` work; differentiated calls evaluate
-    the JAX FK (the FFI itself is not differentiable).
-    """
-    from .cuda_kernels.fk._fk_cuda import fk_cuda
-
-    return fk_cuda(
-        cfg=cfg,
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        fk_level_starts=robot.joints.fk_level_starts,
-        fk_level_joints=robot.joints.fk_level_joints,
-    )
-
-
-@_fk_cuda_differentiable.defjvp
-def _fk_cuda_differentiable_jvp(unroll_fk, primals, tangents):
-    cfg, robot = primals
-    dcfg, drobot = tangents
-    primal_out, tangent_out = jax.jvp(
-        lambda c, r: r._forward_kinematics_joints(c, unroll_fk),
-        (cfg, robot),
-        (dcfg, drobot),
-    )
-    # Match the CUDA primal's dtype (float32; the JAX reference may run in x64).
-    f32 = jnp.float32
-    return primal_out.astype(f32), tangent_out.astype(f32)
+        return _kinematics.forward_kinematics_joints_jax(self, cfg, unroll_fk)

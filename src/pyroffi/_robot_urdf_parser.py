@@ -157,8 +157,188 @@ class LinkInfo:
         return self.get_link_mask_from_indices(link_indices)
 
 
+@jdc.pytree_dataclass
+class DynamicsInfo:
+    """Rigid-body-dynamics quantities for the actuated-joint tree.
+
+    Bodies are indexed by actuated joint (URDF ``actuated_joints`` order,
+    matching the kinematics ``cfg`` vector).  Links attached through
+    non-actuated (fixed) joints are merged into their nearest actuated
+    ancestor body, with their spatial inertias transformed accordingly —
+    the same model reduction GRiD's URDFParser performs.
+
+    Spatial-vector convention: Featherstone motion vectors ``[omega; v]``
+    (angular components first).
+    """
+
+    num_dof: jdc.Static[int]
+    """Number of dynamic degrees of freedom (= actuated, non-mimic joints)."""
+    dof_names: jdc.Static[tuple[str, ...]]
+    """Actuated joint names, in DOF order (matches ``JointInfo.actuated_names``)."""
+    parent_dof_indices: jdc.Static[tuple[int, ...]]
+    """Nearest actuated-ancestor DOF index per DOF; -1 when parented to the world."""
+
+    X_tree: Float[Array, "n_dof 6 6"]
+    """Constant spatial motion transform from the parent body frame to this
+    joint's zero-configuration frame (Featherstone ``Xtree``)."""
+    S: Float[Array, "n_dof 6"]
+    """Joint motion subspace in the joint frame ([axis; 0] revolute, [0; axis] prismatic)."""
+    joint_is_prismatic: Float[Array, " n_dof"]
+    """1.0 where the joint is prismatic, 0.0 where revolute."""
+    I_body: Float[Array, "n_dof 6 6"]
+    """Spatial inertia of each body (child link + merged fixed descendants),
+    expressed in the joint (= child link) frame."""
+    damping: Float[Array, " n_dof"]
+    """Viscous joint damping coefficients from ``<dynamics damping=...>``."""
+
+
+def _skew(v: onp.ndarray) -> onp.ndarray:
+    return onp.array(
+        [
+            [0.0, -v[2], v[1]],
+            [v[2], 0.0, -v[0]],
+            [-v[1], v[0], 0.0],
+        ]
+    )
+
+
+def _motion_transform_from_T(T_ab: onp.ndarray) -> onp.ndarray:
+    """Spatial motion transform ``X_ba`` (maps motion vectors expressed in
+    frame ``a`` to frame ``b`` coordinates) from the homogeneous transform
+    ``T_ab`` of frame ``b`` relative to ``a``. Angular-first convention."""
+    R = T_ab[:3, :3]
+    p = T_ab[:3, 3]
+    E = R.T
+    X = onp.zeros((6, 6))
+    X[:3, :3] = E
+    X[3:, 3:] = E
+    X[3:, :3] = -E @ _skew(p)
+    return X
+
+
+def _spatial_inertia_from_urdf(inertial) -> onp.ndarray:
+    """6x6 spatial inertia in the link frame from a yourdfpy ``Inertial``."""
+    if inertial is None or inertial.mass is None:
+        return onp.zeros((6, 6))
+    m = float(inertial.mass)
+    T_lc = inertial.origin if inertial.origin is not None else onp.eye(4)
+    R = T_lc[:3, :3]
+    c = T_lc[:3, 3]
+    I3 = inertial.inertia if inertial.inertia is not None else onp.zeros((3, 3))
+    I_com = R @ onp.asarray(I3) @ R.T  # rotate inertia into link axes (about COM)
+    cx = _skew(c)
+    I = onp.zeros((6, 6))
+    I[:3, :3] = I_com + m * cx @ cx.T
+    I[:3, 3:] = m * cx
+    I[3:, :3] = m * cx.T
+    I[3:, 3:] = m * onp.eye(3)
+    return I
+
+
 class RobotURDFParser:
     """Parser for creating Robot instances from URDF files."""
+
+    @staticmethod
+    def parse_dynamics(urdf: yourdfpy.URDF) -> DynamicsInfo:
+        """Build :class:`DynamicsInfo` from a URDF.
+
+        Non-actuated joints are treated as rigidly fixed at their zero
+        configuration; their subtree link inertias are merged into the
+        nearest actuated ancestor body.  Mimic joints are unsupported.
+        """
+        if any(j.mimic is not None for j in urdf.joint_map.values()):
+            raise NotImplementedError(
+                "Dynamics does not support URDFs with mimic joints."
+            )
+        dof_joints = list(urdf.actuated_joints)
+        for j in dof_joints:
+            if j.type not in ("revolute", "continuous", "prismatic"):
+                raise NotImplementedError(
+                    f"Dynamics: unsupported actuated joint type '{j.type}' "
+                    f"for joint '{j.name}'."
+                )
+        dof_names = tuple(j.name for j in dof_joints)
+        dof_index = {j.name: i for i, j in enumerate(dof_joints)}
+
+        joint_by_child_link = {j.child: j for j in urdf.joint_map.values()}
+        joints_by_parent_link: dict[str, list[yourdfpy.Joint]] = {}
+        for j in urdf.joint_map.values():
+            joints_by_parent_link.setdefault(j.parent, []).append(j)
+
+        def joint_origin(j: yourdfpy.Joint) -> onp.ndarray:
+            return onp.asarray(j.origin) if j.origin is not None else onp.eye(4)
+
+        parent_dof_list = list[int]()
+        X_tree_list = list[onp.ndarray]()
+        S_list = list[onp.ndarray]()
+        prismatic_list = list[float]()
+        I_body_list = list[onp.ndarray]()
+        damping_list = list[float]()
+
+        for j in dof_joints:
+            # Walk up through non-actuated joints to the nearest actuated
+            # ancestor, composing zero-configuration transforms.
+            T_parent_joint = joint_origin(j)
+            parent_link = j.parent
+            parent_dof = -1
+            while parent_link in joint_by_child_link:
+                pj = joint_by_child_link[parent_link]
+                if pj.name in dof_index:
+                    parent_dof = dof_index[pj.name]
+                    break
+                T_parent_joint = joint_origin(pj) @ T_parent_joint
+                parent_link = pj.parent
+            parent_dof_list.append(parent_dof)
+            X_tree_list.append(_motion_transform_from_T(T_parent_joint))
+
+            axis = onp.asarray(j.axis, dtype=onp.float64)
+            axis = axis / onp.linalg.norm(axis)
+            if j.type == "prismatic":
+                S_list.append(onp.concatenate([onp.zeros(3), axis]))
+                prismatic_list.append(1.0)
+            else:
+                S_list.append(onp.concatenate([axis, onp.zeros(3)]))
+                prismatic_list.append(0.0)
+
+            damping = 0.0
+            if j.dynamics is not None and j.dynamics.damping is not None:
+                damping = float(j.dynamics.damping)
+            damping_list.append(damping)
+
+            # Body inertia: child link plus all descendants reachable through
+            # non-actuated joints, transformed into this joint's frame.
+            I_body = _spatial_inertia_from_urdf(urdf.link_map[j.child].inertial)
+            stack = [(j.child, onp.eye(4))]  # (link, T from body frame to link)
+            while stack:
+                link_name, T_body_link = stack.pop()
+                for cj in joints_by_parent_link.get(link_name, []):
+                    if cj.name in dof_index:
+                        continue
+                    T_body_child = T_body_link @ joint_origin(cj)
+                    X = _motion_transform_from_T(T_body_child)
+                    I_child = _spatial_inertia_from_urdf(
+                        urdf.link_map[cj.child].inertial
+                    )
+                    I_body = I_body + X.T @ I_child @ X
+                    stack.append((cj.child, T_body_child))
+            I_body_list.append(I_body)
+
+        if all(I[5, 5] == 0.0 for I in I_body_list):
+            raise NotImplementedError(
+                "URDF provides no <inertial> data; dynamics quantities would "
+                "be degenerate."
+            )
+
+        return DynamicsInfo(
+            num_dof=len(dof_joints),
+            dof_names=dof_names,
+            parent_dof_indices=tuple(parent_dof_list),
+            X_tree=jnp.array(onp.stack(X_tree_list)),
+            S=jnp.array(onp.stack(S_list)),
+            joint_is_prismatic=jnp.array(prismatic_list),
+            I_body=jnp.array(onp.stack(I_body_list)),
+            damping=jnp.array(damping_list),
+        )
 
     @staticmethod
     def _topologically_sort_joints(

@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import jaxlie
 import jaxls
 
+from .. import kinematics
 from .._robot import Robot
 
 
@@ -206,8 +207,8 @@ def _pose_cost_analytical_jac(
     assert target_link_index.dtype == jnp.int32
     joint_cfg = vals[joint_var]
 
-    Ts_world_joint = robot._forward_kinematics_joints(joint_cfg)
-    Ts_world_link = robot._link_poses_from_joint_poses(Ts_world_joint)
+    Ts_world_joint = kinematics.forward_kinematics_joints_jax(robot, joint_cfg)
+    Ts_world_link = kinematics.link_poses_from_joint_poses(robot, Ts_world_joint)
 
     T_world_ee = jaxlie.SE3(Ts_world_link[target_link_index, :])
     pose_error = target_pose.inverse() @ T_world_ee
