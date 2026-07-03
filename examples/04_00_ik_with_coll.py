@@ -25,7 +25,6 @@ import numpy as np
 import pyroffi as pk
 import viser
 from pyroffi.collision import HalfSpace, RobotCollision, Sphere, collide
-from pyroffi.optimization_engines._ls_ik import ls_ik_solve
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
 
@@ -127,16 +126,16 @@ def main():
         rng_key, subkey = jax.random.split(rng_key)
         start_time = time.perf_counter()
 
-        solution = ls_ik_solve(
-            robot=robot,
-            target_link_indices=(target_link_index,),
-            target_poses=(target_pose,),
+        solution = robot.inverse_kinematics(
+            target_link_name,
+            target_pose,
             rng_key=subkey,
             previous_cfg=solution,
+            solver="ls",
             num_seeds=32,
             max_iter=60,
             fixed_joint_mask=fixed_joint_mask,
-            constraint_fns=constraint_fns,
+            constraints=constraint_fns,
             constraint_args=(sphere_world,),
             constraint_weights=constraint_weights,
         )

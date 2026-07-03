@@ -40,7 +40,6 @@ import numpy as np
 import pyroffi as pk
 import viser
 from pyroffi.collision import HalfSpace, RobotCollision, Sphere, collide
-from pyroffi.optimization_engines._hjcd_ik import hjcd_solve_cuda
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
 
@@ -143,17 +142,18 @@ def main():
         rng_key, subkey = jax.random.split(rng_key)
         start_time = time.perf_counter()
 
-        solution = hjcd_solve_cuda(
-            robot=robot,
-            target_link_indices=(target_link_index,),
-            target_poses=(target_pose,),
+        solution = robot.inverse_kinematics(
+            target_link_name,
+            target_pose,
             rng_key=subkey,
             previous_cfg=solution,
+            solver="hjcd",
             num_seeds=256,
             fixed_joint_mask=fixed_joint_mask,
             constraints=constraints,
             constraint_args=[sphere_world],
             constraint_weights=constraint_weights,
+            use_cuda=True,
         )
         solution.block_until_ready()
 

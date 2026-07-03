@@ -322,11 +322,16 @@ class CUDADifferentiableSDFCollisionChecker:
         next compute_world_collision_distance call retraces with the new world
         shapes.
         """
-        ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
-        self._ws = jnp.array(ws_np)
-        self._wc = jnp.array(wc_np)
-        self._wb = jnp.array(wb_np)
-        self._wh = jnp.array(wh_np)
+        # Force eager evaluation of the geometry properties: if this upload
+        # happens during a caller's jax.jit trace (concrete world geometry),
+        # accessing e.g. Sphere.radius would otherwise stage tracers that
+        # _extract_world_arrays cannot convert to numpy.
+        with jax.ensure_compile_time_eval():
+            ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
+            self._ws = jnp.array(ws_np)
+            self._wc = jnp.array(wc_np)
+            self._wb = jnp.array(wb_np)
+            self._wh = jnp.array(wh_np)
         self._cached_world_id = id(world_geom)
         # Invalidate JIT cache so the new world shapes trigger retracing.
         self._cached_robot_id = None
@@ -949,11 +954,14 @@ class CUDABinaryCollisionChecker:
 
     def set_world(self, world_geom: CollGeom) -> None:
         """Pre-upload world geometry to the device (call once, before the loop)."""
-        ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
-        self._ws = jnp.array(ws_np)
-        self._wc = jnp.array(wc_np)
-        self._wb = jnp.array(wb_np)
-        self._wh = jnp.array(wh_np)
+        # See the SDF checker's set_world: eager-eval so a concrete world can be
+        # uploaded even when this runs inside a caller's jax.jit trace.
+        with jax.ensure_compile_time_eval():
+            ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
+            self._ws = jnp.array(ws_np)
+            self._wc = jnp.array(wc_np)
+            self._wb = jnp.array(wb_np)
+            self._wh = jnp.array(wh_np)
         self._cached_world_id = id(world_geom)
 
     def _ensure_world_cache(self, world_geom: CollGeom) -> None:
