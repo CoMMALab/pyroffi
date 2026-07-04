@@ -10,3 +10,8 @@ from ._fk import (
     link_poses_from_joint_poses as link_poses_from_joint_poses,
 )
 from ._ik import inverse_kinematics as inverse_kinematics
+from ._dh import DHModel as DHModel, extract_dh as extract_dh
+from ._vamp_fk import (
+    VAMPCPUForwardKinematics as VAMPCPUForwardKinematics,
+    make_vamp_cpu_fk as make_vamp_cpu_fk,
+)

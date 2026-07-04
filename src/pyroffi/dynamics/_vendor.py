@@ -1,9 +1,12 @@
-"""Locate and import the external GRiD modules (GRiDCodeGenerator, URDFParser).
+"""Locate and import the external GRiDCodeGenerator module.
 
-These live in ``external/`` at the repo root (like vamp and cricket) and are
-plain importable source packages, not pip-installable. ``PYROFFI_GRID_PATH``
-overrides the search location (it must be the directory *containing* the
-``GRiDCodeGenerator`` and ``URDFParser`` package directories).
+It lives in ``external/`` at the repo root (like vamp and cricket) and is a plain
+importable source package, not pip-installable. ``PYROFFI_GRID_PATH`` overrides
+the search location (it must be the directory *containing* the
+``GRiDCodeGenerator`` package directory).
+
+The companion ``URDFParser`` package is no longer required: its ``Robot`` object
+model and post-processing are vendored into :mod:`pyroffi.dynamics._grid_urdf`.
 """
 
 from __future__ import annotations
@@ -24,23 +27,19 @@ def _candidate_dirs() -> list[Path]:
 
 
 def ensure_grid_importable() -> None:
-    """Put the directory containing GRiDCodeGenerator/URDFParser on sys.path."""
+    """Put the directory containing GRiDCodeGenerator on sys.path."""
     try:
         import GRiDCodeGenerator  # noqa: F401
-        import URDFParser  # noqa: F401
 
         return
     except ImportError:
         pass
     for d in _candidate_dirs():
-        if (d / "GRiDCodeGenerator" / "__init__.py").is_file() and (
-            d / "URDFParser" / "__init__.py"
-        ).is_file():
+        if (d / "GRiDCodeGenerator" / "__init__.py").is_file():
             if str(d) not in sys.path:
                 sys.path.insert(0, str(d))
             return
     raise ImportError(
-        "Could not locate the external GRiD modules (GRiDCodeGenerator, "
-        "URDFParser). Clone them into <repo>/external/ or set "
-        "PYROFFI_GRID_PATH to the directory containing them."
+        "Could not locate the external GRiDCodeGenerator module. Clone it into "
+        "<repo>/external/ or set PYROFFI_GRID_PATH to the directory containing it."
     )

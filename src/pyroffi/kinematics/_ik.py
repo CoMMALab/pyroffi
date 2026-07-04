@@ -44,7 +44,21 @@ def _resolve_solver(solver: str, use_cuda: bool):
         from ..optimization_engines._ls_ik import ls_ik_solve
 
         return ls_ik_solve, False
-    raise ValueError(f"Unknown IK solver {solver!r}; expected 'hjcd' or 'ls'.")
+    if solver == "quik":
+        # QuIK is a CPU C++ (Halley's-method) serial-chain backend; it ignores
+        # use_cuda and takes no differentiable constraints.
+        from ..optimization_engines._quik_ik import quik_ik_solve
+
+        return quik_ik_solve, False
+    if solver == "halley":
+        # Pure-JAX reimplementation of QuIK's third-order Halley update; runs on
+        # whatever JAX platform is active (use JAX_PLATFORMS=cpu for CPU-only).
+        from ..optimization_engines._halley_ik import halley_ik_solve
+
+        return halley_ik_solve, False
+    raise ValueError(
+        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls', 'quik' or 'halley'."
+    )
 
 
 def inverse_kinematics(
@@ -68,10 +82,18 @@ def inverse_kinematics(
     See ``Robot.inverse_kinematics`` for the full parameter documentation.
 
     Args:
-        solver:            ``"hjcd"`` (two-phase coordinate-descent + LM) or
-                           ``"ls"`` (Levenberg-Marquardt least-squares).
+        solver:            ``"hjcd"`` (two-phase coordinate-descent + LM),
+                           ``"ls"`` (Levenberg-Marquardt least-squares),
+                           ``"quik"`` (QuIK C++ Halley's-method CPU backend, a
+                           fast serial-chain solver for ``JAX_PLATFORMS=cpu``
+                           planning), or ``"halley"`` (a pure-JAX reimplementation
+                           of QuIK's third-order update — same algorithm, any JAX
+                           platform).  ``quik``/``halley`` are single-end-effector
+                           serial-chain solvers and ignore differentiable
+                           constraints.
         use_cuda:          Select the CUDA FFI backend for the chosen solver
-                           instead of the pure-JAX implementation.
+                           instead of the pure-JAX implementation (ignored by
+                           ``quik``/``halley``).
         target_link_name:  A single link name, or a sequence of names for a
                            multi-end-effector (e.g. bimanual) solve.
         target_pose:       A matching single ``SE3`` or sequence of poses.

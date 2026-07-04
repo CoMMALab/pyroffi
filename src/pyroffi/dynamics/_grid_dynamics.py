@@ -79,6 +79,22 @@ class GRiDDynamics:
     leading batch dimensions, in float32.
     """
 
+    @classmethod
+    def from_robot(
+        cls,
+        robot,
+        gravity: float = _DEFAULT_GRAVITY,
+        arch: str | None = None,
+    ) -> "GRiDDynamics":
+        """Build from a pyroffi :class:`~pyroffi.Robot` (uses ``robot.urdf``).
+
+        The unified ``from_robot`` entry point shared by the external-binding
+        backends (see :mod:`pyroffi.bindings`).  Equivalent to
+        ``GRiDDynamics(robot.urdf, ...)``; the robot must have been created via
+        :meth:`Robot.from_urdf` so its source URDF is available.
+        """
+        return cls(robot.urdf, gravity=gravity, arch=arch)
+
     def __init__(
         self,
         urdf: yourdfpy.URDF,

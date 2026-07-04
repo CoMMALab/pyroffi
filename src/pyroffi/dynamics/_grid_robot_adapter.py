@@ -1,9 +1,12 @@
 """Translate a yourdfpy-parsed URDF into a GRiD ``Robot`` object.
 
-GRiD's own URDFParser re-parses the URDF XML with BeautifulSoup; instead we
-populate its ``Robot``/``Link``/``Joint`` classes directly from the yourdfpy
-model pyroffi already loaded, then reuse GRiD URDFParser's post-processing
-pipeline (fixed-joint elimination, DFS renumbering, subtree lists) untouched.
+The robot-acceleration URDFParser re-parses the URDF XML with BeautifulSoup;
+instead we populate its ``Robot``/``Link``/``Joint`` object model — vendored into
+:mod:`pyroffi.dynamics._grid_urdf` so pyroffi carries no external ``URDFParser``
+dependency — directly from the yourdfpy model pyroffi already loaded, then reuse
+the vendored post-processing pipeline (fixed-joint elimination, DFS renumbering,
+subtree lists) untouched.  ``GRiDCodeGenerator`` (kept external) consumes the
+resulting ``Robot`` object unchanged.
 
 Two impedance mismatches are handled here rather than by modifying GRiD:
 
@@ -23,7 +26,12 @@ import numpy as onp
 import yourdfpy
 from scipy.spatial.transform import Rotation
 
-from ._vendor import ensure_grid_importable
+from ._grid_urdf import (
+    Joint as GRiDJoint,
+    Link as GRiDLink,
+    Robot as GRiDRobot,
+    renumber_links_joints,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,12 +80,6 @@ def _canonical_axis(axis: onp.ndarray, joint_name: str) -> tuple[list[float], fl
 
 def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
     """Build a GRiD Robot from a yourdfpy URDF (see module docstring)."""
-    ensure_grid_importable()
-    from URDFParser import URDFParser
-    from URDFParser.Robot import Robot as GRiDRobot
-    from URDFParser.Link import Link as GRiDLink
-    from URDFParser.Joint import Joint as GRiDJoint
-
     if any(j.mimic is not None for j in urdf.joint_map.values()):
         raise NotImplementedError(
             "GRiD dynamics does not support URDFs with mimic joints."
@@ -143,11 +145,8 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
         grid_joint.set_damping(damping)
         robot.add_joint(grid_joint)
 
-    # --- Reuse GRiD URDFParser's post-processing pipeline. ------------------
-    parser = URDFParser()
-    parser.robot = robot
-    parser.renumber_linksJoints(alpha_tie_breaker=False)
-    robot = parser.robot
+    # --- Reuse the vendored URDFParser post-processing pipeline. ------------
+    renumber_links_joints(robot, alpha_tie_breaker=False)
 
     # --- Joint ordering map (GRiD DFS order -> pyroffi actuated order). -----
     act_names = [j.name for j in urdf.actuated_joints]

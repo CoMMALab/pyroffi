@@ -128,6 +128,15 @@ from pyroffi.optimization_engines._mppi_ik import (
     mppi_ik_solve_cuda_batch,
 )
 
+# QuIK CPU (Halley's-method) IK backend (optional; needs cricket JIT + a
+# DH-representable serial chain).  It always runs on the CPU, so it is timed
+# here as the CPU alternative to the CUDA solvers.
+try:
+    from pyroffi.optimization_engines._quik_ik import QuIKSolver
+    _QUIK_IMPORT_OK = True
+except Exception:
+    _QUIK_IMPORT_OK = False
+
 # Learned-IK: imports only; model is loaded inside main() after the robot is known.
 try:
     from pyroffi.optimization_engines._learned_ik import (
@@ -892,6 +901,106 @@ def _run_pyroki_batch(
                        peak_gpu_util=peak_gpu, avg_gpu_util=avg_gpu, peak_vram_mb=peak_vram)
 
 
+def _run_quik_sequential(
+    quik: "QuIKSolver",
+    robot: "pk.Robot",
+    target_link_index: int,
+    target_poses: list,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    num_seeds: int,
+    algorithm: int = 0,
+) -> list[SolveResult]:
+    """Run the QuIK CPU solver sequentially, timing with plain wall-clock.
+
+    QuIK is a CPU C++ FFI kernel, so (like PyRoKi) it is timed with wall-clock
+    rather than the JAX ``lax.scan`` device timer.  Seeds are drawn in the
+    chain-joint subspace; the returned config is scattered back into the robot's
+    full actuated-joint vector for a like-for-like FK error evaluation.
+    """
+    order = quik.model.actuated_order
+    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
+    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
+
+    def one(pose_mat, rng) -> jax.Array:
+        seeds = rng.uniform(lo_c, hi_c, (num_seeds, quik.dof)).astype(np.float32)
+        poses = jnp.broadcast_to(jnp.asarray(pose_mat, jnp.float32), (num_seeds, 4, 4))
+        out = quik.solve_to_actuated(poses, jnp.asarray(seeds), algorithm=algorithm)
+        best = int(np.argmin(np.asarray(out["error"])))
+        return out["q_actuated"][best]
+
+    results: list[SolveResult] = []
+    for i, target_pose in enumerate(target_poses):
+        pose_mat = np.asarray(target_pose.as_matrix())
+        rng = np.random.default_rng(i + 1)
+        cfg = one(pose_mat, rng)
+        jax.block_until_ready(cfg)
+        pos_err, rot_err = _pose_errors(robot, cfg, target_link_index, target_pose)
+        times = []
+        for j in range(N_TIMED):
+            rng_j = np.random.default_rng(1000 * (i + 1) + j)
+            t0 = time.perf_counter()
+            out = one(pose_mat, rng_j)
+            jax.block_until_ready(out)
+            times.append(time.perf_counter() - t0)
+        results.append(SolveResult(np.array(cfg), pos_err, rot_err, float(np.median(times)) * 1e3))
+    return results
+
+
+def _run_quik_batch(
+    quik: "QuIKSolver",
+    robot: "pk.Robot",
+    target_link_index: int,
+    target_poses_stacked: jaxlie.SE3,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    num_seeds: int,
+    algorithm: int = 0,
+) -> BatchResult:
+    """Run the QuIK CPU solver over all targets in one fused FFI call (wall-clock)."""
+    order = quik.model.actuated_order
+    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
+    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
+    n_targets = len(target_poses_stacked.wxyz_xyz)
+    Ts = np.stack([
+        np.asarray(jaxlie.SE3(target_poses_stacked.wxyz_xyz[i]).as_matrix())
+        for i in range(n_targets)
+    ]).astype(np.float32)
+
+    def one(rng) -> np.ndarray:
+        seeds = rng.uniform(lo_c, hi_c, (n_targets, num_seeds, quik.dof)).astype(np.float32)
+        poses = np.repeat(Ts[:, None], num_seeds, axis=1)  # (n_targets, num_seeds, 4, 4)
+        out = quik.solve_to_actuated(
+            jnp.asarray(poses.reshape(-1, 4, 4)),
+            jnp.asarray(seeds.reshape(-1, quik.dof)),
+            algorithm=algorithm,
+        )
+        q = np.asarray(out["q_actuated"]).reshape(n_targets, num_seeds, -1)
+        err = np.asarray(out["error"]).reshape(n_targets, num_seeds)
+        best = np.argmin(err, axis=1)
+        return q[np.arange(n_targets), best]
+
+    cfgs_np = one(np.random.default_rng(0))
+    pos_errs = np.empty(n_targets)
+    rot_errs = np.empty(n_targets)
+    for i in range(n_targets):
+        tp = jaxlie.SE3(target_poses_stacked.wxyz_xyz[i])
+        pos_errs[i], rot_errs[i] = _pose_errors(
+            robot, jnp.array(cfgs_np[i]), target_link_index, tp
+        )
+
+    times = []
+    for j in range(N_TIMED):
+        rng_j = np.random.default_rng(j + 1)
+        t0 = time.perf_counter()
+        out = one(rng_j)
+        jax.block_until_ready(jnp.asarray(out))
+        times.append(time.perf_counter() - t0)
+
+    effective_ms = float(np.median(times)) * 1e3 / n_targets
+    return BatchResult(cfgs_np, pos_errs, rot_errs, effective_ms)
+
+
 # ---------------------------------------------------------------------------
 # Collision environment helpers
 # ---------------------------------------------------------------------------
@@ -1320,6 +1429,32 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print("\nPyRoKi unavailable (pip install git+https://github.com/chungmin99/pyroki.git).")
 
     # ------------------------------------------------------------------
+    # QuIK CPU solver setup (optional)
+    # ------------------------------------------------------------------
+    _quik_solver = None
+    _quik_num_seeds = 32
+    if _QUIK_IMPORT_OK:
+        print("\nSetting up QuIK CPU solver (POE->DH + cricket JIT) ...")
+        try:
+            _quik_solver = QuIKSolver(robot, target_link_name)
+            # Warm up (compile the FFI kernel; DH already extracted/validated).
+            _order = _quik_solver.model.actuated_order
+            _lo_c = np.where(np.isfinite(lo[_order]), lo[_order], -np.pi)
+            _hi_c = np.where(np.isfinite(hi[_order]), hi[_order], np.pi)
+            _seeds0 = np.random.default_rng(0).uniform(
+                _lo_c, _hi_c, (_quik_num_seeds, _quik_solver.dof)
+            ).astype(np.float32)
+            _p0 = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (_quik_num_seeds, 4, 4))
+            for _ in range(N_WARMUP):
+                jax.block_until_ready(_quik_solver.solve(_p0, jnp.asarray(_seeds0))["q"])
+            print(f"  QuIK ready (dof={_quik_solver.dof}, CPU).")
+        except Exception as e:  # noqa: BLE001
+            print(f"  QuIK unavailable for {robot_name}: {type(e).__name__}: {str(e)[:90]}")
+            _quik_solver = None
+    else:
+        print("\nQuIK unavailable (needs cricket JIT; build external/cricket).")
+
+    # ------------------------------------------------------------------
     # Collision setup
     # ------------------------------------------------------------------
     robot_coll     = None
@@ -1729,6 +1864,13 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
             target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
+    if _quik_solver is not None:
+        print("  Running QuIK-CPU ...")
+        seq_results["QuIK-CPU"] = _run_quik_sequential(
+            _quik_solver, robot, target_link_index, target_poses,
+            lo, hi, _quik_num_seeds,
+        )
+
     # ------------------------------------------------------------------
     # Sequential evaluation — collision-free IK
     # ------------------------------------------------------------------
@@ -1802,6 +1944,13 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
             target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
+    if _quik_solver is not None:
+        print("  Running QuIK-CPU-BATCH ...")
+        batch_results["QuIK-CPU-BATCH"] = _run_quik_batch(
+            _quik_solver, robot, target_link_index, target_poses_stacked,
+            lo, hi, _quik_num_seeds,
+        )
+
     # ------------------------------------------------------------------
     # Batch evaluation — collision-free IK
     # ------------------------------------------------------------------
@@ -1862,6 +2011,8 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         seq_order.append("Learned-JAX")
     if _pyroki_solve_fn is not None:
         seq_order.append("PyRoKi")
+    if "QuIK-CPU" in seq_results:
+        seq_order.append("QuIK-CPU")
 
     batch_order = [
         "HJCD-JAX-BATCH",  "HJCD-CUDA-BATCH",
@@ -1873,6 +2024,8 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         batch_order.append("Learned-JAX-BATCH")
     if _pyroki_batch_fn is not None:
         batch_order.append("PyRoKi-BATCH")
+    if "QuIK-CPU-BATCH" in batch_results:
+        batch_order.append("QuIK-CPU-BATCH")
 
     coll_seq_order = [
         "HJCD-JAX", "HJCD-CUDA",

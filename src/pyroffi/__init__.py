@@ -1,3 +1,4 @@
+from . import bindings as bindings
 from . import collision as collision
 from . import costs as costs
 from . import kinematics as kinematics
