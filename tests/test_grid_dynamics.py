@@ -104,6 +104,49 @@ def test_batched_shapes_and_jit(setup):
     assert f(q, qd, x).shape == (2, 3, n)
 
 
+def test_mass_matrix_agreement(setup):
+    """Custom CrbaKernel M(q) vs the pure-JAX CRBA."""
+    robot, gd = setup
+    q = _state(gd, jax.random.PRNGKey(6))[0]
+    M = gd.mass_matrix(q)
+    M_ref = robot.mass_matrix(q)
+    assert _close(M, M_ref)
+    # And it must actually invert the direct-Minv kernel's output.
+    assert _close(
+        jnp.einsum("...ij,...jk->...ik", M, gd.mass_matrix_inv(q)),
+        jnp.broadcast_to(jnp.eye(gd.num_dof), M.shape),
+        atol=5e-3,
+        rtol=5e-3,
+    )
+
+
+def test_fext_agreement(setup):
+    """f_ext composited around the GRiD kernels vs pure-JAX f_ext plumbing."""
+    robot, gd = setup
+    q, qd, x = _state(gd, jax.random.PRNGKey(7))
+    f_ext = jax.random.normal(
+        jax.random.PRNGKey(8), (*q.shape, 6), dtype=jnp.float32
+    )
+    assert _close(
+        gd.inverse_dynamics(q, qd, x, f_ext),
+        robot.inverse_dynamics(q, qd, x, f_ext=f_ext),
+    )
+    assert _close(
+        gd.forward_dynamics(q, qd, x, f_ext),
+        robot.forward_dynamics(q, qd, x, f_ext=f_ext),
+    )
+
+
+def test_step_agreement(setup):
+    robot, gd = setup
+    q, qd, u = _state(gd, jax.random.PRNGKey(9))
+    dt = 1e-3
+    for method in ("semi_implicit", "euler", "rk4"):
+        q1, qd1 = gd.step(q, qd, u, dt, method=method)
+        q1_ref, qd1_ref = robot.step(q, qd, u, dt, method=method)
+        assert _close(q1, q1_ref) and _close(qd1, qd1_ref), method
+
+
 def test_cache_hit(setup):
     """Reconstruction must load the cached .so without recompiling."""
     import time

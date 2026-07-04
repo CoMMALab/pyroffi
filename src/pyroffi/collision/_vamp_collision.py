@@ -284,6 +284,7 @@ class VAMPCPUCollisionChecker:
         self._key = jit.hash_source(tu_source, opts)
         self._configs_target = f"vamp_configs_{robot_token}_{src_hash}"
         self._edges_target = f"vamp_edges_{robot_token}_{src_hash}"
+        self._project_target = f"vamp_project_{robot_token}_{src_hash}"
 
         if self._key not in _REGISTERED:
             _preload_runtime_libs()
@@ -300,6 +301,11 @@ class VAMPCPUCollisionChecker:
             jax.ffi.register_ffi_target(
                 self._edges_target,
                 session.handler_capsule("pyroffi_get_validate_edges"),
+                platform="cpu",
+            )
+            jax.ffi.register_ffi_target(
+                self._project_target,
+                session.handler_capsule("pyroffi_get_project_configs"),
                 platform="cpu",
             )
             # Keep the session alive for the process lifetime: the JIT-owned code
@@ -359,6 +365,32 @@ class VAMPCPUCollisionChecker:
             self._wp = np.zeros((0, 3), dtype=np.float32)
             self._capt = (0.0, 0.0, 0.0)
         self._world_cache_key = None  # invalidate the per-call cache
+
+    def set_world_geoms(self, world_geoms) -> None:
+        """Cache a heterogeneous obstacle list (mix of Sphere/Capsule/Box geoms).
+
+        :meth:`set_world` takes a single ``CollGeom`` (one primitive type);
+        this loops :func:`_extract_world_arrays` over a sequence and
+        concatenates the per-type buffers, so scenes mixing spheres and boxes
+        (e.g. the IK benchmark environment) can be cached in one call.
+        """
+        ws, wc, wb = [], [], []
+        for g in world_geoms:
+            s, c, b, h = _extract_world_arrays(g)
+            if h.shape[0] != 0:
+                raise NotImplementedError(
+                    "The VAMP backend has no half-space primitive; represent a "
+                    "ground plane as a large flat Box instead."
+                )
+            ws.append(s)
+            wc.append(c)
+            wb.append(b)
+        self._ws = np.concatenate(ws, axis=0) if ws else np.zeros((0, 4), np.float32)
+        self._wc = np.concatenate(wc, axis=0) if wc else np.zeros((0, 7), np.float32)
+        self._wb = np.concatenate(wb, axis=0) if wb else np.zeros((0, 15), np.float32)
+        self._wp = np.zeros((0, 3), dtype=np.float32)
+        self._capt = (0.0, 0.0, 0.0)
+        self._world_cache_key = None
 
     @staticmethod
     @lru_cache(maxsize=1)
@@ -460,6 +492,123 @@ class VAMPCPUCollisionChecker:
         fn = jax.jit(impl)
         self._jit_cache[key] = fn
         return fn
+
+    def _project_jit_fn(self, capt: tuple[float, float, float], attrs: tuple):
+        """Cached jitted wrapper for the projection FFI call (see ``_jit_fn``)."""
+        key = ("project", capt, attrs)
+        fn = self._jit_cache.get(key)
+        if fn is not None:
+            return fn
+
+        rmin, rmax, rpt = (np.float32(capt[0]), np.float32(capt[1]), np.float32(capt[2]))
+        seed, num_particles, num_iters, temperature, sigma0, sigma_shrink, sigma_grow, bisect_iters = attrs
+        tgt = self._project_target
+
+        def impl(q, lower, upper, ws, wc, wb, wp):
+            B, dim = q.shape
+            return jax.ffi.ffi_call(
+                tgt,
+                (
+                    jax.ShapeDtypeStruct((B, dim), jnp.float32),
+                    jax.ShapeDtypeStruct((B,), jnp.bool_),
+                ),
+            )(q, lower, upper, ws, wc, wb, wp,
+              capt_r_min=rmin, capt_r_max=rmax, capt_r_point=rpt,
+              seed=np.int64(seed),
+              num_particles=np.int64(num_particles),
+              num_iters=np.int64(num_iters),
+              temperature=np.float32(temperature),
+              sigma0=np.float32(sigma0),
+              sigma_shrink=np.float32(sigma_shrink),
+              sigma_grow=np.float32(sigma_grow),
+              bisect_iters=np.int64(bisect_iters))
+
+        fn = jax.jit(impl)
+        self._jit_cache[key] = fn
+        return fn
+
+    def project_collision_free(
+        self,
+        robot,  # accepted for API parity; FK is baked into the JIT binary
+        cfg: Float[Array, "*batch actuated_count"],
+        world_geom: Optional[CollGeom] = None,
+        point_cloud: Optional[Array] = None,
+        capt: Optional[tuple[float, float, float]] = None,
+        *,
+        lower: Optional[Array] = None,
+        upper: Optional[Array] = None,
+        seed: int = 0,
+        num_particles: int = 32,
+        num_iters: int = 8,
+        temperature: float = 0.1,
+        sigma0: float = 0.1,
+        sigma_shrink: float = 0.7,
+        sigma_grow: float = 1.6,
+        bisect_iters: int = 12,
+    ) -> tuple[Array, Array]:
+        """MPPI-project configurations onto the collision-free set (seed repair).
+
+        Collision-free inputs pass through unchanged.  Each colliding input runs
+        a small derivative-free MPPI optimization (VAMP's collision oracle is
+        boolean, so no gradients exist to follow): per iteration,
+        ``num_particles`` particles are drawn around a running mean as
+        antithetic +/- pairs at stratified log-spaced radius scales (for sample
+        diversity), the feasible ones are softmax-weighted by
+        ``exp(-||q - seed||^2 / temperature)``, and the mean moves to the
+        weighted average.  The sampling scale starts at ``sigma0`` and adapts
+        (``sigma_shrink`` on feasible evidence, ``sigma_grow`` when the whole
+        population collides).  The best feasible particle found is finally
+        bisected back toward the input for ``bisect_iters`` iterations, so the
+        result is a near-closest free configuration.  Deterministic per
+        (``seed``, batch index), independent of thread schedule.
+
+        Parallelism is one OpenMP thread per batch element (particles within an
+        element run serially on that thread's SIMD units), so cores don't
+        contend over a single problem.
+
+        Args:
+            cfg:   ``[*batch, n_act]`` configurations to project.
+            lower/upper: per-joint clamp bounds ``[n_act]``; default unbounded.
+
+        Returns:
+            ``(q_projected, ok)`` with shapes ``[*batch, n_act]`` / ``[*batch]``;
+            ``ok`` is False where no free configuration was found (``q`` is then
+            returned unchanged).
+        """
+        ws, wc, wb, wp, capt = self._world_args(world_geom, point_cloud, capt)
+        cfg = jnp.asarray(cfg, dtype=jnp.float32)
+        batch_axes = cfg.shape[:-1]
+        n_act = cfg.shape[-1]
+        B = int(np.prod(batch_axes)) if batch_axes else 1
+        cpu = self._cpu_device()
+        cfg_flat = jax.device_put(cfg.reshape(B, n_act), cpu)
+
+        big = np.float32(np.finfo(np.float32).max)
+        lo = np.full(n_act, -big, np.float32) if lower is None else np.asarray(
+            lower, np.float32
+        )
+        hi = np.full(n_act, big, np.float32) if upper is None else np.asarray(
+            upper, np.float32
+        )
+        lo = jax.device_put(np.nan_to_num(lo, neginf=-big, posinf=big), cpu)
+        hi = jax.device_put(np.nan_to_num(hi, neginf=-big, posinf=big), cpu)
+
+        attrs = (
+            int(seed),
+            max(2, int(num_particles)),  # >= one antithetic pair
+            int(num_iters),
+            float(temperature),
+            float(sigma0),
+            float(sigma_shrink),
+            float(sigma_grow),
+            int(bisect_iters),
+        )
+        q_out, ok = self._project_jit_fn(capt, attrs)(
+            cfg_flat, lo, hi, ws, wc, wb, wp
+        )
+        if batch_axes:
+            return q_out.reshape(*batch_axes, n_act), ok.reshape(batch_axes)
+        return q_out.reshape(n_act), ok.reshape(())
 
     def check_collision_free(
         self,

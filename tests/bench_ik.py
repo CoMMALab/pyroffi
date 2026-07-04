@@ -137,6 +137,15 @@ try:
 except Exception:
     _QUIK_IMPORT_OK = False
 
+# VAMP CPU collision checker + MPPI collision-free projection kernel (optional;
+# needs cricket JIT).  Used to give QuIK a collision-aware mode: seeds are
+# projected onto the collision-free manifold and solutions collision-filtered.
+try:
+    from pyroffi.collision import VAMPCPUCollisionChecker
+    _VAMP_CPU_IMPORT_OK = True
+except Exception:
+    _VAMP_CPU_IMPORT_OK = False
+
 # Learned-IK: imports only; model is loaded inside main() after the robot is known.
 try:
     from pyroffi.optimization_engines._learned_ik import (
@@ -901,6 +910,60 @@ def _run_pyroki_batch(
                        peak_gpu_util=peak_gpu, avg_gpu_util=avg_gpu, peak_vram_mb=peak_vram)
 
 
+def _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker):
+    """Shared seed-generation / solution-selection for the QuIK bench runners.
+
+    Returns ``(make_seeds, pick_best)``:
+
+    ``make_seeds(rng, n_batch)`` draws ``[n_batch, num_seeds, dof]`` chain-space
+    seeds; when ``vamp_checker`` is given they are first pushed onto the
+    collision-free manifold with the MPPI projection kernel
+    (:meth:`VAMPCPUCollisionChecker.project_collision_free`), scattered through
+    the robot's full actuated vector (non-chain joints at the limit midpoint).
+
+    ``pick_best(q_actuated, err)`` selects the lowest-error solution per
+    problem; with a checker, the lowest-error *collision-free* solution
+    (falling back to lowest error when none is free).
+    """
+    order = quik.model.actuated_order
+    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
+    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
+    n_act = lo.shape[0]
+    mid = np.where(np.isfinite(lo) & np.isfinite(hi), (lo + hi) / 2.0, 0.0)
+    lo_f = np.where(np.isfinite(lo), lo, -np.pi).astype(np.float32)
+    hi_f = np.where(np.isfinite(hi), hi, np.pi).astype(np.float32)
+
+    def make_seeds(rng, n_batch: int) -> np.ndarray:
+        seeds = rng.uniform(
+            lo_c, hi_c, (n_batch, num_seeds, quik.dof)
+        ).astype(np.float32)
+        if vamp_checker is None:
+            return seeds
+        q_full = np.broadcast_to(
+            mid.astype(np.float32), (n_batch, num_seeds, n_act)
+        ).copy()
+        q_full[..., order] = seeds
+        qp, _ok = vamp_checker.project_collision_free(
+            None, q_full.reshape(-1, n_act),
+            lower=lo_f, upper=hi_f, seed=int(rng.integers(2**31)),
+        )
+        return np.asarray(qp).reshape(n_batch, num_seeds, n_act)[..., order]
+
+    def pick_best(q_actuated: np.ndarray, err: np.ndarray) -> np.ndarray:
+        # q_actuated: [n_batch, num_seeds, n_act]; err: [n_batch, num_seeds]
+        if vamp_checker is not None:
+            free = np.asarray(
+                vamp_checker.check_collision_free(
+                    None, q_actuated.reshape(-1, q_actuated.shape[-1])
+                )
+            ).reshape(err.shape)
+            err = np.where(free, err, err + 1e6)  # free solutions always win
+        best = np.argmin(err, axis=1)
+        return q_actuated[np.arange(err.shape[0]), best]
+
+    return make_seeds, pick_best
+
+
 def _run_quik_sequential(
     quik: "QuIKSolver",
     robot: "pk.Robot",
@@ -910,6 +973,7 @@ def _run_quik_sequential(
     hi: np.ndarray,
     num_seeds: int,
     algorithm: int = 0,
+    vamp_checker=None,
 ) -> list[SolveResult]:
     """Run the QuIK CPU solver sequentially, timing with plain wall-clock.
 
@@ -917,17 +981,20 @@ def _run_quik_sequential(
     rather than the JAX ``lax.scan`` device timer.  Seeds are drawn in the
     chain-joint subspace; the returned config is scattered back into the robot's
     full actuated-joint vector for a like-for-like FK error evaluation.
+
+    With ``vamp_checker`` the run is collision-aware: seeds are MPPI-projected
+    onto the collision-free manifold before solving, and the best
+    collision-free solution is preferred (both inside the timed region).
     """
-    order = quik.model.actuated_order
-    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
-    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
+    make_seeds, pick_best = _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker)
 
     def one(pose_mat, rng) -> jax.Array:
-        seeds = rng.uniform(lo_c, hi_c, (num_seeds, quik.dof)).astype(np.float32)
+        seeds = make_seeds(rng, 1)[0]
         poses = jnp.broadcast_to(jnp.asarray(pose_mat, jnp.float32), (num_seeds, 4, 4))
         out = quik.solve_to_actuated(poses, jnp.asarray(seeds), algorithm=algorithm)
-        best = int(np.argmin(np.asarray(out["error"])))
-        return out["q_actuated"][best]
+        q = np.asarray(out["q_actuated"])[None]
+        err = np.asarray(out["error"])[None]
+        return jnp.asarray(pick_best(q, err)[0])
 
     results: list[SolveResult] = []
     for i, target_pose in enumerate(target_poses):
@@ -956,11 +1023,14 @@ def _run_quik_batch(
     hi: np.ndarray,
     num_seeds: int,
     algorithm: int = 0,
+    vamp_checker=None,
 ) -> BatchResult:
-    """Run the QuIK CPU solver over all targets in one fused FFI call (wall-clock)."""
-    order = quik.model.actuated_order
-    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
-    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
+    """Run the QuIK CPU solver over all targets in one fused FFI call (wall-clock).
+
+    With ``vamp_checker`` the run is collision-aware (see
+    :func:`_run_quik_sequential`).
+    """
+    make_seeds, pick_best = _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker)
     n_targets = len(target_poses_stacked.wxyz_xyz)
     Ts = np.stack([
         np.asarray(jaxlie.SE3(target_poses_stacked.wxyz_xyz[i]).as_matrix())
@@ -968,7 +1038,7 @@ def _run_quik_batch(
     ]).astype(np.float32)
 
     def one(rng) -> np.ndarray:
-        seeds = rng.uniform(lo_c, hi_c, (n_targets, num_seeds, quik.dof)).astype(np.float32)
+        seeds = make_seeds(rng, n_targets)
         poses = np.repeat(Ts[:, None], num_seeds, axis=1)  # (n_targets, num_seeds, 4, 4)
         out = quik.solve_to_actuated(
             jnp.asarray(poses.reshape(-1, 4, 4)),
@@ -977,8 +1047,7 @@ def _run_quik_batch(
         )
         q = np.asarray(out["q_actuated"]).reshape(n_targets, num_seeds, -1)
         err = np.asarray(out["error"]).reshape(n_targets, num_seeds)
-        best = np.argmin(err, axis=1)
-        return q[np.arange(n_targets), best]
+        return pick_best(q, err)
 
     cfgs_np = one(np.random.default_rng(0))
     pos_errs = np.empty(n_targets)
@@ -1460,6 +1529,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     robot_coll     = None
     _obs_geoms: list = []
     _collision_penalty = None
+    _quik_vamp_checker = None
     coll_kwargs_jax  = {}
     coll_kwargs_cuda = {}
     coll_kwargs_ls_cuda_kernel = {}
@@ -1538,6 +1608,33 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
 
         _check_coll_jit        = jax.jit(_min_coll_dist_single)
         _check_coll_batch_jit  = jax.jit(jax.vmap(_min_coll_dist_single))
+
+        # Collision-aware QuIK: VAMP CPU checker + MPPI seed projection.
+        if _quik_solver is not None and _VAMP_CPU_IMPORT_OK:
+            print("  Setting up collision-aware QuIK (VAMP MPPI seed projection) ...")
+            try:
+                _quik_vamp_checker = VAMPCPUCollisionChecker(
+                    ROBOT_URDFS[robot_name], srdf_path=srdf_path
+                )
+                if _quik_vamp_checker.dimension != n_act:
+                    raise RuntimeError(
+                        f"VAMP dimension {_quik_vamp_checker.dimension} != "
+                        f"robot actuated count {n_act}"
+                    )
+                _quik_vamp_checker.set_world_geoms(_obs_geoms)
+                # Warm up the projection + check kernels.
+                _warm = np.zeros((4, n_act), np.float32)
+                jax.block_until_ready(
+                    _quik_vamp_checker.project_collision_free(None, _warm)[0]
+                )
+                jax.block_until_ready(
+                    _quik_vamp_checker.check_collision_free(None, _warm)
+                )
+                print("  Collision-aware QuIK ready.")
+            except Exception as e:  # noqa: BLE001
+                print(f"  Collision-aware QuIK unavailable: "
+                      f"{type(e).__name__}: {str(e)[:90]}")
+                _quik_vamp_checker = None
 
         if _pyroki_solve_fn is not None:
             print("  Setting up collision-aware PyRoKi ...")
@@ -1906,6 +2003,13 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
                 target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
+        if _quik_vamp_checker is not None:
+            print("  Running QuIK-CPU-COLL ...")
+            seq_coll_results["QuIK-CPU"] = _run_quik_sequential(
+                _quik_solver, robot, target_link_index, target_poses,
+                lo, hi, _quik_num_seeds, vamp_checker=_quik_vamp_checker,
+            )
+
     # ------------------------------------------------------------------
     # Batch evaluation (JAX + CUDA batch solvers)
     # ------------------------------------------------------------------
@@ -1987,6 +2091,13 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
                 target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
+        if _quik_vamp_checker is not None:
+            print("  Running QuIK-CPU-COLL-BATCH ...")
+            batch_coll_results["QuIK-CPU"] = _run_quik_batch(
+                _quik_solver, robot, target_link_index, target_poses_stacked,
+                lo, hi, _quik_num_seeds, vamp_checker=_quik_vamp_checker,
+            )
+
     # ------------------------------------------------------------------
     # Results tables
     # ------------------------------------------------------------------
@@ -2035,6 +2146,8 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     ]
     if _pyroki_coll_solve_fn is not None:
         coll_seq_order.append("PyRoKi")
+    if "QuIK-CPU" in seq_coll_results:
+        coll_seq_order.append("QuIK-CPU")
     coll_batch_order = [
         "HJCD-JAX", "HJCD-CUDA",
         "LS-JAX",   "LS-CUDA",
@@ -2043,6 +2156,8 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     ]
     if _pyroki_coll_batch_fn is not None:
         coll_batch_order.append("PyRoKi")
+    if "QuIK-CPU" in batch_coll_results:
+        coll_batch_order.append("QuIK-CPU")
 
     print(f"\n{'='*80}")
     print(f"Sequential results — per-problem latency  (N={N_TARGETS}, timed={N_TIMED})")

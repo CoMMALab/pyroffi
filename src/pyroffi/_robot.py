@@ -230,6 +230,7 @@ class Robot:
         qdd: Float[Array, "*batch n_act_joints"],
         gravity: jdc.Static[float] = -9.81,
         use_cuda: jdc.Static[bool] = False,
+        f_ext: Float[Array, "*batch n_act_joints 6"] | None = None,
     ) -> Float[Array, "*batch n_act_joints"]:
         """Joint torques realizing ``qdd`` at state ``(q, qd)`` (RNEA + viscous damping).
 
@@ -242,13 +243,19 @@ class Robot:
                 wrapped in ``jax.jit`` (first in-trace use triggers a one-time
                 kernel compile).  ``jax.vmap`` is not supported by the FFI
                 kernels — batch via a leading dim on ``q``/``qd``/``qdd``.
+            f_ext: Optional per-body external wrenches ``[torque; force]``
+                applied at each body's frame origin, in world axes.
         """
         if use_cuda:
-            return self._require_backends().grid(gravity).inverse_dynamics(q, qd, qdd)
+            return (
+                self._require_backends()
+                .grid(gravity)
+                .inverse_dynamics(q, qd, qdd, f_ext)
+            )
 
         from . import dynamics as _dynamics
 
-        return _dynamics.inverse_dynamics(self, q, qd, qdd, gravity)
+        return _dynamics.inverse_dynamics(self, q, qd, qdd, gravity, f_ext)
 
     @jdc.jit
     def forward_dynamics(
@@ -258,6 +265,7 @@ class Robot:
         tau: Float[Array, "*batch n_act_joints"],
         gravity: jdc.Static[float] = -9.81,
         use_cuda: jdc.Static[bool] = False,
+        f_ext: Float[Array, "*batch n_act_joints 6"] | None = None,
     ) -> Float[Array, "*batch n_act_joints"]:
         """Joint accelerations produced by torques ``tau`` at state ``(q, qd)``.
 
@@ -265,13 +273,18 @@ class Robot:
             use_cuda: If True, dispatch to the per-robot GRiD CUDA backend;
                 otherwise use the pure-JAX implementation.  jit-compatible (see
                 ``inverse_dynamics``); ``jax.vmap`` unsupported for the CUDA path.
+            f_ext: Optional per-body external wrenches (see ``inverse_dynamics``).
         """
         if use_cuda:
-            return self._require_backends().grid(gravity).forward_dynamics(q, qd, tau)
+            return (
+                self._require_backends()
+                .grid(gravity)
+                .forward_dynamics(q, qd, tau, f_ext)
+            )
 
         from . import dynamics as _dynamics
 
-        return _dynamics.forward_dynamics(self, q, qd, tau, gravity)
+        return _dynamics.forward_dynamics(self, q, qd, tau, gravity, f_ext)
 
     @jdc.jit
     def mass_matrix(
@@ -282,19 +295,68 @@ class Robot:
         """Joint-space mass matrix M(q) via the composite rigid body algorithm.
 
         Args:
-            use_cuda: If True, dispatch to the GRiD CUDA backend, which computes
-                M(q) as the (symmetrized) inverse of its direct ``Minv`` kernel;
+            use_cuda: If True, dispatch to the GRiD CUDA backend's direct
+                mass-matrix kernel (CRBA-equivalent, column-parallel);
                 otherwise use the pure-JAX composite rigid body algorithm.
                 jit-compatible (see ``inverse_dynamics``); ``jax.vmap``
                 unsupported for the CUDA path.
         """
         if use_cuda:
-            minv = self._require_backends().grid(-9.81).mass_matrix_inv(q)
-            return jnp.linalg.inv(minv)
+            return self._require_backends().grid(-9.81).mass_matrix(q)
 
         from . import dynamics as _dynamics
 
         return _dynamics.mass_matrix(self, q)
+
+    @jdc.jit
+    def jacobian(
+        self,
+        q: Float[Array, "*batch n_act_joints"],
+    ) -> tuple[
+        Float[Array, "*batch n_body 6 n_act_joints"],
+        Float[Array, "*batch n_body 3"],
+    ]:
+        """World-frame geometric Jacobians ``(J, r)`` for every dynamic body.
+
+        ``J[..., i, :, :] @ qd`` is the angular-first spatial velocity
+        ``[omega; v]`` of body ``i``'s frame, with the linear part measured at
+        the frame origin ``r[..., i, :]`` in world axes. Bodies are indexed by
+        actuated joint (``robot.dynamics.dof_names`` order).
+        """
+        from . import dynamics as _dynamics
+
+        return _dynamics.jacobian(self, q)
+
+    @jdc.jit
+    def step(
+        self,
+        q: Float[Array, "*batch n_act_joints"],
+        qd: Float[Array, "*batch n_act_joints"],
+        tau: Float[Array, "*batch n_act_joints"],
+        dt: jdc.Static[float],
+        gravity: jdc.Static[float] = -9.81,
+        use_cuda: jdc.Static[bool] = False,
+        f_ext: Float[Array, "*batch n_act_joints 6"] | None = None,
+        method: jdc.Static[str] = "semi_implicit",
+    ) -> tuple[
+        Float[Array, "*batch n_act_joints"], Float[Array, "*batch n_act_joints"]
+    ]:
+        """Advance ``(q, qd)`` one timestep of size ``dt`` under torques ``tau``.
+
+        Semi-implicit (symplectic) Euler by default; ``method`` may also be
+        ``"euler"`` or ``"rk4"``. scan-compatible for rollouts; ``use_cuda``
+        integrates over the GRiD forward-dynamics kernels.
+        """
+        if use_cuda:
+            return (
+                self._require_backends()
+                .grid(gravity)
+                .step(q, qd, tau, dt, f_ext, method)
+            )
+
+        from . import dynamics as _dynamics
+
+        return _dynamics.step(self, q, qd, tau, dt, gravity, f_ext, method)
 
     def collision_check(
         self,

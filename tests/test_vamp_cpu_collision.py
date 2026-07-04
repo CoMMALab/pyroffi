@@ -261,6 +261,50 @@ def test_point_cloud_capt(checker):
     assert withpc < base, "CAPT point-cloud wall removed no free configurations"
 
 
+def test_project_collision_free(checker):
+    """Projection repairs colliding seeds, passes free ones through, and is
+    deterministic per seed."""
+    n = checker.dimension
+    world = Sphere.from_center_and_radius(
+        center=jnp.array([[0.3, 0.0, 0.6], [0.0, 0.35, 0.7], [-0.25, 0.0, 0.5]]),
+        radius=jnp.array([0.13, 0.12, 0.12]),
+    )
+    rng = np.random.RandomState(3)
+    B = 1024
+    cfg = jnp.asarray(rng.uniform(-1.2, 1.2, size=(B, n)), dtype=jnp.float32)
+    free_before = np.asarray(checker.check_collision_free(None, cfg, world))
+    assert 0 < int(free_before.sum()) < B, "vacuous test — need a free/colliding mix"
+
+    lower = np.full(n, -2.8, np.float32)
+    upper = np.full(n, 2.8, np.float32)
+    qp, ok = checker.project_collision_free(
+        None, cfg, world, lower=lower, upper=upper, seed=42
+    )
+    qp, ok = np.asarray(qp), np.asarray(ok)
+    cfg_np = np.asarray(cfg)
+
+    # Every config reported ok must actually be collision-free.
+    free_after = np.asarray(checker.check_collision_free(None, jnp.asarray(qp), world))
+    assert np.all(free_after[ok]), "projection returned colliding configs marked ok"
+    # Already-free seeds pass through untouched; failures are returned unchanged.
+    assert np.allclose(qp[free_before], cfg_np[free_before])
+    assert np.allclose(qp[~ok], cfg_np[~ok])
+    # Joint-limit clamping is respected.
+    assert np.all(qp >= lower - 1e-6) and np.all(qp <= upper + 1e-6)
+    # The projection repaired a real share of the colliding seeds.
+    repaired = int((ok & ~free_before).sum())
+    n_coll = int((~free_before).sum())
+    print(f"[vamp-project] repaired {repaired}/{n_coll} colliding seeds")
+    assert repaired > n_coll // 2, "projection repaired too few colliding seeds"
+
+    # Deterministic per (seed, batch index), independent of the OpenMP schedule.
+    qp2, ok2 = checker.project_collision_free(
+        None, cfg, world, lower=lower, upper=upper, seed=42
+    )
+    assert np.array_equal(qp, np.asarray(qp2))
+    assert np.array_equal(ok, np.asarray(ok2))
+
+
 def _time_call(fn, repeats):
     """Return the best wall-clock time (seconds) over `repeats` runs of `fn`.
 

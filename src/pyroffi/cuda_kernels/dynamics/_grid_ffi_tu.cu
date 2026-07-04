@@ -123,6 +123,97 @@ struct ScratchBuffer {
 };
 
 // ---------------------------------------------------------------------------
+// CRBA-equivalent mass matrix kernel.
+//
+// GRiDCodeGenerator does not emit a CRBA; instead M(q) is assembled
+// column-by-column as M e_j = ID(q, qd=0, qdd=e_j, g=0), reusing the
+// generated (fully thread-parallel) inverse_dynamics_inner. XImats are
+// loaded/updated once per timestep and shared across all n columns; blocks
+// grid-stride over timesteps, so the batch dimension saturates the GPU and
+// every column evaluation uses all threads of the block.
+// ---------------------------------------------------------------------------
+
+// GRiDCodeGenerator omits the s_topology_helpers parameter from the device
+// helpers for serial chains with identical joint subspaces; these shims
+// dispatch to whichever signature this robot's grid.cuh actually declares
+// (the int/long dummy parameter makes the topology-helpers overload
+// preferred when both could bind).
+
+template <typename U>
+__device__ auto LoadXImats(U* s_XImats, const U* s_q, int* s_top,
+                           const grid::robotModel<U>* m, U* s_temp, int)
+    -> decltype(grid::load_update_XImats_helpers<U>(s_XImats, s_q, s_top, m,
+                                                    s_temp)) {
+  grid::load_update_XImats_helpers<U>(s_XImats, s_q, s_top, m, s_temp);
+}
+
+template <typename U>
+__device__ void LoadXImats(U* s_XImats, const U* s_q, int* /*s_top*/,
+                           const grid::robotModel<U>* m, U* s_temp, long) {
+  grid::load_update_XImats_helpers<U>(s_XImats, s_q, m, s_temp);
+}
+
+template <typename U>
+__device__ auto IdInner(U* s_c, U* s_vaf, const U* s_q, const U* s_qd,
+                        const U* s_qdd, U* s_XImats, int* s_top, U* s_temp,
+                        const U gravity, int)
+    -> decltype(grid::inverse_dynamics_inner<U>(s_c, s_vaf, s_q, s_qd, s_qdd,
+                                                s_XImats, s_top, s_temp,
+                                                gravity)) {
+  grid::inverse_dynamics_inner<U>(s_c, s_vaf, s_q, s_qd, s_qdd, s_XImats,
+                                  s_top, s_temp, gravity);
+}
+
+template <typename U>
+__device__ void IdInner(U* s_c, U* s_vaf, const U* s_q, const U* s_qd,
+                        const U* s_qdd, U* s_XImats, int* /*s_top*/, U* s_temp,
+                        const U gravity, long) {
+  grid::inverse_dynamics_inner<U>(s_c, s_vaf, s_q, s_qd, s_qdd, s_XImats,
+                                  s_temp, gravity);
+}
+
+__global__ void CrbaKernel(T* d_M, const T* d_q,
+                           const grid::robotModel<T>* d_robotModel,
+                           const int NUM_TIMESTEPS) {
+  __shared__ T s_q[kNq];
+  __shared__ T s_qd[kNq];   // zero
+  __shared__ T s_qdd[kNq];  // unit column
+  __shared__ T s_c[kNq];
+  __shared__ T s_vaf[18 * kNq];
+  // Upper bound on gen_topology_helpers_size() (6n+1; 0 for serial chains).
+  __shared__ int s_topology_helpers[6 * kNq + 2];
+  extern __shared__ T s_XITemp[];
+  T* s_XImats = s_XITemp;          // 72n floats (X and I mats per joint)
+  T* s_temp = &s_XITemp[72 * kNq];
+  for (int k = blockIdx.x; k < NUM_TIMESTEPS; k += gridDim.x) {
+    for (int i = threadIdx.x + threadIdx.y * blockDim.x; i < kNq;
+         i += blockDim.x * blockDim.y) {
+      s_q[i] = d_q[k * kNq + i];
+      s_qd[i] = T(0);
+    }
+    __syncthreads();
+    LoadXImats<T>(s_XImats, s_q, s_topology_helpers, d_robotModel, s_temp, 0);
+    __syncthreads();
+    for (int col = 0; col < kNq; ++col) {
+      for (int i = threadIdx.x + threadIdx.y * blockDim.x; i < kNq;
+           i += blockDim.x * blockDim.y) {
+        s_qdd[i] = (i == col) ? T(1) : T(0);
+      }
+      __syncthreads();
+      // qd = 0 and g = 0 kill every bias term, so s_c = M(q) @ e_col.
+      IdInner<T>(s_c, s_vaf, s_q, s_qd, s_qdd, s_XImats, s_topology_helpers,
+                 s_temp, T(0), 0);
+      __syncthreads();
+      for (int i = threadIdx.x + threadIdx.y * blockDim.x; i < kNq;
+           i += blockDim.x * blockDim.y) {
+        d_M[(k * kNq + col) * kNq + i] = s_c[i];  // [t, col, row]
+      }
+      __syncthreads();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Handlers.
 // ---------------------------------------------------------------------------
 
@@ -190,6 +281,22 @@ ffi::Error GridMinvImpl(cudaStream_t stream,
          grid::MINV_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
           minv->typed_data(), q.typed_data(), kNq, model, batch);
   return CudaCheck(cudaGetLastError(), "direct_minv_kernel");
+}
+
+// Mass matrix M(q): q -> (B, n, n), [t, col, row] fully populated.
+ffi::Error GridCrbaImpl(cudaStream_t stream,
+                        ffi::Buffer<ffi::DataType::F32> q,
+                        ffi::Result<ffi::Buffer<ffi::DataType::F32>> m) {
+  const int64_t batch = q.dimensions()[0];
+  const int64_t n = q.dimensions()[1];
+  if (auto err = CheckDims(batch, n, q.element_count()); err.failure())
+    return err;
+  grid::robotModel<T>* model = GetRobotModel();
+
+  CrbaKernel<<<GridDims(batch), ThreadDims(),
+               grid::ID_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
+      m->typed_data(), q.typed_data(), model, batch);
+  return CudaCheck(cudaGetLastError(), "CrbaKernel");
 }
 
 // Analytic inverse dynamics gradient: (q, qd, qdd) -> dc/d[q,qd],
@@ -264,6 +371,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GridFdFfi, GridFdImpl,
                                   .Ret<ffi::Buffer<ffi::DataType::F32>>());
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridMinvFfi, GridMinvImpl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
+                                  .Ret<ffi::Buffer<ffi::DataType::F32>>());
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GridCrbaFfi, GridCrbaImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q

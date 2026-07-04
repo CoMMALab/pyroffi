@@ -126,6 +126,111 @@ def test_forward_dynamics_differentiable(robot):
     assert jnp.abs(g - Minv_rowsum).max() < 1e-4
 
 
+def test_jacobian_linear_vs_autodiff(robot):
+    """J_lin must equal d r / d q (frame-origin velocity = J_lin @ qd)."""
+    n = robot.dynamics.num_dof
+    q = jax.random.normal(jax.random.PRNGKey(6), (n,))
+    J, r = dynamics.jacobian(robot, q)
+    dr_dq = jax.jacfwd(lambda q_: dynamics.jacobian(robot, q_)[1])(q)
+    assert jnp.abs(J[:, 3:, :] - dr_dq).max() < 1e-5
+
+
+def test_jacobian_angular_vs_autodiff(robot):
+    """skew(J_ang[:, j]) == d R_wb / d q_j @ R_wb^T for each body."""
+    from pyroffi.dynamics._dynamics_jax import _compute_X0, _compute_Xup
+
+    dyn = robot.dynamics
+    n = dyn.num_dof
+    q = jax.random.normal(jax.random.PRNGKey(7), (n,))
+    J, _ = dynamics.jacobian(robot, q)
+
+    def rotations(q_):
+        X0 = _compute_X0(dyn, _compute_Xup(dyn, q_))
+        # E maps world -> body, so R_wb = E^T.
+        return jnp.stack([X0[i][:3, :3].T for i in range(n)])
+
+    R = rotations(q)
+    dR = jax.jacfwd(rotations)(q)  # (n_body, 3, 3, n_dof)
+    for i in range(n):
+        for j in range(n):
+            W = dR[i, :, :, j] @ R[i].T  # skew(d omega / d qd_j)
+            w = jnp.array([W[2, 1], W[0, 2], W[1, 0]])
+            assert jnp.abs(J[i, :3, j] - w).max() < 1e-5, (i, j)
+
+
+def test_fext_generalized_force_equivalence(robot):
+    """ID(q,qd,qdd,f_ext) == ID(q,qd,qdd) - J^T f_ext (world-axis wrenches)."""
+    n = robot.dynamics.num_dof
+    key = jax.random.PRNGKey(8)
+    q, qd, qdd = jax.random.normal(key, (3, n))
+    f_ext = jax.random.normal(jax.random.PRNGKey(9), (n, 6))
+    tau = dynamics.inverse_dynamics(robot, q, qd, qdd)
+    tau_f = dynamics.inverse_dynamics(robot, q, qd, qdd, f_ext=f_ext)
+    J, _ = dynamics.jacobian(robot, q)
+    tau_ext = jnp.einsum("ijk,ij->k", J, f_ext)
+    assert jnp.abs((tau - tau_f) - tau_ext).max() < 1e-4
+
+
+def test_fext_forward_inverse_roundtrip(robot):
+    n = robot.dynamics.num_dof
+    key = jax.random.PRNGKey(10)
+    q, qd, tau = jax.random.normal(key, (3, n))
+    f_ext = jax.random.normal(jax.random.PRNGKey(11), (n, 6))
+    qdd = dynamics.forward_dynamics(robot, q, qd, tau, f_ext=f_ext)
+    tau_rt = dynamics.inverse_dynamics(robot, q, qd, qdd, f_ext=f_ext)
+    assert jnp.abs(tau_rt - tau).max() < 1e-4
+
+
+def test_fext_batched(robot):
+    n = robot.dynamics.num_dof
+    q, qd, qdd = _rand_state(robot, jax.random.PRNGKey(12), batch=(4,))
+    f_ext = jax.random.normal(jax.random.PRNGKey(13), (4, n, 6))
+    tau = dynamics.inverse_dynamics(robot, q, qd, qdd, f_ext=f_ext)
+    assert tau.shape == (4, n)
+    tau0 = dynamics.inverse_dynamics(robot, q[0], qd[0], qdd[0], f_ext=f_ext[0])
+    assert jnp.abs(tau[0] - tau0).max() < ATOL
+
+
+def test_step_semi_implicit_definition(robot):
+    n = robot.dynamics.num_dof
+    key = jax.random.PRNGKey(14)
+    q, qd, tau = jax.random.normal(key, (3, n))
+    dt = 1e-3
+    q1, qd1 = dynamics.step(robot, q, qd, tau, dt)
+    qdd = dynamics.forward_dynamics(robot, q, qd, tau)
+    assert jnp.abs(qd1 - (qd + dt * qdd)).max() < ATOL
+    assert jnp.abs(q1 - (q + dt * qd1)).max() < ATOL
+
+
+def test_step_rk4_rollout_matches_fine_euler(robot):
+    """A coarse RK4 rollout should track a much finer semi-implicit rollout."""
+    n = robot.dynamics.num_dof
+    q0 = 0.1 * jax.random.normal(jax.random.PRNGKey(15), (n,))
+    qd0 = jnp.zeros(n)
+    tau = jnp.zeros(n)
+    dt, steps, refine = 5e-3, 20, 50
+
+    def rollout(method, dt, steps):
+        def body(carry, _):
+            q, qd = carry
+            return dynamics.step(robot, q, qd, tau, dt, method=method), None
+
+        (q, qd), _ = jax.lax.scan(body, (q0, qd0), None, length=steps)
+        return q, qd
+
+    q_rk4, _ = rollout("rk4", dt, steps)
+    q_ref, _ = rollout("semi_implicit", dt / refine, steps * refine)
+    assert jnp.abs(q_rk4 - q_ref).max() < 1e-3
+
+
+def test_step_jit_and_batch(robot):
+    n = robot.dynamics.num_dof
+    q, qd, tau = _rand_state(robot, jax.random.PRNGKey(16), batch=(4,))
+    step = jax.jit(lambda q, qd: dynamics.step(robot, q, qd, tau, 1e-3))
+    q1, qd1 = step(q, qd)
+    assert q1.shape == qd1.shape == (4, n)
+
+
 if __name__ == "__main__":
     import sys
 

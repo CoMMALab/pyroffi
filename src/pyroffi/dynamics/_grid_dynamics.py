@@ -27,14 +27,16 @@ from jax import numpy as jnp
 from jaxtyping import Float
 
 from .._robot_urdf_parser import RobotURDFParser
-from ._dynamics_jax import _DEFAULT_GRAVITY, mass_matrix_jax
+from ._dynamics_jax import _DEFAULT_GRAVITY, jacobian_jax, mass_matrix_jax
 from ._grid_codegen import compile_grid_library
 from ._grid_robot_adapter import build_grid_robot
+from ._integrators import StepMethod, step_with_fd
 
 _SYMBOLS = {
     "id": "GridIdFfi",
     "fd": "GridFdFfi",
     "minv": "GridMinvFfi",
+    "crba": "GridCrbaFfi",
     "id_grad": "GridIdGradFfi",
     "fd_grad": "GridFdGradFfi",
 }
@@ -43,7 +45,7 @@ _registered_libs: dict[str, dict[str, str]] = {}
 
 
 def _register_library(so_path: Path) -> dict[str, str]:
-    """CDLL the compiled library and register its five FFI targets.
+    """CDLL the compiled library and register its FFI targets.
 
     Target names are namespaced by the library's cache key so multiple robots
     coexist in one process. Returns op-name -> FFI target name.
@@ -244,24 +246,59 @@ class GRiDDynamics:
     # Public API.
     # ------------------------------------------------------------------
 
+    def _require_dyn_info(self, what: str):
+        if self._dyn_info is None:
+            raise NotImplementedError(
+                f"{what} requires the pure-JAX dynamics info, which is "
+                "unavailable for this URDF (see RobotURDFParser.parse_dynamics)."
+            )
+        return self._dyn_info
+
+    def _tau_ext(self, q: Array, f_ext: Array) -> Array:
+        """Generalized joint torques from per-body world-axis wrenches.
+
+        ``tau_ext = sum_i J_i^T f_ext_i`` with the pure-JAX frame Jacobians
+        (external forces enter the dynamics linearly as generalized forces,
+        so the GRiD kernels themselves stay untouched). Differentiable in
+        both ``q`` and ``f_ext``.
+        """
+        dyn = self._require_dyn_info("f_ext support")
+        J, _ = jacobian_jax(dyn, q.astype(jnp.float32))  # (*b, n_body, 6, n)
+        return jnp.einsum("...ijk,...ij->...k", J, f_ext.astype(jnp.float32))
+
     def inverse_dynamics(
         self,
         q: Float[Array, "*batch n"],
         qd: Float[Array, "*batch n"],
         qdd: Float[Array, "*batch n"],
+        f_ext: Float[Array, "*batch n 6"] | None = None,
     ) -> Float[Array, "*batch n"]:
         """Joint torques via GRiD RNEA. Reverse-mode differentiable
-        (analytic GRiD gradients for q/qd; mass-matrix product for qdd)."""
-        return _id_differentiable(self, q, qd, qdd)
+        (analytic GRiD gradients for q/qd; mass-matrix product for qdd).
+
+        ``f_ext`` are optional per-body wrenches ``[torque; force]`` at each
+        body's frame origin in world axes (pyroffi actuated-joint body order);
+        they are composited around the kernel as generalized forces.
+        """
+        tau = _id_differentiable(self, q, qd, qdd)
+        if f_ext is not None:
+            tau = tau - self._tau_ext(q, f_ext)
+        return tau
 
     def forward_dynamics(
         self,
         q: Float[Array, "*batch n"],
         qd: Float[Array, "*batch n"],
         u: Float[Array, "*batch n"],
+        f_ext: Float[Array, "*batch n 6"] | None = None,
     ) -> Float[Array, "*batch n"]:
         """Joint accelerations via GRiD ABA-style FD. Reverse-mode
-        differentiable using GRiD's analytic gradient + Minv kernels."""
+        differentiable using GRiD's analytic gradient + Minv kernels.
+
+        ``f_ext`` follows the same convention as :meth:`inverse_dynamics`.
+        """
+        if f_ext is not None:
+            u = u + self._tau_ext(q, f_ext)
         return _fd_differentiable(self, q, qd, u)
 
     def mass_matrix_inv(
@@ -269,6 +306,56 @@ class GRiDDynamics:
     ) -> Float[Array, "*batch n n"]:
         """Inverse joint-space mass matrix (GRiD direct Minv), symmetrized."""
         return self._minv_raw(q)
+
+    def mass_matrix(
+        self, q: Float[Array, "*batch n"]
+    ) -> Float[Array, "*batch n n"]:
+        """Joint-space mass matrix M(q) on the GPU.
+
+        Computed by the custom ``CrbaKernel``: XImats are loaded once per
+        timestep, then each column is ``ID(q, 0, e_j, g=0)`` via GRiD's
+        thread-parallel inverse-dynamics inner routine (exactly CRBA's M).
+        """
+        n = self.num_dof
+        batch_axes, (qf,) = self._flatten(q)
+        buf = self._call("crba", (qf.shape[0], n, n), qf)  # [b, col, row]
+        M = self._mat_from_grid(jnp.swapaxes(buf, -1, -2))
+        return M.reshape(*batch_axes, n, n)
+
+    def jacobian(
+        self, q: Float[Array, "*batch n"]
+    ) -> tuple[Float[Array, "*batch n 6 n"], Float[Array, "*batch n 3"]]:
+        """World-frame geometric Jacobians ``(J, r)`` for every body.
+
+        GRiDCodeGenerator emits no Jacobian kernel; this delegates to the
+        pure-JAX :func:`jacobian_jax` in float32 (same convention: angular
+        first, linear part at each body frame origin, world axes).
+        """
+        dyn = self._require_dyn_info("jacobian")
+        return jacobian_jax(dyn, q.astype(jnp.float32))
+
+    def step(
+        self,
+        q: Float[Array, "*batch n"],
+        qd: Float[Array, "*batch n"],
+        u: Float[Array, "*batch n"],
+        dt: float,
+        f_ext: Float[Array, "*batch n 6"] | None = None,
+        method: StepMethod = "semi_implicit",
+    ) -> tuple[Float[Array, "*batch n"], Float[Array, "*batch n"]]:
+        """Advance ``(q, qd)`` one timestep using the GRiD forward dynamics.
+
+        Same integrators as :func:`pyroffi.dynamics.step` (semi-implicit
+        Euler default, ``"euler"``, ``"rk4"``); differentiable through the
+        GRiD custom_vjp rules.
+        """
+        return step_with_fd(
+            lambda q_, qd_: self.forward_dynamics(q_, qd_, u, f_ext),
+            q,
+            qd,
+            dt,
+            method,
+        )
 
     def inverse_dynamics_gradient(
         self,
