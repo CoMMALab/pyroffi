@@ -1,0 +1,6 @@
+[submodule "external/GRiDCodeGenerator"]
+	path = external/GRiDCodeGenerator
+	url = https://github.com/robot-acceleration/GRiDCodeGenerator.git
+[submodule "external/QuIK"]
+	path = external/QuIK
+	url = https://github.com/steffanlloyd/quik.git
