@@ -31,6 +31,8 @@ from ._sco_optimization import ScoTrajOptConfig as ScoTrajOptConfig
 from ._sco_optimization import TrajOptConfig as TrajOptConfig
 from ._sco_optimization import sco_trajopt as sco_trajopt
 from ._sco_optimization import make_init_trajs as make_init_trajs
+from ._contact_trajopt import ContactTrajOptConfig as ContactTrajOptConfig
+from ._contact_trajopt import contact_sco_trajopt as contact_sco_trajopt
 from ._chomp_optimization import ChompTrajOptConfig as ChompTrajOptConfig
 from ._chomp_optimization import chomp_trajopt as chomp_trajopt
 from ._stomp_optimization import StompTrajOptConfig as StompTrajOptConfig

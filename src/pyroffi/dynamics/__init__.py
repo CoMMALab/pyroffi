@@ -29,4 +29,13 @@ def __getattr__(name: str):
         from ._grid_dynamics import GRiDDynamics
 
         return GRiDDynamics
+    if name in (
+        "ManipulatorSpec",
+        "GraspedObject",
+        "ContactSystem",
+        "capture_grasp_offsets",
+    ):
+        from . import _contact
+
+        return getattr(_contact, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

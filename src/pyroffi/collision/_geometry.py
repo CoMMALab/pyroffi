@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import dataclasses
 from typing import cast
 
 import jax
@@ -26,6 +27,42 @@ class CollGeom(abc.ABC):
 
     size: Float[Array, "*batch shape_dim"]
     """Geometry shape parameters, e.g. radius, half-length."""
+
+    mass: Float[Array, "*batch"] = dataclasses.field(
+        default_factory=lambda: jnp.zeros(()), kw_only=True
+    )
+    """Rigid-body mass (kg). Zero by default (purely geometric/static use)."""
+
+    inertia_diag: Float[Array, "*batch 3"] = dataclasses.field(
+        default_factory=lambda: jnp.zeros((3,)), kw_only=True
+    )
+    """Principal (diagonal) rotational inertia about the geometry's local
+    frame axes, at its ``pose`` origin (kg m^2). Zero by default."""
+
+    friction: Float[Array, "*batch"] = dataclasses.field(
+        default_factory=lambda: jnp.zeros(()), kw_only=True
+    )
+    """Coulomb friction coefficient for contacts against this geometry.
+    Zero by default."""
+
+    def with_physical_properties(
+        self,
+        mass: Float[ArrayLike, "*batch"] | None = None,
+        inertia_diag: Float[ArrayLike, "*batch 3"] | None = None,
+        friction: Float[ArrayLike, "*batch"] | None = None,
+    ) -> Self:
+        """Return a copy with mass / inertia / friction set (batch-broadcast)."""
+        batch_axes = self.get_batch_axes()
+        with jdc.copy_and_mutate(self) as out:
+            if mass is not None:
+                out.mass = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
+            if inertia_diag is not None:
+                out.inertia_diag = jnp.broadcast_to(
+                    jnp.asarray(inertia_diag), batch_axes + (3,)
+                )
+            if friction is not None:
+                out.friction = jnp.broadcast_to(jnp.asarray(friction), batch_axes)
+        return out
 
     def get_batch_axes(self) -> tuple[int, ...]:
         """Get batch axes of the geometry."""
@@ -113,6 +150,122 @@ class CollGeom(abc.ABC):
         return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
 
 
+def geom_from_mjcf_body(mj_model, body_name: str) -> "Box | Sphere | Capsule":
+    """Build a physically-parameterized ``CollGeom`` from a compiled MJCF body.
+
+    Reads ``mass`` / ``inertia_diag`` from ``mj_model.body_mass`` /
+    ``mj_model.body_inertia`` (MuJoCo's compiler already diagonalizes these in
+    the body's own inertial frame) and shape + ``friction`` (the sliding
+    component of ``geom_friction``) from the body's single geom. The body's
+    ``pos``/``quat`` (relative to its parent frame — the world frame, if the
+    body is attached directly to ``<worldbody>``) become the geometry's pose.
+
+    Requires the body to own exactly one geom, of a supported type (box,
+    sphere, or capsule).
+
+    Args:
+        mj_model: A compiled ``mujoco.MjModel`` (e.g. from
+            ``mujoco.MjModel.from_xml_path(...)``).
+        body_name: Name of the MJCF ``<body>`` to read.
+    """
+    import mujoco
+
+    bid = mj_model.body(body_name).id
+    n_geom = mj_model.body_geomnum[bid]
+    if n_geom != 1:
+        raise ValueError(
+            f"geom_from_mjcf_body requires exactly one geom on body "
+            f"'{body_name}' (found {n_geom})."
+        )
+    gid = mj_model.body_geomadr[bid]
+    gtype = mj_model.geom_type[gid]
+    size = mj_model.geom_size[gid]
+
+    # The geom's shape pose is expressed in the body frame; compose with the
+    # body's own pose (relative to its parent — the world frame, if this body
+    # is attached directly under <worldbody>) to get the geom's placement.
+    body_tf = jaxlie.SE3.from_rotation_and_translation(
+        jaxlie.SO3(jnp.asarray(mj_model.body_quat[bid])),
+        jnp.asarray(mj_model.body_pos[bid]),
+    )
+    geom_tf = jaxlie.SE3.from_rotation_and_translation(
+        jaxlie.SO3(jnp.asarray(mj_model.geom_quat[gid])),
+        jnp.asarray(mj_model.geom_pos[gid]),
+    )
+    world_tf = body_tf @ geom_tf
+    pos = world_tf.translation()
+    quat = world_tf.rotation().wxyz
+    mass = float(mj_model.body_mass[bid])
+    # `body_inertia` is diagonal in the body's *inertial* frame (ipos/iquat),
+    # which for a single-geom body auto-compiled by MuJoCo coincides with the
+    # geom frame used above; this is not composed separately.
+    inertia_diag = mj_model.body_inertia[bid]
+    friction = float(mj_model.geom_friction[gid, 0])
+
+    if gtype == mujoco.mjtGeom.mjGEOM_BOX:
+        return Box.from_center_and_half_lengths(
+            center=pos, half_lengths=size, wxyz=quat,
+            mass=mass, inertia_diag=inertia_diag, friction=friction,
+        )
+    if gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
+        return Sphere.from_center_and_radius(
+            center=pos, radius=size[0],
+            mass=mass, inertia_diag=inertia_diag, friction=friction,
+        )
+    if gtype == mujoco.mjtGeom.mjGEOM_CAPSULE:
+        return Capsule.from_radius_height(
+            radius=size[0], height=2.0 * size[1], position=pos, wxyz=quat,
+            mass=mass, inertia_diag=inertia_diag, friction=friction,
+        )
+    raise ValueError(
+        f"Unsupported MJCF geom type {gtype!r} on body '{body_name}' "
+        "(geom_from_mjcf_body supports box, sphere, capsule)."
+    )
+
+
+def box_with_mjcf_dynamics(
+    center: Float[ArrayLike, "3"],
+    half_lengths: Float[ArrayLike, "3"],
+    mass: float,
+    friction: float = 0.0,
+    wxyz: Float[ArrayLike, "4"] | None = None,
+) -> Box:
+    """Build a ``Box`` whose inertia is computed by MuJoCo's compiler, without
+    writing any MJCF file to disk.
+
+    Constructs a minimal single-body, single-geom model in memory via
+    ``mujoco.MjSpec``, compiles it, and reads the result back through
+    :func:`geom_from_mjcf_body`. This gets the same solid-box inertia physics
+    an MJCF asset file would give you (and the same code path — one physical
+    parameter source for both) without manifesting a throwaway ``.xml`` file
+    per object.
+
+    Args:
+        center: World position of the box centre, ``(3,)``.
+        half_lengths: Half-extents along local X/Y/Z, ``(3,)``.
+        mass: Total mass (kg). MuJoCo derives the inertia tensor from this
+            and the box dimensions (uniform-density solid box).
+        friction: Coulomb sliding-friction coefficient.
+        wxyz: Optional orientation quaternion, ``(4,)``. Identity if omitted.
+    """
+    import mujoco
+
+    center = onp.asarray(center, dtype=float)
+    half_lengths = onp.asarray(half_lengths, dtype=float)
+    quat = onp.array([1.0, 0.0, 0.0, 0.0]) if wxyz is None else onp.asarray(wxyz, dtype=float)
+
+    spec = mujoco.MjSpec()
+    body = spec.worldbody.add_body(name="obj", pos=center, quat=quat)
+    body.add_geom(
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=half_lengths,
+        mass=mass,
+        friction=[friction, 0.005, 0.0001],
+    )
+    model = spec.compile()
+    return geom_from_mjcf_body(model, "obj")
+
+
 @jdc.pytree_dataclass
 class HalfSpace(CollGeom):
     """HalfSpace geometry defined by a point and an outward normal."""
@@ -169,9 +322,19 @@ class Sphere(CollGeom):
 
     @staticmethod
     def from_center_and_radius(
-        center: Float[ArrayLike, "*batch 3"], radius: Float[ArrayLike, "*batch"]
+        center: Float[ArrayLike, "*batch 3"],
+        radius: Float[ArrayLike, "*batch"],
+        mass: Float[ArrayLike, "*batch"] | None = None,
+        inertia_diag: Float[ArrayLike, "*batch 3"] | None = None,
+        friction: Float[ArrayLike, "*batch"] | None = None,
     ) -> Sphere:
-        """Create a Sphere geometry from a center point and radius."""
+        """Create a Sphere geometry from a center point and radius.
+
+        ``mass``/``inertia_diag``/``friction`` are optional physical
+        parameters (see :class:`CollGeom`). If ``mass`` is given and
+        ``inertia_diag`` is not, a solid-sphere inertia (``2/5 m r^2``) is
+        used as the default.
+        """
         center, radius = jnp.array(center), jnp.array(radius)
         batch_axes = jnp.broadcast_shapes(center.shape[:-1], radius.shape)
         center = jnp.broadcast_to(center, batch_axes + (3,))
@@ -189,7 +352,15 @@ class Sphere(CollGeom):
 
         # Store radius in size[..., 0], shape_dim=1
         size = radius[..., None]
-        return Sphere(pose=pose, size=size)
+        sphere = Sphere(pose=pose, size=size)
+
+        if mass is not None and inertia_diag is None:
+            m = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
+            i = (2.0 / 5.0) * m * radius**2
+            inertia_diag = jnp.broadcast_to(i[..., None], batch_axes + (3,))
+        if mass is not None or inertia_diag is not None or friction is not None:
+            sphere = sphere.with_physical_properties(mass, inertia_diag, friction)
+        return sphere
 
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
         pose_i: jaxlie.SE3 = jax.tree.map(lambda x: x[index], self.pose)
@@ -259,6 +430,9 @@ class Box(CollGeom):
         center: Float[ArrayLike, "*batch 3"],
         half_lengths: Float[ArrayLike, "*batch 3"],
         wxyz: Float[ArrayLike, "*batch 4"] | None = None,
+        mass: Float[ArrayLike, "*batch"] | None = None,
+        inertia_diag: Float[ArrayLike, "*batch 3"] | None = None,
+        friction: Float[ArrayLike, "*batch"] | None = None,
     ) -> Box:
         """Create a Box from a center position, half-lengths and optional orientation.
 
@@ -273,6 +447,9 @@ class Box(CollGeom):
             width=lengths[..., 1],
             height=lengths[..., 2],
             wxyz=wxyz,
+            mass=mass,
+            inertia_diag=inertia_diag,
+            friction=friction,
         )
 
     @staticmethod
@@ -282,6 +459,9 @@ class Box(CollGeom):
         width: Float[ArrayLike, "*batch"],
         height: Float[ArrayLike, "*batch"],
         wxyz: Float[ArrayLike, "*batch 4"] | None = None,
+        mass: Float[ArrayLike, "*batch"] | None = None,
+        inertia_diag: Float[ArrayLike, "*batch 3"] | None = None,
+        friction: Float[ArrayLike, "*batch"] | None = None,
     ) -> Box:
         """Create a Box from center, full `length`, `width`, `height` and optional orientation.
 
@@ -292,6 +472,9 @@ class Box(CollGeom):
             height: full extent along local Z-axis (*batch).
             wxyz: optional quaternion(s) describing rotation (*batch, 4). If None,
                   identity rotation is used.
+            mass, inertia_diag, friction: optional physical parameters (see
+                :class:`CollGeom`). If ``mass`` is given and ``inertia_diag``
+                is not, a solid-box inertia is used as the default.
         Returns:
             Box: new Box instance storing half-lengths internally.
         """
@@ -316,7 +499,19 @@ class Box(CollGeom):
 
         half_lengths = jnp.stack([length / 2.0, width / 2.0, height / 2.0], axis=-1)
         size = jnp.broadcast_to(half_lengths, batch_axes + (3,))
-        return Box(pose=pose, size=size)
+        box = Box(pose=pose, size=size)
+
+        if mass is not None and inertia_diag is None:
+            m = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
+            l_bc = jnp.broadcast_to(length, batch_axes)
+            w_bc = jnp.broadcast_to(width, batch_axes)
+            h_bc = jnp.broadcast_to(height, batch_axes)
+            inertia_diag = (m / 12.0)[..., None] * jnp.stack(
+                [w_bc**2 + h_bc**2, l_bc**2 + h_bc**2, l_bc**2 + w_bc**2], axis=-1
+            )
+        if mass is not None or inertia_diag is not None or friction is not None:
+            box = box.with_physical_properties(mass, inertia_diag, friction)
+        return box
 
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
         """Create a trimesh box for a single batch entry at `index`."""
@@ -403,8 +598,17 @@ class Capsule(CollGeom):
         height: Float[ArrayLike, "*batch"],  # Full height
         position: Float[ArrayLike, "*batch 3"] | None = None,
         wxyz: Float[ArrayLike, "*batch 4"] | None = None,
+        mass: Float[ArrayLike, "*batch"] | None = None,
+        inertia_diag: Float[ArrayLike, "*batch 3"] | None = None,
+        friction: Float[ArrayLike, "*batch"] | None = None,
     ) -> Capsule:
-        """Create Capsule geometry from radius and height."""
+        """Create Capsule geometry from radius and height.
+
+        ``mass``/``inertia_diag``/``friction`` are optional physical
+        parameters (see :class:`CollGeom`). If ``mass`` is given and
+        ``inertia_diag`` is not, a solid-cylinder approximation (end caps
+        ignored) is used as the default, with the cylinder axis along local Z.
+        """
         if position is None:
             position = jnp.zeros((3,))
         if wxyz is None:
@@ -427,7 +631,16 @@ class Capsule(CollGeom):
         pose = jaxlie.SE3(wxyz_xyz)
 
         size = jnp.stack([radius, height], axis=-1)
-        return Capsule(pose=pose, size=size)
+        capsule = Capsule(pose=pose, size=size)
+
+        if mass is not None and inertia_diag is None:
+            m = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
+            i_axial = 0.5 * m * radius**2
+            i_radial = m * (3.0 * radius**2 + height**2) / 12.0
+            inertia_diag = jnp.stack([i_radial, i_radial, i_axial], axis=-1)
+        if mass is not None or inertia_diag is not None or friction is not None:
+            capsule = capsule.with_physical_properties(mass, inertia_diag, friction)
+        return capsule
 
     @staticmethod
     def from_trimesh(mesh: trimesh.Trimesh) -> Capsule:

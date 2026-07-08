@@ -41,6 +41,35 @@ class Robot:
     Static pytree aux-data, identity-hashed — see :class:`CudaBackends`.  ``None``
     only for robots not built via :meth:`from_urdf` (e.g. manual construction)."""
 
+    _mjcf_model: jdc.Static[object | None] = None
+    """Optional compiled ``mujoco.MjModel``, set when :meth:`from_urdf` is
+    given an ``mjcf_path``. Static pytree aux-data, identity-hashed. ``None``
+    unless an MJCF file was supplied at construction."""
+
+    @property
+    def mjcf_model(self):
+        """The compiled ``mujoco.MjModel`` this robot was loaded with.
+
+        Available only when :meth:`from_urdf` was called with ``mjcf_path``.
+        """
+        if self._mjcf_model is None:
+            raise AttributeError(
+                "This Robot was not created with an mjcf_path, so no MJCF "
+                "model is available. Pass mjcf_path=... to Robot.from_urdf."
+            )
+        return self._mjcf_model
+
+    def geom_from_mjcf(self, body_name: str):
+        """Build a physically-parameterized ``CollGeom`` from a body in this
+        robot's MJCF model (mass/inertia/friction sourced from the MJCF, not
+        guessed). See :func:`pyroffi.collision.geom_from_mjcf_body`.
+
+        Requires :meth:`from_urdf` to have been called with ``mjcf_path``.
+        """
+        from .collision._geometry import geom_from_mjcf_body
+
+        return geom_from_mjcf_body(self.mjcf_model, body_name)
+
     @property
     def urdf(self):
         """The source ``yourdfpy.URDF`` this robot was parsed from.
@@ -66,6 +95,7 @@ class Robot:
     def from_urdf(
         urdf: yourdfpy.URDF,
         default_joint_cfg: Float[ArrayLike, "*batch actuated_count"] | None = None,
+        mjcf_path: str | None = None,
     ) -> Robot:
         """
         Loads a robot kinematic tree from a URDF.
@@ -74,6 +104,16 @@ class Robot:
         Args:
             urdf: The URDF to load the robot from.
             default_joint_cfg: The default joint configuration to use for optimization.
+            mjcf_path: Optional path to an MJCF (MuJoCo XML) file describing
+                this robot or a scene containing it — e.g. converted from the
+                URDF via ``scripts/urdf_to_mjcf.py``, or a hand-authored scene
+                with extra bodies (a grasped object, a fixture, ...). When
+                given, the compiled model is available as ``robot.mjcf_model``
+                and per-body physical parameters (mass, inertia, friction) can
+                be read via ``robot.geom_from_mjcf(body_name)``. Optional,
+                mirroring how an SRDF is optionally supplied to
+                :meth:`pyroffi.collision.RobotCollision.from_urdf` — omit it
+                if you don't need MJCF-sourced dynamics data.
         """
         joints, links = RobotURDFParser.parse(urdf)
 
@@ -96,6 +136,12 @@ class Robot:
             logger.warning(f"Dynamics unavailable for this URDF: {e}")
             dynamics = None
 
+        mjcf_model = None
+        if mjcf_path is not None:
+            import mujoco
+
+            mjcf_model = mujoco.MjModel.from_xml_path(str(mjcf_path))
+
         robot = Robot(
             joints=joints,
             links=links,
@@ -107,6 +153,7 @@ class Robot:
                 parent_joint_indices=links.parent_joint_indices,
                 num_joints=joints.num_joints,
             ),
+            _mjcf_model=mjcf_model,
         )
 
         return robot

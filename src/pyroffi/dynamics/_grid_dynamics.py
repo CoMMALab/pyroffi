@@ -44,6 +44,35 @@ _SYMBOLS = {
 _registered_libs: dict[str, dict[str, str]] = {}
 
 
+def _batchable(impl):
+    """Give ``impl`` a *true* (single-launch) ``jax.vmap`` rule.
+
+    ``impl`` must already accept arbitrary **leading** batch dimensions (all the
+    GRiD kernel wrappers do, via :meth:`GRiDDynamics._flatten`). The vmap rule
+    simply folds the mapped axis in as one more leading batch dimension and
+    calls ``impl`` once, so a ``vmap`` becomes a single fused kernel launch
+    (identically to batching over a leading dim) rather than a Python loop.
+    """
+    f = jax.custom_batching.custom_vmap(impl)
+
+    @f.def_vmap
+    def _rule(axis_size, in_batched, *args):
+        # def_vmap moves each batched arg's mapped axis to front (axis 0);
+        # broadcast any unbatched arg so every operand shares that leading axis.
+        # ``impl`` then runs once over the merged leading batch — a single
+        # kernel launch (not a Python loop). One vmap axis is folded per rule
+        # application; for many batch axes at once prefer a single leading
+        # batch dimension (reshape) over deeply-nested ``vmap``.
+        args = [
+            a if b else jnp.broadcast_to(a, (axis_size, *jnp.shape(a)))
+            for a, b in zip(args, in_batched)
+        ]
+        out = impl(*args)
+        return out, jax.tree_util.tree_map(lambda _: True, out)
+
+    return f
+
+
 def _register_library(so_path: Path) -> dict[str, str]:
     """CDLL the compiled library and register its FFI targets.
 
@@ -109,6 +138,24 @@ class GRiDDynamics:
         so_path = compile_grid_library(self._grid_model, arch=arch)
         self._targets = _register_library(so_path)
 
+        # True single-launch vmap for every kernel: wrap the *raw* (non-diff)
+        # kernel calls with :func:`_batchable`, which folds a vmapped axis in as
+        # one more leading batch dim (see its docstring). The custom_vjp layer
+        # sits on top and is vmap-transparent, descending into these on both the
+        # forward and backward pass — so vmap and grad-of-vmap are single
+        # launches. (Wrapping the custom_vjp function itself would close over
+        # ``self`` and trip CustomVJPException.)
+        self._id_raw_b = _batchable(self._id_raw)
+        self._fd_raw_b = _batchable(self._fd_raw)
+        self._minv_call = _batchable(self._minv_raw)
+        self._crba_call = _batchable(self._crba_raw)
+        self._idgrad_call = _batchable(
+            lambda q, qd, qdd: self._grad_raw("id_grad", q, qd, qdd)
+        )
+        self._fdgrad_call = _batchable(
+            lambda q, qd, u: self._grad_raw("fd_grad", q, qd, u)
+        )
+
         # q_grid[g] = sign[g] * q_act[perm[g]]  (see GridRobotModel).
         perm = onp.asarray(self._grid_model.joint_perm)
         signs = onp.asarray(self._grid_model.axis_signs, dtype=onp.float32)
@@ -165,6 +212,10 @@ class GRiDDynamics:
         ]
 
     def _call(self, op: str, out_shape: tuple[int, ...], *operands, **attrs):
+        # The raw FFI primitive is not vmap-aware; ``jax.vmap`` support is
+        # provided a level up by wrapping the public methods with
+        # :func:`_batchable` (a true single-launch batching rule). Prefer a
+        # leading batch dimension for the largest batches.
         return jax.ffi.ffi_call(
             self._targets[op],
             jax.ShapeDtypeStruct(out_shape, jnp.float32),
@@ -305,7 +356,7 @@ class GRiDDynamics:
         self, q: Float[Array, "*batch n"]
     ) -> Float[Array, "*batch n n"]:
         """Inverse joint-space mass matrix (GRiD direct Minv), symmetrized."""
-        return self._minv_raw(q)
+        return self._minv_call(q)
 
     def mass_matrix(
         self, q: Float[Array, "*batch n"]
@@ -316,6 +367,9 @@ class GRiDDynamics:
         timestep, then each column is ``ID(q, 0, e_j, g=0)`` via GRiD's
         thread-parallel inverse-dynamics inner routine (exactly CRBA's M).
         """
+        return self._crba_call(q)
+
+    def _crba_raw(self, q: Array) -> Array:
         n = self.num_dof
         batch_axes, (qf,) = self._flatten(q)
         buf = self._call("crba", (qf.shape[0], n, n), qf)  # [b, col, row]
@@ -364,7 +418,7 @@ class GRiDDynamics:
         qdd: Float[Array, "*batch n"],
     ) -> Float[Array, "*batch n 2n"]:
         """Analytic [d tau/d q | d tau/d qd], shape (*batch, n, 2n)."""
-        G = self._grad_raw("id_grad", q, qd, qdd)
+        G = self._idgrad_call(q, qd, qdd)
         # Damping is composited outside the GRiD kernels: d tau/d qd += diag(d).
         return G.at[..., :, self.num_dof :].add(jnp.diag(self._damping))
 
@@ -378,9 +432,9 @@ class GRiDDynamics:
         n = self.num_dof
         # The kernel differentiates GRiD's FD at the effective (damping-
         # compensated) torque; add the -Minv @ diag(d) chain-rule term for qd.
-        G = self._grad_raw("fd_grad", q, qd, u - self._damping * qd)
+        G = self._fdgrad_call(q, qd, u - self._damping * qd)
         if bool((self._damping != 0).any()):
-            Minv = self._minv_raw(q)
+            Minv = self._minv_call(q)
             G = G.at[..., :, n:].add(-Minv * self._damping[None, :])
         return G
 
@@ -392,17 +446,17 @@ class GRiDDynamics:
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
 def _id_differentiable(gd: GRiDDynamics, q, qd, qdd):
-    return gd._id_raw(q, qd, qdd)
+    return gd._id_raw_b(q, qd, qdd)
 
 
 def _id_fwd(gd, q, qd, qdd):
-    return gd._id_raw(q, qd, qdd), (q, qd, qdd)
+    return gd._id_raw_b(q, qd, qdd), (q, qd, qdd)
 
 
 def _id_bwd(gd, res, g):
     q, qd, qdd = res
     n = gd.num_dof
-    G = gd._grad_raw("id_grad", q, qd, qdd)  # (*b, n, 2n)
+    G = gd._idgrad_call(q, qd, qdd)  # (*b, n, 2n)
     dq = jnp.einsum("...ij,...i->...j", G[..., :n], g)
     dqd = jnp.einsum("...ij,...i->...j", G[..., n:], g) + gd._damping * g
     if gd._dyn_info is None:
@@ -421,11 +475,11 @@ _id_differentiable.defvjp(_id_fwd, _id_bwd)
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
 def _fd_differentiable(gd: GRiDDynamics, q, qd, u):
-    return gd._fd_raw(q, qd, u)
+    return gd._fd_raw_b(q, qd, u)
 
 
 def _fd_fwd(gd, q, qd, u):
-    return gd._fd_raw(q, qd, u), (q, qd, u)
+    return gd._fd_raw_b(q, qd, u), (q, qd, u)
 
 
 def _fd_bwd(gd, res, g):
@@ -433,11 +487,11 @@ def _fd_bwd(gd, res, g):
     n = gd.num_dof
     # Gradient kernel is evaluated at the effective (damping-compensated)
     # torque used by _fd_raw's forward pass.
-    G = gd._grad_raw("fd_grad", q, qd, u - gd._damping * qd)  # (*b, n, 2n)
+    G = gd._fdgrad_call(q, qd, u - gd._damping * qd)  # (*b, n, 2n)
     dq = jnp.einsum("...ij,...i->...j", G[..., :n], g)
     dqd = jnp.einsum("...ij,...i->...j", G[..., n:], g)
     # d qdd / d u = Minv(q); symmetric, so the VJP is Minv @ g.
-    Minv = gd._minv_raw(q)
+    Minv = gd._minv_call(q)
     du = jnp.einsum("...ij,...i->...j", Minv, g)
     # Chain rule through u_eff = u - d*qd.
     dqd = dqd - gd._damping * du
