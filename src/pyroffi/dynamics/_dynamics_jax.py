@@ -225,6 +225,34 @@ def _crba_single(dyn: DynamicsInfo, q: Array) -> Array:
     return M
 
 
+def _fd_solve_single(
+    dyn: DynamicsInfo,
+    q: Array,
+    qd: Array,
+    tau: Array,
+    gravity: Array | float,
+    f_ext: Array | None = None,
+) -> Array:
+    """Joint accelerations via an explicit mass-matrix solve (CRBA + RNEA).
+
+    Forms ``qdd = M(q)^-1 (tau - bias)`` where ``bias = RNEA(q, qd, qdd=0)``
+    collects the Coriolis/centrifugal, gravity, viscous-damping and external-
+    wrench terms. The solve uses a Cholesky factorization of the symmetric
+    positive-definite mass matrix (``assume_a="pos"``), following ``frax``'s
+    forward-dynamics formulation. Compared with the O(n) Articulated Body
+    Algorithm (:func:`_aba_single`) this avoids the per-joint division by the
+    projected articulated inertia ``S_i^T IA_i S_i`` -- which is where ABA can
+    produce NaN/Inf for degenerate (near-massless) links -- at the cost of an
+    O(n^3) factorization, negligible for manipulator-sized ``n`` and numerically
+    robust for well-conditioned ``M``.
+    """
+    import jax.scipy as jsp
+
+    M = _crba_single(dyn, q)
+    bias = _rnea_single(dyn, q, qd, jnp.zeros_like(q), gravity, f_ext)
+    return jsp.linalg.solve(M, tau - bias, assume_a="pos")
+
+
 def _aba_single(
     dyn: DynamicsInfo,
     q: Array,
@@ -397,15 +425,18 @@ def forward_dynamics_jax(
     gravity: float = _DEFAULT_GRAVITY,
     f_ext: Float[Array, "*batch n_dof 6"] | None = None,
 ) -> Float[Array, "*batch n_dof"]:
-    """Joint accelerations from state and torques via the O(n) ABA.
+    """Joint accelerations from state and torques.
 
-    Matches GRiD's forward dynamics formulation
-    ``qdd = Minv @ (u - RNEA(q, qd, 0))``, computed with the Articulated Body
-    Algorithm rather than an explicit mass-matrix solve.  ``f_ext`` follows
-    the same convention as :func:`inverse_dynamics_jax`.
+    Computes ``qdd = M(q)^-1 (tau - RNEA(q, qd, 0))`` via a Cholesky solve of the
+    composite-rigid-body mass matrix (:func:`_fd_solve_single`, following
+    ``frax``). This is numerically robust for degenerate/near-massless links,
+    where the O(n) Articulated Body Algorithm (:func:`_aba_single`, kept for
+    reference/benchmarking) can divide by a vanishing projected inertia and
+    return NaN/Inf. ``f_ext`` follows the same convention as
+    :func:`inverse_dynamics_jax`.
     """
     return _batched(
-        lambda d, q_, qd_, tau_, f_: _aba_single(d, q_, qd_, tau_, gravity, f_),
+        lambda d, q_, qd_, tau_, f_: _fd_solve_single(d, q_, qd_, tau_, gravity, f_),
         dyn,
         q,
         qd,

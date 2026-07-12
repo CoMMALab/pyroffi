@@ -370,10 +370,16 @@ def _params_from_A(A: np.ndarray) -> tuple[float, float, float, float]:
 
 
 def _ee_frame(robot: "Robot", cfg: np.ndarray, ee_link_idx: int) -> np.ndarray:
+    import jax
     import jax.numpy as jnp
     from ._fk import forward_kinematics
 
-    poses = np.asarray(forward_kinematics(robot, jnp.asarray(cfg)))  # [links, 7]
+    # This extraction is validated against a tight tolerance (see _validate),
+    # so it needs float64 FK precision here even though pyroffi no longer
+    # forces x64 globally (see _ik_primitives.py). Scoped locally so callers
+    # elsewhere stay in float32.
+    with jax.enable_x64():
+        poses = np.asarray(forward_kinematics(robot, jnp.asarray(cfg, dtype=jnp.float64)))  # [links, 7]
     return _wxyz_xyz_to_matrix(poses[ee_link_idx])
 
 

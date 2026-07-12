@@ -1,0 +1,536 @@
+"""Differential-flatness **contact-aware** (fixed-grasp) trajectory optimization.
+
+.. note:: **Contact-aware, not contact-rich.** This solver assumes a *single,
+   persistent contact mode* — the grasp captured at plan time is held rigid for
+   the entire horizon. Contacts never make or break, the active set is fixed,
+   and the contact forces are *allocated analytically* (not decided) from the
+   object's motion via the grasp-map pseudo-inverse. It reasons *about* contact
+   but never *decides* anything about it, which is exactly what makes the system
+   differentially flat. A genuinely **contact-rich** solver, where the contact
+   forces are first-class decision variables optimized subject to the object's
+   Newton-Euler balance (and where flatness therefore does *not* hold), lives in
+   :func:`~pyroffi.optimization_engines.contact_rich_trajopt`. See
+   ``flat_contact_trajopt_theory.md`` for the full distinction.
+
+A faster, better-conditioned reformulation of :mod:`_contact_trajopt`. The
+insight is that a *rigidly-grasped* object is **differentially flat in the
+object's SE(3) pose**: once the object-pose trajectory is chosen, everything
+else that the augmented-Lagrangian solver used to fight over is *structurally
+determined* rather than penalized:
+
+* **Grasp closure** — every gripper pose is ``xi_t @ offset_i`` for a constant
+  captured offset, so all grippers move as one rigid body *by construction*.
+  The expensive relative-pose closure constraint (and its ``mu`` duals) is gone;
+  in its place each arm's config merely *tracks* its object-derived gripper pose
+  (a well-conditioned absolute-pose cost, not a coupled equality constraint).
+* **Object Newton-Euler** — the contact forces are *allocated analytically*
+  from the object's acceleration via the grasp-map pseudo-inverse, so the
+  object-dynamics residual is **zero for every candidate trajectory**. The
+  contact forces stop being decision variables and the ``nu`` duals disappear.
+
+What remains is a single, mostly-unconstrained smooth problem solved with **one
+L-BFGS pass** (with an optional light penalty-continuation on the pose-tracking
+weight) — no nested dual-ascent outer loop. The decision vector is
+
+    z = [ delta_obj (T x 6) | q (T x ndof) | squeeze (T) | time_scale (1) ]
+
+where ``delta_obj_t`` is the object-pose twist relative to the grasp pose
+(``xi_t = exp(delta_t) @ T_obj0``), ``q`` are the stacked joint configs (kept
+so torque / joint-limit / (future) collision costs can see them), and
+``squeeze_t`` is a scalar internal grip force added *in the null space of the
+grasp map* so it tightens the grip without disturbing the object dynamics, and
+``time_scale`` sets a shared timestep ``dt`` (so the trajectory *duration* is a
+decision variable, enabling a minimum-time objective).
+
+The objective is a tunable blend — ``w_time`` (minimum time), ``w_smoothness``
+(accel/jerk), and ``w_effort`` (torque) — defaulting to pure min-time.
+
+This slashes the variable count (~4x fewer than ``[q | lambda]`` with duals),
+removes the outer loop, and turns two hard equality constraints into
+structure — addressing both the tractability and the speed of the plain
+augmented-Lagrangian formulation.
+"""
+
+from __future__ import annotations
+
+import functools
+from dataclasses import dataclass
+
+import jax
+import jax.numpy as jnp
+import jaxlie
+from jax import Array
+from jaxtyping import Float
+
+from ..dynamics import _contact as C
+from ..dynamics._contact import ContactSystem
+from ._contact_trajopt import _fd_vel_acc
+from ._sco_optimization import (
+    _LS_ALPHAS,
+    _lbfgs_two_loop,
+    _limits_cost,
+    _smoothness_cost,
+)
+
+
+@dataclass(frozen=True)
+class FlatContactTrajOptConfig:
+    """Hyper-parameters for the differential-flatness contact solver."""
+
+    # --- Loop structure (note: NO dual-ascent outer loop) ---
+    n_stages: int = 4
+    """Penalty-continuation stages; each scales the pose-tracking weight up."""
+    n_inner_iters: int = 40
+    m_lbfgs: int = 8
+
+    # --- Time parameterization (the trajectory *duration* is a decision var) ---
+    dt: float = 0.1
+    """Nominal / initial timestep. The per-step ``dt`` is optimized within
+    ``[min_dt, max_dt]`` (a shared scalar), so the total horizon is
+    ``(T - 1) * dt`` — this is what the min-time objective drives down."""
+    min_dt: float = 0.01
+    max_dt: float = 0.5
+
+    # --- High-level objective weights (what the solve trades off) ------------
+    #   These select *what* to optimize; the per-term weights below only shape
+    #   the relative contribution *within* each group. Feasibility penalties
+    #   (grasp tracking, joint/torque limits, grip validity) are always on and
+    #   are NOT gated by these — they enforce constraints, not preferences.
+    w_time: float = 1.0
+    """Minimum-time: penalizes the total horizon ``(T - 1) * dt``."""
+    w_smoothness: float = 0.0
+    """Scales the object + joint accel/jerk smoothness group."""
+    w_effort: float = 0.0
+    """Scales the total torque effort ``sum(tau**2)``."""
+
+    # --- Object flat-output smoothness (relative shape within the group) ---
+    w_obj_smooth: float = 1.0
+    w_obj_acc: float = 1.0
+    w_obj_jerk: float = 0.2
+
+    # --- Grasp tracking (replaces the AL grasp-closure constraint) ---
+    w_track: float = 50.0
+    """Initial weight pulling each arm's gripper onto its object-derived pose."""
+    track_scale: float = 3.0
+    """Per-stage multiplier on w_track (cheap penalty continuation)."""
+    w_track_max: float = 1e4
+
+    # --- Joint-space regularity ---
+    w_q_smooth: float = 0.2
+    w_q_acc: float = 0.5
+    w_q_jerk: float = 0.1
+    w_limits: float = 1.0
+
+    # --- Dynamics / effort (forces are ALLOCATED, not optimized) ---
+    w_torque_limit: float = 1.0
+    tau_max: float = 87.0
+
+    # --- Grip validity + squeeze ---
+    w_grip: float = 1.0
+    mu_friction: float | None = None
+    f_min: float = 2.0
+    w_squeeze_reg: float = 1e-4
+    """Regularizer on the internal squeeze force (keeps it minimal)."""
+
+
+# ---------------------------------------------------------------------------
+# Object frame + flat kinematics
+# ---------------------------------------------------------------------------
+
+def object_frame_offsets(system: ContactSystem) -> tuple[jaxlie.SE3, ...]:
+    """Constant object-frame -> gripper[i] transforms.
+
+    The object frame is taken to be the *reference* gripper frame at grasp
+    time, so ``offset_0`` is the identity and ``offset_i`` is exactly the
+    captured reference->gripper[i] offset already stored on the system.
+    """
+    k = system.num_manipulators
+    ident = jaxlie.SE3.identity()
+    return (ident,) + tuple(system.grasp_offsets)  # length == k, checked below or trust
+
+
+def _dt_from_scale(scale: Array, cfg: FlatContactTrajOptConfig) -> Array:
+    """Smoothly map an unconstrained scalar to a timestep in ``[min_dt, max_dt]``.
+
+    Using a sigmoid keeps the min-time optimization *unconstrained* (no clamp /
+    projection needed) while structurally respecting the duration bounds.
+    """
+    return cfg.min_dt + (cfg.max_dt - cfg.min_dt) * jax.nn.sigmoid(scale)
+
+
+def _scale_from_dt(dt: float, cfg: FlatContactTrajOptConfig) -> float:
+    """Inverse of :func:`_dt_from_scale` (used to initialise ``dt = cfg.dt``)."""
+    import math
+
+    frac = (dt - cfg.min_dt) / (cfg.max_dt - cfg.min_dt)
+    frac = min(max(frac, 1e-4), 1.0 - 1e-4)
+    return math.log(frac / (1.0 - frac))
+
+
+def _object_pose(delta: Float[Array, "6"], T_obj0: jaxlie.SE3) -> jaxlie.SE3:
+    """Object SE(3) pose from a twist relative to the grasp pose."""
+    return jaxlie.SE3.exp(delta) @ T_obj0
+
+
+def _gripper_targets(
+    xi: jaxlie.SE3, offsets: tuple[jaxlie.SE3, ...]
+) -> tuple[jaxlie.SE3, ...]:
+    return tuple(xi @ off for off in offsets)
+
+
+# ---------------------------------------------------------------------------
+# Analytic contact-force allocation (grasp-map pseudo-inverse + null squeeze)
+# ---------------------------------------------------------------------------
+
+def _skew(v: Array) -> Array:
+    return jnp.array(
+        [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]], v.dtype
+    )
+
+
+def allocate_forces(
+    system: ContactSystem,
+    q: Float[Array, "n"],
+    c: Float[Array, "3"],
+    R_obj: Array,
+    a_lin: Float[Array, "3"],
+    alpha: Float[Array, "3"],
+    omega: Float[Array, "3"],
+    squeeze: Array,
+) -> Float[Array, "k 3"]:
+    """Contact forces that satisfy the object's Newton-Euler balance exactly.
+
+    Solves the (6 x 3k) grasp map ``G lam = w_req`` for the minimum-norm
+    particular solution, then adds an internal ``squeeze`` force projected onto
+    ``null(G)`` so the grip can be tightened without changing ``w_req``. The
+    result therefore *always* satisfies object dynamics — there is no residual
+    left to constrain.
+    """
+    k = system.num_manipulators
+    dtype = q.dtype
+    pts = C.contact_points_world(system, q)  # tuple of (3,)
+    P = jnp.stack(pts)  # (k, 3)
+
+    # Required net wrench about the object centre c.
+    g_vec = jnp.array([0.0, 0.0, -system.gravity], dtype)
+    inertia_diag = jnp.asarray(system.body.inertia_diag, dtype)
+    I_world = R_obj @ (inertia_diag[:, None] * R_obj.T)  # (3,3)
+    f_req = system.body.mass * (a_lin - g_vec)
+    tau_req = I_world @ alpha + jnp.cross(omega, I_world @ omega)
+    w_req = jnp.concatenate([f_req, tau_req])  # (6,)
+
+    # Grasp map G (6 x 3k): [ I3 ... ; skew(p_i - c) ... ].
+    top = jnp.tile(jnp.eye(3, dtype=dtype), (1, k))  # (3, 3k)
+    bot = jnp.concatenate([_skew(P[i] - c) for i in range(k)], axis=1)  # (3, 3k)
+    G = jnp.concatenate([top, bot], axis=0)  # (6, 3k)
+
+    GGt = G @ G.T + 1e-6 * jnp.eye(6, dtype=dtype)
+    Gpinv = G.T @ jnp.linalg.inv(GGt)  # (3k, 6), min-norm right-inverse
+    lam_part = Gpinv @ w_req  # (3k,)
+
+    # Internal squeeze: push each contact toward the object centre, then remove
+    # any component that would disturb w_req (project onto null(G)).
+    normals = jnp.stack([(c - P[i]) / (jnp.linalg.norm(c - P[i]) + 1e-9)
+                         for i in range(k)])  # (k, 3)
+    raw = (squeeze * normals).reshape(-1)  # (3k,)
+    proj = raw - Gpinv @ (G @ raw)  # null-space component
+    lam = (lam_part + proj).reshape(k, 3)
+    return lam
+
+
+# ---------------------------------------------------------------------------
+# Flat objective
+# ---------------------------------------------------------------------------
+
+def _angular_rates(R_seq_log: Float[Array, "T 3"], dt: float) -> tuple[Array, Array]:
+    """omega, alpha from a sequence of world rotation vectors (small-motion FD)."""
+    omega, alpha = _fd_vel_acc(R_seq_log, dt)
+    return omega, alpha
+
+
+def _flat_cost(
+    z: Float[Array, "nz"],
+    system: ContactSystem,
+    T_obj0: jaxlie.SE3,
+    offsets: tuple[jaxlie.SE3, ...],
+    lower: Float[Array, "n"],
+    upper: Float[Array, "n"],
+    w_track: Array,
+    T: int,
+    cfg: FlatContactTrajOptConfig,
+) -> Array:
+    ndof = system.num_dof
+    k = system.num_manipulators
+    n_delta = T * 6
+    n_q = T * ndof
+
+    delta = z[:n_delta].reshape(T, 6)
+    q = z[n_delta : n_delta + n_q].reshape(T, ndof)
+    squeeze = z[n_delta + n_q : n_delta + n_q + T]  # (T,)
+    dt = _dt_from_scale(z[-1], cfg)  # shared, optimized timestep
+
+    # --- Minimum-time: penalize the total horizon (T - 1) * dt -----------
+    cost = cfg.w_time * (T - 1) * dt
+
+    # --- Object pose trajectory (flat output) ----------------------------
+    xis = jax.vmap(lambda d: _object_pose(d, T_obj0))(delta)  # SE3 batched
+    obj_centers = xis.translation()  # (T, 3) flat-output translation
+    phis = jax.vmap(lambda R: R.log())(xis.rotation())  # (T,3) world rotvec
+
+    # --- Object flat-output smoothness (cheap: 6-D per waypoint) ---------
+    cost += cfg.w_smoothness * cfg.w_obj_smooth * _smoothness_cost(
+        obj_centers, 0.0, cfg.w_obj_acc, cfg.w_obj_jerk
+    )
+    cost += cfg.w_smoothness * cfg.w_obj_smooth * _smoothness_cost(
+        phis, 0.0, cfg.w_obj_acc, cfg.w_obj_jerk
+    )
+
+    # --- Grasp tracking: each arm follows its object-derived gripper pose --
+    def track_res(delta_t, q_t):
+        xi = _object_pose(delta_t, T_obj0)
+        targets = _gripper_targets(xi, offsets)
+        qs = system.split_q(q_t)
+        errs = []
+        for m, qm, tgt in zip(system.manipulators, qs, targets):
+            fk = C._gripper_world_pose(m, qm)
+            errs.append((fk.inverse() @ tgt).log())
+        return jnp.concatenate(errs)  # (6k,)
+
+    track = jax.vmap(track_res)(delta, q)  # (T, 6k)
+    cost += w_track * jnp.sum(track**2)
+
+    # --- Joint-space regularity ------------------------------------------
+    cost += cfg.w_smoothness * cfg.w_q_smooth * _smoothness_cost(
+        q, 0.0, cfg.w_q_acc, cfg.w_q_jerk
+    )
+    cost += cfg.w_limits * _limits_cost(q, lower, upper)
+
+    # --- Allocate forces (exact object dynamics) -------------------------
+    # Balance about the *actual* object centre (contact-point centroid), so the
+    # allocated forces satisfy the same Newton-Euler residual a caller measures.
+    centers = jax.vmap(C.object_center_world, in_axes=(None, 0))(system, q)  # (T,3)
+    _, a_lin = _fd_vel_acc(centers, dt)
+    omega, alpha = _angular_rates(phis, dt)
+    R_mats = jax.vmap(lambda R: R.as_matrix())(xis.rotation())  # (T,3,3)
+    lam = jax.vmap(allocate_forces, in_axes=(None, 0, 0, 0, 0, 0, 0, 0))(
+        system, q, centers, R_mats, a_lin, alpha, omega, squeeze
+    )  # (T, k, 3)
+
+    # --- Torque effort + limits via GRiD inverse dynamics ----------------
+    dof_offsets = []
+    idx = 0
+    for m in system.manipulators:
+        dof_offsets.append(idx)
+        idx += m.num_dof
+    for i, m in enumerate(system.manipulators):
+        o = dof_offsets[i]
+        q_i = q[:, o : o + m.num_dof]
+        f_i = lam[:, i, :]
+        qd_i, qdd_i = _fd_vel_acc(q_i, dt)
+        fext_i = jax.vmap(C.manipulator_contact_fext, in_axes=(None, 0, 0))(
+            m, q_i, f_i
+        )
+        tau_i = m.grid.inverse_dynamics(q_i, qd_i, qdd_i, f_ext=fext_i)
+        cost += cfg.w_effort * jnp.sum(tau_i**2)
+        over_i = jnp.maximum(0.0, jnp.abs(tau_i) - cfg.tau_max) ** 2
+        cost += cfg.w_torque_limit * jnp.sum(over_i)
+
+    # --- Grip validity + squeeze regularization --------------------------
+    grip = jax.vmap(
+        C.grip_validity_penalty, in_axes=(None, 0, 0, None, None)
+    )(system, q, lam, cfg.mu_friction, cfg.f_min)
+    cost += cfg.w_grip * jnp.sum(grip)
+    cost += cfg.w_squeeze_reg * jnp.sum(squeeze**2)
+
+    return cost
+
+
+# ---------------------------------------------------------------------------
+# Inner L-BFGS solve (shared scaffold; single unconstrained pass)
+# ---------------------------------------------------------------------------
+
+def _inner_solve(z0, endpoint_mask, cost_fn, cfg: FlatContactTrajOptConfig):
+    m = cfg.m_lbfgs
+    nz = z0.shape[0]
+    cost0, g0 = jax.value_and_grad(cost_fn)(z0)
+    g0 = g0 * endpoint_mask
+
+    init = (
+        z0, z0, cost0, z0, g0,
+        jnp.zeros((m, nz)), jnp.zeros((m, nz)), jnp.zeros(m),
+        jnp.int32(0), jnp.int32(0), jnp.int32(0),
+    )
+
+    def step(carry, _):
+        (x, best_x, best_cost, x_prev, g_prev,
+         s_buf, y_buf, rho_buf, m_used, newest, it) = carry
+        cost_val, g = jax.value_and_grad(cost_fn)(x)
+        g = g * endpoint_mask
+        s_k = x - x_prev
+        y_k = g - g_prev
+        sy = jnp.dot(s_k, y_k)
+        yy = jnp.dot(y_k, y_k)
+        valid = (sy > 1e-10 * yy + 1e-30) & (it > 0)
+        new_newest = (newest + 1) % m
+        actual_newest = jnp.where(valid, new_newest, newest)
+        s_buf = jnp.where(valid, s_buf.at[new_newest].set(s_k), s_buf)
+        y_buf = jnp.where(valid, y_buf.at[new_newest].set(y_k), y_buf)
+        rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / (sy + 1e-30)), rho_buf)
+        m_used = jnp.where(valid & (m_used < m), m_used + 1, m_used)
+        newest = actual_newest
+        dir_lbfgs = _lbfgs_two_loop(g, s_buf, y_buf, rho_buf, m_used, newest, m)
+        dir_gd = -g / (jnp.linalg.norm(g) + 1e-18)
+        direction = jnp.where(m_used > 0, dir_lbfgs, dir_gd) * endpoint_mask
+        suff = cost_val * (1.0 - 1e-4)
+        trial = jax.vmap(lambda a: cost_fn(x + a * direction))(_LS_ALPHAS)
+        has_suff = trial < suff
+        idx = jnp.where(jnp.any(has_suff), jnp.argmax(has_suff), jnp.argmin(trial))
+        alpha = _LS_ALPHAS[idx]
+        x_new = x + alpha * direction
+        new_cost = trial[idx]
+        improved = new_cost < best_cost
+        best_x = jnp.where(improved, x_new, best_x)
+        best_cost = jnp.where(improved, new_cost, best_cost)
+        return (
+            x_new, best_x, best_cost, x, g,
+            s_buf, y_buf, rho_buf, m_used, newest, it + 1,
+        ), None
+
+    (_, best_x, *_), _ = jax.lax.scan(step, init, None, length=cfg.n_inner_iters)
+    return best_x
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+@functools.partial(jax.jit, static_argnames=("system", "opt_cfg"))
+def _flat_contact_jax(
+    init_q: Float[Array, "T n"],
+    delta_goal: Float[Array, "6"],
+    init_squeeze: Float[Array, "T"],
+    start: Float[Array, "n"],
+    goal: Float[Array, "n"],
+    system: ContactSystem,
+    opt_cfg: FlatContactTrajOptConfig,
+) -> tuple[Array, Array, Array, Array]:
+    T = init_q.shape[0]
+    ndof = system.num_dof
+    k = system.num_manipulators
+    n_delta = T * 6
+    n_q = T * ndof
+    nz = n_delta + n_q + T + 1  # + shared time-scale scalar
+
+    lower = jnp.concatenate([m.robot.joints.lower_limits for m in system.manipulators])
+    upper = jnp.concatenate([m.robot.joints.upper_limits for m in system.manipulators])
+
+    # Object frame = reference gripper frame at the start config.
+    ref = system.manipulators[0]
+    T_obj0 = C._gripper_world_pose(ref, system.split_q(start)[0])
+    offsets = object_frame_offsets(system)
+
+    # Initialise the object-pose deltas by linearly ramping to the goal twist.
+    t = jnp.linspace(0.0, 1.0, T)[:, None]
+    delta0 = t * delta_goal[None, :]  # (T,6)
+
+    q = init_q.at[0].set(start).at[-1].set(goal)
+    scale0 = jnp.array([_scale_from_dt(opt_cfg.dt, opt_cfg)], jnp.float32)
+    z = jnp.concatenate([delta0.reshape(-1), q.reshape(-1), init_squeeze, scale0])
+
+    # Pin: object-pose delta at start (=0) and goal; joint configs at start/goal.
+    # The trailing time-scale scalar stays free (optimized).
+    mask = jnp.ones(nz)
+    mask = mask.at[:6].set(0.0).at[n_delta - 6 : n_delta].set(0.0)
+    mask = mask.at[n_delta : n_delta + ndof].set(0.0)
+    mask = mask.at[n_delta + n_q - ndof : n_delta + n_q].set(0.0)
+
+    def stage(carry, _):
+        z, w_track = carry
+        cost_fn = lambda zz: _flat_cost(
+            zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg
+        )
+        z = _inner_solve(z, mask, cost_fn, opt_cfg)
+        w_track = jnp.minimum(w_track * opt_cfg.track_scale, opt_cfg.w_track_max)
+        return (z, w_track), None
+
+    (z, _), _ = jax.lax.scan(
+        stage,
+        (z, jnp.array(opt_cfg.w_track, jnp.float32)),
+        None,
+        length=opt_cfg.n_stages,
+    )
+
+    delta = z[:n_delta].reshape(T, 6)
+    q = z[n_delta : n_delta + n_q].reshape(T, ndof)
+    squeeze = z[n_delta + n_q : n_delta + n_q + T]
+    dt = _dt_from_scale(z[-1], opt_cfg)  # optimized timestep
+
+    # Recover the allocated forces for the returned trajectory.
+    xis = jax.vmap(lambda d: _object_pose(d, T_obj0))(delta)
+    phis = jax.vmap(lambda R: R.log())(xis.rotation())
+    centers = jax.vmap(C.object_center_world, in_axes=(None, 0))(system, q)
+    _, a_lin = _fd_vel_acc(centers, dt)
+    omega, alpha = _angular_rates(phis, dt)
+    R_mats = jax.vmap(lambda R: R.as_matrix())(xis.rotation())
+    forces = jax.vmap(allocate_forces, in_axes=(None, 0, 0, 0, 0, 0, 0, 0))(
+        system, q, centers, R_mats, a_lin, alpha, omega, squeeze
+    )
+
+    # Diagnostics: grasp-closure residual (should be tiny — tracked, not free).
+    g = jax.vmap(C.grasp_closure_residual, in_axes=(None, 0))(system, q)
+    if g.shape[-1] == 0:
+        residuals = jnp.zeros((2,), g.dtype)
+    else:
+        residuals = jnp.array([jnp.sqrt(jnp.mean(g**2)), jnp.max(jnp.abs(g))])
+    return q, forces, residuals, centers, dt
+
+
+def flat_contact_trajopt(
+    init_traj: Float[Array, "T n"],
+    start: Float[Array, "n"],
+    goal: Float[Array, "n"],
+    system: ContactSystem,
+    opt_cfg: FlatContactTrajOptConfig = FlatContactTrajOptConfig(),
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Differential-flatness **contact-aware** (fixed-grasp) trajectory optimization.
+
+    Contact-aware, *not* contact-rich: the grasp is a fixed, persistent contact
+    mode and the contact forces are allocated analytically (not optimized). For a
+    solver that optimizes the contact forces as decision variables, use
+    :func:`~pyroffi.optimization_engines.contact_rich_trajopt`.
+
+    Optimizes the object's SE(3) pose trajectory (the flat output) together with
+    slaved joint configs, a scalar grip-squeeze, and a shared trajectory
+    timestep, so the grasp-closure and object-dynamics constraints are satisfied
+    by construction. Returns ``(traj, forces, residuals, obj_centers, dt)``,
+    where ``dt`` is the optimized timestep (total horizon ``(T - 1) * dt``).
+
+    The objective is a tunable blend selected by ``opt_cfg``:
+
+    * ``w_time``       — minimum time (drives the horizon ``(T - 1) * dt`` down),
+    * ``w_smoothness`` — object + joint accel/jerk smoothness,
+    * ``w_effort``     — total torque ``sum(tau**2)``.
+
+    By default only ``w_time`` is active (pure min-time); ``w_smoothness`` and
+    ``w_effort`` default to 0. Feasibility penalties (grasp tracking, joint /
+    torque limits, grip validity) are always enforced regardless of the blend.
+
+    ``start`` / ``goal`` are stacked joint configs (as in
+    :func:`contact_sco_trajopt`); the goal object pose is derived from ``goal``'s
+    reference gripper so a caller can reuse an IK'd goal directly.
+    """
+    T = init_traj.shape[0]
+    ref = system.manipulators[0]
+    # Goal object-pose twist relative to the start object pose.
+    T_obj0 = C._gripper_world_pose(ref, system.split_q(start)[0])
+    T_objT = C._gripper_world_pose(ref, system.split_q(goal)[0])
+    # xi = exp(delta) @ T_obj0, so xi_T = T_objT  =>  delta_goal = log(T_objT @ T_obj0^-1).
+    delta_goal = (T_objT @ T_obj0.inverse()).log()
+
+    # Static initial squeeze so the grip starts closed.
+    share = system.body.mass * system.gravity / system.num_manipulators
+    init_squeeze = jnp.full((T,), float(share))
+
+    return _flat_contact_jax(
+        init_traj, delta_goal, init_squeeze, start, goal, system, opt_cfg
+    )

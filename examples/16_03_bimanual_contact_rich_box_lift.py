@@ -1,62 +1,32 @@
-"""Contact-rich bimanual box lift (dynamics-aware SCO).
+"""Contact-*rich* bimanual box lift (contact forces as decision variables).
 
-Two Franka Panda arms face each other and pinch a box between their grippers
-(pressing on two opposing walls), then lift it. The trajectory is planned by
-``contact_sco_trajopt``: a Sequential-Convex-Optimization loop made
-dynamics-aware with GRiD inverse dynamics and made contact-aware with an
-augmented-Lagrangian *fixed-contact* (grasp-closure) constraint plus a
-grasped-object Newton-Euler balance that solves for the contact forces.
+The contact-rich parallel to ``16_00``. Two Franka Panda arms face each other,
+pinch a box palm-to-palm, and lift it — the same scene and grasp mechanics as
+``16_00`` — but planned with a different solver:
 
-The bimanual manipulator setup and the two-Panda scene are assembled *here*,
-in the example, out of the fully general building blocks in
-``pyroffi.dynamics._contact`` (``ManipulatorSpec``, ``GraspedObject``,
-``ContactSystem``) — none of that machinery is specific to two arms or to a
-box; a caller wanting three manipulators grasping a sphere would assemble the
-same building blocks differently.
+* ``16_00`` uses ``contact_sco_trajopt``: the original augmented-Lagrangian
+  contact solver over a fixed timestep.
+* ``16_03`` (this file) uses ``contact_rich_trajopt``: the per-contact forces
+  are **first-class decision variables** optimized under the object's
+  Newton-Euler balance (augmented Lagrangian) *and* the friction cone, with a
+  minimum-time objective over an optimized shared timestep ``dt``. It shares its
+  interface with the differential-flatness **contact-aware** solver
+  (``flat_contact_trajopt``) so the two can be swapped directly — but unlike that
+  one, it does not *allocate* the forces from a grasp-map pseudo-inverse; it
+  *optimizes* them, so the system is genuinely contact-rich (not flat). The
+  contact *mode* is still one persistent rigid grasp — contact-rich, not
+  contact-implicit. See ``flat_contact_trajopt_theory.md`` §8.
 
-The box's inertia is **not** a hand-picked constant: given its mass and
-dimensions, ``pyroffi.collision.box_with_mjcf_dynamics`` builds a throwaway
-in-memory MJCF model (via ``mujoco.MjSpec`` — no ``.xml`` file written to
-disk) and lets MuJoCo's compiler derive the solid-box inertia tensor, the
-same physics an MJCF asset file would give you.
+Where a single contact fully determines the force (the single-arm ``16_02``),
+contact-rich and contact-aware coincide. Here, with two contacts, the grasp map
+has a genuine null space (internal squeeze), so the contact-rich solver has real
+force freedom to trade off against the friction cone — this is the regime where
+optimizing the forces actually buys something over allocating them.
 
-Pipeline
---------
-1. Build the box's physical geometry (MJCF-derived inertia); place it between
-   two Panda bases.
-2. IK each arm to a pinch pose on its box face (start), and to the same pose
-   translated straight up by ``LIFT`` (goal). Translating *both* gripper
-   targets by the same vector preserves their relative transform, so the goal
-   still satisfies the rigid-grasp constraint.
-3. Capture the grasp offset at the start config and build a
-   ``ContactSystem`` from the two ``ManipulatorSpec``s and the
-   MJCF-sourced ``GraspedObject``.
-4. Optimize the joint + contact-force trajectory with ``contact_sco_trajopt``.
-5. Visualize the result in a real, actively-stepped MuJoCo simulation (via
-   mjviser's ``Viewer(step_fn=..., reset_fn=...)``, following
-   ``gtmp_pyronot/examples/example_gtmp_kinodynamic.py``): a computed-torque
-   controller (GRiD feedforward torques from the planned trajectory + PD
-   correction) tracks the timed reference for each arm, and the box is a
-   **real dynamic body** (freejoint, mass, friction, full collision) —
-   there is no kinematic teleport. It's held up by the actual contact forces
-   the two hands' palms exert on it as the arms track the plan, the same
-   mechanism the trajopt's contact-force allocation models: an *actuated*
-   squeeze from each arm's own joint torques (not a passive finger pinch —
-   see the geometry note below) (skipped automatically if mjviser is
-   unavailable / running headless).
-
-Grasp geometry. The Panda's spherized collision model for ``panda_hand`` is a
-flat "puck" of spheres spanning local z in ``[~-0.02, 0.074]`` (the palm); its
-fixed, non-actuated fingers sit further out at local z in ``[0.08, 0.10]`` but
-are only ~0.13 m apart, far narrower than this box, so they play no part here
-— the grip is a *palm-to-palm* squeeze, like compressing the box between two
-flat plates. Each hand's contact point ``p_local=(0, 0, D)`` is placed at the
-surface of the deepest palm sphere ring (``D`` = ring depth + sphere radius),
-with the box positioned a hair *inside* that surface (a few mm of
-interference) so real, actuated squeeze pressure — not a geometric
-coincidence — is what holds the box; too little interference and the palms
-never truly load the box, too much and the arms fight the box's own
-stiffness instead of tracking the plan.
+Scene, grasp geometry, and the actuated-grip MuJoCo playback follow ``16_00`` /
+``16_01``: the box is a real dynamic freejoint body, and because the palms are
+non-actuated an *ideal actuated grip* (the planner's own net grasp wrench applied
+to the box) carries it, so it does not slip through the passive primitive contact.
 
 Requires a CUDA GPU + nvcc (GRiD dynamics).
 """
@@ -77,35 +47,34 @@ from pyroffi.dynamics._contact import (
     GraspedObject,
     ManipulatorSpec,
     capture_grasp_offsets,
+    contact_points_world,
     manipulator_contact_fext,
     object_center_world,
 )
-from pyroffi.optimization_engines import ContactTrajOptConfig, contact_sco_trajopt
+from pyroffi.optimization_engines import (
+    ContactRichTrajOptConfig,
+    contact_rich_trajopt,
+)
 from pyroffi.optimization_engines._contact_trajopt import _fd_vel_acc
 
-# --- Scene constants --------------------------------------------------------
+# --- Scene constants (identical to 16_00) -----------------------------------
 GRIP_LINK = "panda_hand"
-BASE_SEP = 0.4          # each base offset +/- this along world x
+BASE_SEP = 0.4
 BOX_CENTER = np.array([0.0, 0.0, 0.45])
 BOX_HALF_LENGTHS = np.array([0.06, 0.12, 0.12])
-BOX_MASS = 0.5          # kg
+BOX_MASS = 0.5
 BOX_FRICTION = 0.6
-LIFT = 0.15             # vertical lift (m)
-T = 24                  # trajectory waypoints
-# Palm contact standoff (hand-local +z): deepest palm-sphere ring depth
-# (0.05) + its radius (0.028) = the sphere's surface, minus a few mm of
-# interference so the actuated squeeze actually loads the box (see module
-# docstring's geometry note).
+LIFT = 0.15
+T = 24
 PALM_STANDOFF = 0.070
 
 
 def _ik_pose(robot, base_xy_yaw, world_target: jaxlie.SE3, seed):
-    """IK an arm (with a world base offset) to a world gripper pose."""
     x, y, yaw = base_xy_yaw
     base = jaxlie.SE3.from_rotation_and_translation(
         jaxlie.SO3.from_z_radians(jnp.asarray(yaw)), jnp.array([x, y, 0.0])
     )
-    local_target = base.inverse() @ world_target  # into the arm's base frame
+    local_target = base.inverse() @ world_target
     return robot.inverse_kinematics(GRIP_LINK, local_target, solver="ls",
                                     num_seeds=64, previous_cfg=seed)
 
@@ -136,17 +105,8 @@ def main():
     left_base = (-BASE_SEP, 0.0, 0.0)
     right_base = (BASE_SEP, 0.0, np.pi)
 
-    # Gripper faces inward toward the box: the hand's approach axis (local z)
-    # points horizontally at the box centre, so the fingers/palm confront the
-    # box face rather than pressing down onto it from above. The hand origin
-    # is stood off by (box_half_x + PALM_STANDOFF) from the box centre —
-    # *not* placed flush on the box face — so it's the palm's contact point
-    # p_local=(0,0,PALM_STANDOFF) that reaches the box surface, not the
-    # hand's own bulk (which is what caused the box to render embedded in the
-    # wrist before this fix).
     def grip_target(sign, height):
         pos = box_center + np.array([sign * (box_half_x + PALM_STANDOFF), 0.0, height])
-        # Orientation: z (approach) toward the box centre, x pointing down.
         rot = jaxlie.SO3.from_matrix(jnp.array([
             [0.0, 0.0, -sign],
             [0.0, -sign, 0.0],
@@ -180,41 +140,45 @@ def main():
     t = jnp.linspace(0.0, 1.0, T)[:, None]
     init = start[None] * (1 - t) + goal[None] * t
 
-    cfg = ContactTrajOptConfig(
-        n_outer_iters=15, n_inner_iters=25, dt=0.1,
-        rho_grasp=50.0, penalty_scale=1.8, tau_max=87.0,
-        f_min=3.0,  # mu_friction=None -> uses the MJCF box's own friction
+    cfg = ContactRichTrajOptConfig(
+        n_outer_iters=15, n_inner_iters=30, m_lbfgs=8, dt=0.1,
+        rho_grasp=50.0, rho_obj=10.0, penalty_scale=1.8, tau_max=87.0,
+        f_min=3.0, w_smoothness=1.0, w_effort=1e-3,
     )
 
-    # Warm up with the SAME cfg we time below. opt_cfg is a static JIT arg, so a
-    # warmup config that differs in any field (e.g. n_outer_iters) compiles a
-    # *different* function and the real solve then recompiles inside the timed
-    # region -- which is what made the "execution" look like ~70s. Warming the
-    # exact cfg moves all compilation here and reveals the true few-second solve.
     print("Warming up (JIT compile) ...")
     t0 = time.perf_counter()
-    warm_traj, _, _ = contact_sco_trajopt(init, start, goal, system, cfg)
-    warm_traj.block_until_ready()
+    warm = contact_rich_trajopt(init, start, goal, system, cfg)
+    jax.block_until_ready(warm)
     print(f"  warmup done in {time.perf_counter() - t0:.1f}s")
 
-    print("Optimizing contact-rich trajectory ...")
+    print("Optimizing contact-rich trajectory (forces are decision variables) ...")
     t0 = time.perf_counter()
-    traj, forces, resid = contact_sco_trajopt(init, start, goal, system, cfg)
-    traj.block_until_ready()
+    traj, forces, resid, centers, dt = contact_rich_trajopt(init, start, goal, system, cfg)
+    jax.block_until_ready(traj)
     print(f"  done in {time.perf_counter() - t0:.1f}s")
-    print(f"  grasp-closure residual [rms, max] = {np.array(resid)}")
+    print(f"  object-dynamics residual [rms, max] = {np.array(resid[:2])}")
+    print(f"  grasp-closure residual (rms)         = {float(resid[2]):.2e}")
+    print(f"  optimized dt = {float(dt):.4f}s  (horizon = {float(dt) * (len(traj) - 1):.2f}s)")
     print(f"  mean |contact force| = {float(jnp.mean(jnp.abs(forces))):.2f} N")
-
-    centers = jax.vmap(object_center_world, in_axes=(None, 0))(system, traj)
     print(f"  box lift achieved: {float(centers[-1, 2] - centers[0, 2]):.3f} m")
 
     goal_center = BOX_CENTER + np.array([0.0, 0.0, LIFT])
-    _maybe_visualize(system, traj, forces, cfg, goal_center,
+    _maybe_visualize(system, traj, forces, dt, goal_center,
                      save_video=args.save_video)
 
 
-def _maybe_visualize(system: ContactSystem, traj, forces,
-                     cfg: ContactTrajOptConfig, goal_center: np.ndarray,
+def _grip_wrenches(system: ContactSystem, traj_arr, forces):
+    """Per-waypoint net grasp wrench (force, torque about the box centre) the
+    optimized contact forces exert on the held object, in world axes."""
+    centers = jax.vmap(object_center_world, in_axes=(None, 0))(system, traj_arr)
+    pts = jax.vmap(lambda q: jnp.stack(contact_points_world(system, q)))(traj_arr)
+    net_f = jnp.sum(forces, axis=1)
+    net_tau = jnp.sum(jnp.cross(pts - centers[:, None, :], forces), axis=1)
+    return np.array(net_f), np.array(net_tau)
+
+
+def _maybe_visualize(system: ContactSystem, traj, forces, dt, goal_center,
                      save_video: str | None = None):
     try:
         import mujoco
@@ -227,11 +191,8 @@ def _maybe_visualize(system: ContactSystem, traj, forces,
     box_geom = system.body.geom
     box_center0 = np.array(box_geom.pose.translation())
     box_extents = np.array(box_geom.extents)
+    dt = float(dt)
 
-    # Build a MuJoCo scene with both arms (at their real base poses) plus the
-    # grasped box. The box is a real dynamic body (freejoint + mass + friction
-    # + full collision) — no kinematic teleport; it's held up purely by the
-    # contact forces the two palms exert on it as the arms track the plan.
     spec = mujoco.MjSpec()
     spec.add_texture(
         name="grid", type=mujoco.mjtTexture.mjTEXTURE_2D,
@@ -244,7 +205,6 @@ def _maybe_visualize(system: ContactSystem, traj, forces,
                             material="grid")
     spec.worldbody.add_light(pos=[0.5, -0.5, 2.0], dir=[-0.15, 0.25, -1.0],
                              castshadow=True)
-    # Translucent green goal marker (non-colliding) at the planned lift pose.
     spec.worldbody.add_geom(
         type=mujoco.mjtGeom.mjGEOM_BOX, pos=goal_center,
         size=np.array(box_geom.extents) / 2.0,
@@ -273,11 +233,11 @@ def _maybe_visualize(system: ContactSystem, traj, forces,
     mj_data = mujoco.MjData(mj_model)
     nv_arms = nL + nR
 
-    # --- Feedforward torques per arm (GRiD ID over the planned traj, incl. contact) ---
+    # --- Feedforward torques per arm (GRiD ID over the planned traj) ----------
     traj_arr = jnp.asarray(traj)
     qL, qR = traj_arr[:, :nL], traj_arr[:, nL:]
-    qdL, qddL = _fd_vel_acc(qL, cfg.dt)
-    qdR, qddR = _fd_vel_acc(qR, cfg.dt)
+    qdL, qddL = _fd_vel_acc(qL, dt)
+    qdR, qddR = _fd_vel_acc(qR, dt)
     fextL = jax.vmap(manipulator_contact_fext, in_axes=(None, 0, 0))(left, qL, forces[:, 0, :])
     fextR = jax.vmap(manipulator_contact_fext, in_axes=(None, 0, 0))(right, qR, forces[:, 1, :])
     tau_ff = np.concatenate([
@@ -285,30 +245,35 @@ def _maybe_visualize(system: ContactSystem, traj, forces,
         np.array(right.grid.inverse_dynamics(qR, qdR, qddR, f_ext=fextR)),
     ], axis=1)
     traj_np = np.array(traj)
-    times = np.arange(traj_np.shape[0]) * cfg.dt
+    times = np.arange(traj_np.shape[0]) * dt
     duration = float(times[-1])
+
+    # --- Actuated grip: apply the planner's net grasp wrench to the box -------
+    grip_f, grip_tau = _grip_wrenches(system, traj_arr, forces)
+    box_body = mj_model.body("box").id
 
     kp, kd = 1500.0, 80.0
 
     def _ref(t: float):
         tc = np.clip(t, 0.0, duration)
         qr = np.array([np.interp(tc, times, traj_np[:, j]) for j in range(nv_arms)])
-        qdr = np.array([np.interp(tc, times, np.gradient(traj_np[:, j], cfg.dt))
+        qdr = np.array([np.interp(tc, times, np.gradient(traj_np[:, j], dt))
                         for j in range(nv_arms)])
         taur = np.array([np.interp(tc, times, tau_ff[:, j]) for j in range(nv_arms)])
-        return qr, qdr, taur
+        fr = np.array([np.interp(tc, times, grip_f[:, a]) for a in range(3)])
+        tr = np.array([np.interp(tc, times, grip_tau[:, a]) for a in range(3)])
+        return qr, qdr, taur, fr, tr
 
     def step_fn(m: mujoco.MjModel, d: mujoco.MjData):
         hold = 1.0
-        # Loop by resetting the *state*, not just wrapping the reference:
-        # wrapping alone leaves the box at the lifted pose while the arms snap
-        # back to the start, so every pass after the first plays out empty.
         if d.time >= duration + hold:
             reset_fn(m, d)
-        q_ref, qd_ref, tau = _ref(d.time)
+        q_ref, qd_ref, tau, grip_force, grip_torque = _ref(d.time)
         d.qfrc_applied[:nv_arms] = (
             tau + kp * (q_ref - d.qpos[:nv_arms]) + kd * (qd_ref - d.qvel[:nv_arms])
         )
+        d.xfrc_applied[box_body, :3] = grip_force
+        d.xfrc_applied[box_body, 3:] = grip_torque
         mujoco.mj_step(m, d)
 
     def reset_fn(m: mujoco.MjModel, d: mujoco.MjData):

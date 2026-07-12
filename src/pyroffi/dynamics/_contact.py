@@ -110,6 +110,11 @@ class GraspedObject:
     def friction(self) -> Array:
         return jnp.asarray(self.geom.friction)
 
+    @property
+    def inertia_diag(self) -> Array:
+        """Principal rotational inertia about the object's centre (local axes)."""
+        return jnp.asarray(self.geom.inertia_diag)
+
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class ContactSystem:

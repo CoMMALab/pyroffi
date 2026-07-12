@@ -74,6 +74,56 @@ def link_poses_from_joint_poses(
     return Ts_world_link
 
 
+def _joint_delta_matrices(
+    twists: Float[Array, "n_joints 6"],
+    q_full: Float[Array, "*batch n_joints"],
+) -> Float[Array, "*batch n_joints 4 4"]:
+    """Per-joint SE(3) delta transforms as homogeneous 4x4 matrices.
+
+    pyroffi twists are ``[v; w]`` with ``w`` the (unit) rotation axis for
+    revolute/continuous joints (``v == 0``) and ``v`` the translation axis for
+    prismatic joints (``w == 0``); fixed joints have an all-zero twist. In every
+    case the joint's ``exp(twist * q)`` collapses to a *pure* rotation or a pure
+    translation, so the general screw exponential reduces to a single
+    branch-free closed form::
+
+        R = I + sin(q) [w]x + (1 - cos(q)) [w]x^2      (Rodrigues)
+        t = v * q
+
+    which yields ``R = I`` when ``w == 0`` (prismatic/fixed) and ``t = 0`` when
+    ``v == 0`` (revolute), matching ``jaxlie.SE3.exp`` exactly. Building the delta
+    as a 4x4 matrix (rather than a jaxlie ``SE3``) lets the FK accumulation loop
+    below compose transforms with plain ``jnp.matmul`` instead of quaternion
+    multiply-and-renormalize per joint -- the lean path that makes the FK-heavy
+    hot loops (trajopt) cheaper, and mirrors what the CUDA FK kernel does.
+    """
+    v = twists[..., :3]  # (n_joints, 3) translation axis (0 for revolute)
+    w = twists[..., 3:]  # (n_joints, 3) rotation axis (0 for prismatic/fixed)
+    # Constant per-joint skew matrices [w]x and [w]x^2.
+    zero = jnp.zeros_like(w[..., 0])
+    K = jnp.stack(
+        [
+            jnp.stack([zero, -w[..., 2], w[..., 1]], axis=-1),
+            jnp.stack([w[..., 2], zero, -w[..., 0]], axis=-1),
+            jnp.stack([-w[..., 1], w[..., 0], zero], axis=-1),
+        ],
+        axis=-2,
+    )  # (n_joints, 3, 3)
+    K2 = K @ K
+    s = jnp.sin(q_full)[..., None, None]
+    c = jnp.cos(q_full)[..., None, None]
+    eye3 = jnp.eye(3, dtype=q_full.dtype)
+    R = eye3 + s * K + (1.0 - c) * K2  # (*batch, n_joints, 3, 3)
+    t = v * q_full[..., None]  # (*batch, n_joints, 3)
+
+    batch_shape = R.shape[:-2]
+    top = jnp.concatenate([R, t[..., None]], axis=-1)  # (*batch, n_joints, 3, 4)
+    bottom = jnp.broadcast_to(
+        jnp.array([0.0, 0.0, 0.0, 1.0], dtype=q_full.dtype), (*batch_shape, 1, 4)
+    )
+    return jnp.concatenate([top, bottom], axis=-2)  # (*batch, n_joints, 4, 4)
+
+
 def forward_kinematics_joints_jax(
     robot: Robot,
     cfg: Float[Array, "*batch actuated_count"],
@@ -85,20 +135,18 @@ def forward_kinematics_joints_jax(
     # Calculate full configuration using the dedicated method
     q_full = robot.joints.get_full_config(cfg)
 
-    # Calculate delta transforms using the effective config and twists for all joints.
-    tangents = robot.joints.twists * q_full[..., None]
-    assert tangents.shape == (*batch_axes, robot.joints.num_joints, 6)
-    delta_Ts = jaxlie.SE3.exp(tangents)  # Shape: (*batch_axes, self.joint.count, 7)
-
-    # Combine constant parent transform with variable joint delta transform.
-    Ts_parent_child = (
-        jaxlie.SE3(robot.joints.parent_transforms) @ delta_Ts
-    ).wxyz_xyz
-    assert Ts_parent_child.shape == (*batch_axes, robot.joints.num_joints, 7)
+    # Local (parent->child) transforms as 4x4 matrices: constant parent transform
+    # composed with the variable joint delta. jaxlie is used only for the one-shot
+    # vectorized conversion of the *constant* parent transforms; the hot accumulation
+    # loop below is pure matmul.
+    delta_mats = _joint_delta_matrices(robot.joints.twists, q_full)
+    parent_mats = jaxlie.SE3(robot.joints.parent_transforms).as_matrix()  # (n_joints,4,4)
+    Ts_parent_child = parent_mats @ delta_mats  # (*batch, n_joints, 4, 4)
+    assert Ts_parent_child.shape == (*batch_axes, robot.joints.num_joints, 4, 4)
 
     # Topological sort helpers
     topo_order = jnp.argsort(robot.joints._topo_sort_inv)
-    Ts_parent_child_sorted = Ts_parent_child[..., robot.joints._topo_sort_inv, :]
+    Ts_parent_child_sorted = Ts_parent_child[..., robot.joints._topo_sort_inv, :, :]
     parent_orig_for_sorted_child = robot.joints.parent_indices[
         robot.joints._topo_sort_inv
     ]
@@ -108,22 +156,24 @@ def forward_kinematics_joints_jax(
         topo_order[parent_orig_for_sorted_child],
     )
 
+    eye4 = jnp.eye(4, dtype=Ts_parent_child.dtype)
+
     # Compute link transforms relative to world, indexed by sorted *joint* index.
+    # Pure 4x4 matmul composition -- no per-joint quaternion renormalization.
     def compute_transform(i: int, Ts_world_link_sorted: Array) -> Array:
         parent_sorted_idx = idx_parent_joint_sorted[i]
         T_world_parent_link = jnp.where(
             parent_sorted_idx == -1,
-            jaxlie.SE3.identity().wxyz_xyz,
-            Ts_world_link_sorted[..., parent_sorted_idx, :],
+            eye4,
+            Ts_world_link_sorted[..., parent_sorted_idx, :, :],
         )
-        return Ts_world_link_sorted.at[..., i, :].set(
-            (
-                jaxlie.SE3(T_world_parent_link)
-                @ jaxlie.SE3(Ts_parent_child_sorted[..., i, :])
-            ).wxyz_xyz
+        return Ts_world_link_sorted.at[..., i, :, :].set(
+            T_world_parent_link @ Ts_parent_child_sorted[..., i, :, :]
         )
 
-    Ts_world_link_init_sorted = jnp.zeros((*batch_axes, robot.joints.num_joints, 7))
+    Ts_world_link_init_sorted = jnp.zeros(
+        (*batch_axes, robot.joints.num_joints, 4, 4), dtype=Ts_parent_child.dtype
+    )
     Ts_world_link_sorted = jax.lax.fori_loop(
         lower=0,
         upper=robot.joints.num_joints,
@@ -132,7 +182,9 @@ def forward_kinematics_joints_jax(
         unroll=unroll_fk,
     )
 
-    Ts_world_link_joint_indexed = Ts_world_link_sorted[..., topo_order, :]
+    Ts_world_link_mats = Ts_world_link_sorted[..., topo_order, :, :]
+    # Convert back to the (wxyz_xyz) contract in one vectorized shot.
+    Ts_world_link_joint_indexed = jaxlie.SE3.from_matrix(Ts_world_link_mats).wxyz_xyz
     assert Ts_world_link_joint_indexed.shape == (
         *batch_axes,
         robot.joints.num_joints,

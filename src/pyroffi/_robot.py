@@ -385,6 +385,7 @@ class Robot:
         use_cuda: jdc.Static[bool] = False,
         f_ext: Float[Array, "*batch n_act_joints 6"] | None = None,
         method: jdc.Static[str] = "semi_implicit",
+        substeps: jdc.Static[int] = 1,
     ) -> tuple[
         Float[Array, "*batch n_act_joints"], Float[Array, "*batch n_act_joints"]
     ]:
@@ -393,17 +394,25 @@ class Robot:
         Semi-implicit (symplectic) Euler by default; ``method`` may also be
         ``"euler"`` or ``"rk4"``. scan-compatible for rollouts; ``use_cuda``
         integrates over the GRiD forward-dynamics kernels.
+
+        All fixed-step methods can silently diverge (blow up to NaN/Inf) once
+        ``dt`` is large relative to the system's stiffness -- e.g.
+        semi-implicit Euler under PD torques has been observed to diverge at
+        ``dt`` as small as ~0.15s. ``substeps`` (default 1, identical to the
+        prior behavior) subdivides ``dt`` into that many equal sub-steps and
+        integrates each one in turn, trading extra ``fd``/kernel evaluations
+        for a smaller effective step and much better stability.
         """
         if use_cuda:
             return (
                 self._require_backends()
                 .grid(gravity)
-                .step(q, qd, tau, dt, f_ext, method)
+                .step(q, qd, tau, dt, f_ext, method, substeps)
             )
 
         from . import dynamics as _dynamics
 
-        return _dynamics.step(self, q, qd, tau, dt, gravity, f_ext, method)
+        return _dynamics.step(self, q, qd, tau, dt, gravity, f_ext, method, substeps)
 
     def collision_check(
         self,

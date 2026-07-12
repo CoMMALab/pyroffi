@@ -404,9 +404,17 @@ class RobotCollision:
             M = world_axes[-1]
             batch_world_shape = world_axes[:-1]
 
-        # 3. Compute distances: Map collide over robot links (axis -2) vs _world_geom (None)
-        # _world_geom is guaranteed to have the M axis now.
-        _collide_links_vs_world = jax.vmap(collide, in_axes=(-2, None), out_axes=(-2))
+        # 3. Compute distances: map collide over robot links vs _world_geom (None).
+        # CollGeom batch axes are always LEADING (feature dims trail), and the
+        # number of trailing feature dims varies per leaf (e.g. a Sphere's
+        # `radius` has none, while `pose` has 7), so a single back-relative
+        # axis like -2 does NOT point at the link axis for every leaf. Since
+        # batch axes are leading, the link axis is at the same *front*-relative
+        # position for every leaf: use that instead.
+        link_axis = len(coll_robot_world.get_batch_axes()) - 1
+        _collide_links_vs_world = jax.vmap(
+            collide, in_axes=(link_axis, None), out_axes=(-2)
+        )
         dist_matrix = _collide_links_vs_world(coll_robot_world, _world_geom)
 
         # 4. Result shape check
@@ -890,9 +898,14 @@ class RobotCollisionSpherized:
 
         # 4. Now map that over links (N)
         # coll_robot_world: (*batch_cfg, S, N, ...)
-        # We map over the link axis (-2 from end, N)
+        # CollGeom batch axes are always LEADING (feature dims trail) and the
+        # trailing feature-dim count varies per leaf (e.g. Sphere.radius has
+        # none, Sphere.pose has 7), so a back-relative axis like -2 does not
+        # consistently point at the link (N) axis across leaves. Compute the
+        # link axis from the front instead, where it's leaf-independent.
+        link_axis = len(coll_robot_world.get_batch_axes()) - 1
         _collide_links_vs_world = jax.vmap(
-            self.collide_link_vs_world, in_axes=(-2, None), out_axes=-2
+            self.collide_link_vs_world, in_axes=(link_axis, None), out_axes=-2
         )
 
         # # 5. Compute final distance matrix

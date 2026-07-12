@@ -396,12 +396,14 @@ class GRiDDynamics:
         dt: float,
         f_ext: Float[Array, "*batch n 6"] | None = None,
         method: StepMethod = "semi_implicit",
+        substeps: int = 1,
     ) -> tuple[Float[Array, "*batch n"], Float[Array, "*batch n"]]:
         """Advance ``(q, qd)`` one timestep using the GRiD forward dynamics.
 
         Same integrators as :func:`pyroffi.dynamics.step` (semi-implicit
         Euler default, ``"euler"``, ``"rk4"``); differentiable through the
-        GRiD custom_vjp rules.
+        GRiD custom_vjp rules. See :func:`pyroffi.dynamics.step_with_fd` for
+        the ``substeps`` divergence caveat and stabilization tradeoff.
         """
         return step_with_fd(
             lambda q_, qd_: self.forward_dynamics(q_, qd_, u, f_ext),
@@ -409,6 +411,7 @@ class GRiDDynamics:
             qd,
             dt,
             method,
+            substeps,
         )
 
     def inverse_dynamics_gradient(

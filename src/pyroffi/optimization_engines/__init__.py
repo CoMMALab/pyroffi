@@ -33,6 +33,14 @@ from ._sco_optimization import sco_trajopt as sco_trajopt
 from ._sco_optimization import make_init_trajs as make_init_trajs
 from ._contact_trajopt import ContactTrajOptConfig as ContactTrajOptConfig
 from ._contact_trajopt import contact_sco_trajopt as contact_sco_trajopt
+from ._flat_contact_trajopt import (
+    FlatContactTrajOptConfig as FlatContactTrajOptConfig,
+)
+from ._flat_contact_trajopt import flat_contact_trajopt as flat_contact_trajopt
+from ._contact_rich_trajopt import (
+    ContactRichTrajOptConfig as ContactRichTrajOptConfig,
+)
+from ._contact_rich_trajopt import contact_rich_trajopt as contact_rich_trajopt
 from ._chomp_optimization import ChompTrajOptConfig as ChompTrajOptConfig
 from ._chomp_optimization import chomp_trajopt as chomp_trajopt
 from ._stomp_optimization import StompTrajOptConfig as StompTrajOptConfig

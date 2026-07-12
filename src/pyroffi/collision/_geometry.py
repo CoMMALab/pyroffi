@@ -295,7 +295,15 @@ class HalfSpace(CollGeom):
             jaxlie.SO3.from_matrix(mat), pos
         )
         size = jnp.zeros(batch_axes + (1,), dtype=pos.dtype)
-        return HalfSpace(pose=pose, size=size)
+        # Construct with physical-property fields explicitly broadcast up
+        # front, see the matching comment in Sphere.from_center_and_radius.
+        return HalfSpace(
+            pose=pose,
+            size=size,
+            mass=jnp.zeros(batch_axes, dtype=pos.dtype),
+            inertia_diag=jnp.zeros(batch_axes + (3,), dtype=pos.dtype),
+            friction=jnp.zeros(batch_axes, dtype=pos.dtype),
+        )
 
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
         """Visualize HalfSpace as a large thin box aligned with its boundary plane."""
@@ -352,14 +360,31 @@ class Sphere(CollGeom):
 
         # Store radius in size[..., 0], shape_dim=1
         size = radius[..., None]
-        sphere = Sphere(pose=pose, size=size)
 
         if mass is not None and inertia_diag is None:
             m = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
             i = (2.0 / 5.0) * m * radius**2
             inertia_diag = jnp.broadcast_to(i[..., None], batch_axes + (3,))
-        if mass is not None or inertia_diag is not None or friction is not None:
-            sphere = sphere.with_physical_properties(mass, inertia_diag, friction)
+        # Construct with all physical-property fields explicitly broadcast to
+        # batch_axes up front (rather than via with_physical_properties,
+        # which infers batch_axes from get_batch_axes() -- that inference is
+        # unreliable here since it hasn't seen properly-batched fields yet).
+        # Leaving any of these at their unbatched dataclass defaults would
+        # corrupt get_batch_axes() for any batch shape that happens to
+        # (mis)broadcast against those default shapes (or raise for shapes
+        # that don't broadcast at all).
+        sphere = Sphere(
+            pose=pose,
+            size=size,
+            mass=jnp.broadcast_to(jnp.asarray(mass) if mass is not None else 0.0, batch_axes),
+            inertia_diag=jnp.broadcast_to(
+                inertia_diag if inertia_diag is not None else jnp.zeros((3,)),
+                batch_axes + (3,),
+            ),
+            friction=jnp.broadcast_to(
+                jnp.asarray(friction) if friction is not None else 0.0, batch_axes
+            ),
+        )
         return sphere
 
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
@@ -499,7 +524,6 @@ class Box(CollGeom):
 
         half_lengths = jnp.stack([length / 2.0, width / 2.0, height / 2.0], axis=-1)
         size = jnp.broadcast_to(half_lengths, batch_axes + (3,))
-        box = Box(pose=pose, size=size)
 
         if mass is not None and inertia_diag is None:
             m = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
@@ -509,8 +533,20 @@ class Box(CollGeom):
             inertia_diag = (m / 12.0)[..., None] * jnp.stack(
                 [w_bc**2 + h_bc**2, l_bc**2 + h_bc**2, l_bc**2 + w_bc**2], axis=-1
             )
-        if mass is not None or inertia_diag is not None or friction is not None:
-            box = box.with_physical_properties(mass, inertia_diag, friction)
+        # Construct with physical-property fields explicitly broadcast up
+        # front, see the matching comment in Sphere.from_center_and_radius.
+        box = Box(
+            pose=pose,
+            size=size,
+            mass=jnp.broadcast_to(jnp.asarray(mass) if mass is not None else 0.0, batch_axes),
+            inertia_diag=jnp.broadcast_to(
+                inertia_diag if inertia_diag is not None else jnp.zeros((3,)),
+                batch_axes + (3,),
+            ),
+            friction=jnp.broadcast_to(
+                jnp.asarray(friction) if friction is not None else 0.0, batch_axes
+            ),
+        )
         return box
 
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
@@ -631,15 +667,26 @@ class Capsule(CollGeom):
         pose = jaxlie.SE3(wxyz_xyz)
 
         size = jnp.stack([radius, height], axis=-1)
-        capsule = Capsule(pose=pose, size=size)
 
         if mass is not None and inertia_diag is None:
             m = jnp.broadcast_to(jnp.asarray(mass), batch_axes)
             i_axial = 0.5 * m * radius**2
             i_radial = m * (3.0 * radius**2 + height**2) / 12.0
             inertia_diag = jnp.stack([i_radial, i_radial, i_axial], axis=-1)
-        if mass is not None or inertia_diag is not None or friction is not None:
-            capsule = capsule.with_physical_properties(mass, inertia_diag, friction)
+        # Construct with physical-property fields explicitly broadcast up
+        # front, see the matching comment in Sphere.from_center_and_radius.
+        capsule = Capsule(
+            pose=pose,
+            size=size,
+            mass=jnp.broadcast_to(jnp.asarray(mass) if mass is not None else 0.0, batch_axes),
+            inertia_diag=jnp.broadcast_to(
+                inertia_diag if inertia_diag is not None else jnp.zeros((3,)),
+                batch_axes + (3,),
+            ),
+            friction=jnp.broadcast_to(
+                jnp.asarray(friction) if friction is not None else 0.0, batch_axes
+            ),
+        )
         return capsule
 
     @staticmethod

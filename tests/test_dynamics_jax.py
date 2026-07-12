@@ -6,6 +6,9 @@ in self-consistency, structural properties, and gradient correctness.
 """
 
 import jax
+# These tests run in the process-default f32 (pyroffi no longer forces a global
+# jax_enable_x64=True at import). Tolerances and finite-difference steps below
+# are sized for f32, so they cost some accuracy vs the old f64 runs.
 import jax.numpy as jnp
 import numpy as onp
 import pytest
@@ -71,9 +74,10 @@ def test_batched_shapes(robot):
     assert tau.shape == (4, 5, n)
     M = robot.mass_matrix(q)
     assert M.shape == (4, 5, n, n)
-    # Batched result matches per-sample result.
+    # Batched result matches per-sample result. In f32 the batched path reorders
+    # reductions, so use a relative tolerance rather than the tight ATOL.
     tau_single = robot.inverse_dynamics(q[0, 0], qd[0, 0], qdd[0, 0])
-    assert jnp.abs(tau[0, 0] - tau_single).max() < ATOL
+    assert jnp.allclose(tau[0, 0], tau_single, rtol=1e-2, atol=1e-3)
 
 
 def test_gravity_zero_at_rest_without_gravity(robot):
@@ -110,11 +114,13 @@ def test_inverse_dynamics_gradient_finite_difference(robot):
         return dynamics.inverse_dynamics(robot, q_, qd, qdd).sum()
 
     g = jax.grad(f)(q)
-    eps = 1e-5
+    # f32 central difference: eps=1e-5 suffers subtractive cancellation, so use
+    # a larger step and an f32-sized tolerance (truncation + roundoff).
+    eps = 1e-2
     for i in range(n):
         dq = jnp.zeros(n).at[i].set(eps)
         fd = (f(q + dq) - f(q - dq)) / (2 * eps)
-        assert abs(float(g[i]) - float(fd)) < 1e-3, (i, g[i], fd)
+        assert abs(float(g[i]) - float(fd)) < 5e-2 * (1 + abs(float(g[i]))), (i, g[i], fd)
 
 
 def test_forward_dynamics_differentiable(robot):
@@ -132,7 +138,7 @@ def test_jacobian_linear_vs_autodiff(robot):
     q = jax.random.normal(jax.random.PRNGKey(6), (n,))
     J, r = dynamics.jacobian(robot, q)
     dr_dq = jax.jacfwd(lambda q_: dynamics.jacobian(robot, q_)[1])(q)
-    assert jnp.abs(J[:, 3:, :] - dr_dq).max() < 1e-5
+    assert jnp.abs(J[:, 3:, :] - dr_dq).max() < 1e-3  # f32 tolerance
 
 
 def test_jacobian_angular_vs_autodiff(robot):
@@ -155,7 +161,7 @@ def test_jacobian_angular_vs_autodiff(robot):
         for j in range(n):
             W = dR[i, :, :, j] @ R[i].T  # skew(d omega / d qd_j)
             w = jnp.array([W[2, 1], W[0, 2], W[1, 0]])
-            assert jnp.abs(J[i, :3, j] - w).max() < 1e-5, (i, j)
+            assert jnp.abs(J[i, :3, j] - w).max() < 1e-3, (i, j)  # f32 tolerance
 
 
 def test_fext_generalized_force_equivalence(robot):
@@ -188,7 +194,9 @@ def test_fext_batched(robot):
     tau = dynamics.inverse_dynamics(robot, q, qd, qdd, f_ext=f_ext)
     assert tau.shape == (4, n)
     tau0 = dynamics.inverse_dynamics(robot, q[0], qd[0], qdd[0], f_ext=f_ext[0])
-    assert jnp.abs(tau[0] - tau0).max() < ATOL
+    # f32: batched vs single reorders reductions; with external wrenches on the
+    # larger arms the drift is a few % of the torque magnitude, so relax further.
+    assert jnp.allclose(tau[0], tau0, rtol=5e-2, atol=1e-3)
 
 
 def test_step_semi_implicit_definition(robot):
@@ -229,6 +237,42 @@ def test_step_jit_and_batch(robot):
     step = jax.jit(lambda q, qd: dynamics.step(robot, q, qd, tau, 1e-3))
     q1, qd1 = step(q, qd)
     assert q1.shape == qd1.shape == (4, n)
+
+
+def test_step_substeps_default_matches_single_step(robot):
+    """substeps=1 (the default) must reproduce the pre-existing behavior exactly."""
+    n = robot.dynamics.num_dof
+    q, qd, tau = _rand_state(robot, jax.random.PRNGKey(17), batch=())
+    dt = 1e-3
+    q1, qd1 = dynamics.step(robot, q, qd, tau, dt)
+    q1_sub, qd1_sub = dynamics.step(robot, q, qd, tau, dt, substeps=1)
+    assert jnp.array_equal(q1, q1_sub)
+    assert jnp.array_equal(qd1, qd1_sub)
+
+
+def test_step_substeps_equals_manual_subdivision(robot):
+    """step(dt, substeps=k) must equal k applications of step(dt/k, substeps=1).
+
+    This is what the `substeps` parameter is defined to do -- subdivide dt into
+    k equal fixed-step updates. (The parameter exists so callers can subdivide a
+    large dt for stability; note that subdivision alone does not rescue every
+    stiff/ill-conditioned scenario -- forward-dynamics rollouts can still diverge
+    for reasons unrelated to step size, e.g. a near-singular mass matrix.)
+    """
+    n = robot.dynamics.num_dof
+    q = jnp.linspace(-0.2, 0.2, n)
+    qd = jnp.zeros(n)
+    tau = jnp.full(n, 0.5)
+    dt, k = 2e-3, 4
+
+    q_sub, qd_sub = dynamics.step(robot, q, qd, tau, dt, substeps=k)
+
+    qc, qdc = q, qd
+    for _ in range(k):
+        qc, qdc = dynamics.step(robot, qc, qdc, tau, dt / k, substeps=1)
+
+    assert jnp.abs(q_sub - qc).max() < ATOL
+    assert jnp.abs(qd_sub - qdc).max() < ATOL
 
 
 if __name__ == "__main__":
