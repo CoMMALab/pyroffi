@@ -46,7 +46,6 @@ from pyroffi.dynamics._contact import (
     ContactSystem,
     GraspedObject,
     ManipulatorSpec,
-    contact_points_world,
     manipulator_contact_fext,
     object_center_world,
 )
@@ -122,7 +121,7 @@ def main():
 
     cfg = ContactRichTrajOptConfig(
         n_outer_iters=12, n_inner_iters=50, m_lbfgs=8, dt=0.1,
-        w_smoothness=1.0, w_effort=1e-3, tau_max=87.0, f_min=1.0,
+        w_smoothness=1.0, w_effort=1e-5, tau_max=87.0, f_min=1.0,
     )
 
     print("Warming up (JIT compile) ...")
@@ -162,6 +161,11 @@ def _maybe_visualize(system: ContactSystem, traj, forces, dt, goal_center,
     box_extents = np.array(box_geom.extents)
 
     spec = mujoco.MjSpec()
+    # MjSpec defaults to degree mode, which would reinterpret the URDF's *radian*
+    # joint limits as degrees (shrinking the panda's ~+-2.9 rad ranges by 180/pi to
+    # ~+-3 deg) and clamp the arm near its home configuration so it cannot track
+    # the plan. The URDF limits are radians.
+    spec.compiler.degree = False
     tex = spec.add_texture(
         name="grid", type=mujoco.mjtTexture.mjTEXTURE_2D,
         builtin=mujoco.mjtBuiltin.mjBUILTIN_CHECKER,
@@ -184,9 +188,17 @@ def _maybe_visualize(system: ContactSystem, traj, forces, dt, goal_center,
 
     box = spec.worldbody.add_body(name="box", pos=box_center0)
     box.add_freejoint()
-    box.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=box_extents / 2.0,
-                 rgba=[200 / 255, 140 / 255, 60 / 255, 1.0],
-                 friction=[BOX_FRICTION, 0.01, 0.001])
+    # The grasp is a *rigid* fixed-contact hold (the planner's assumption), realized
+    # in playback as a kinematic attach of the box to the gripper (below). The coarse
+    # *spherized* Panda hand cannot form a stable two-pad pinch around the box -- its
+    # collision spheres transiently deep-penetrate the box and produce ~5e5 N contact
+    # impulses that launch it -- so the box carries no primitive collision here; it is
+    # driven directly from the simulated gripper pose.
+    bg = box.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=box_extents / 2.0,
+                      rgba=[200 / 255, 140 / 255, 60 / 255, 1.0],
+                      friction=[BOX_FRICTION, 0.01, 0.001])
+    bg.contype = 0
+    bg.conaffinity = 0
 
     mj_model = spec.compile()
     mj_data = mujoco.MjData(mj_model)
@@ -204,42 +216,75 @@ def _maybe_visualize(system: ContactSystem, traj, forces, dt, goal_center,
     times = np.arange(traj_np.shape[0]) * dt
     duration = float(times[-1])
 
-    # --- Actuated grip: apply the planner's optimized grasp wrench to the box ---
-    # (Same ideal-gripper model as 16_01; here the forces are decision variables
-    # the contact-rich solver optimized, so this renders exactly those forces.)
-    grip_f, grip_tau = _grip_wrenches(system, traj_arr, forces)
+    # --- Rigid grasp: kinematically pin the box to the simulated gripper ---------
+    # The arm is dynamically stepped (GRiD feedforward torque + computed-torque PD),
+    # and the box rigidly follows the *actual* simulated hand via the constant grasp
+    # offset captured at the grasp configuration -- the faithful playback of the
+    # planner's fixed-contact (rigid-grasp) assumption. The optimized contact forces
+    # already enter the arm dynamics through ``fext`` in ``tau_ff`` above.
     box_body = mj_model.body("box").id
+    hand_body = mj_model.body("arm_" + arm.grip_link).id
+    box_start = np.array(object_center_world(system, traj_arr[0]))
+
+    def _hand_se3(d: mujoco.MjData) -> jaxlie.SE3:
+        return jaxlie.SE3.from_rotation_and_translation(
+            jaxlie.SO3(jnp.asarray(d.xquat[hand_body])),
+            jnp.asarray(d.xpos[hand_body]),
+        )
 
     kp, kd = 1500.0, 80.0
+
+    # Static gravity torque at the goal, used to hold the pose after the horizon.
+    tau_hold = np.array(
+        arm.grid.inverse_dynamics(
+            traj_arr[-1:], jnp.zeros((1, ndof)), jnp.zeros((1, ndof))
+        )
+    )[0]
 
     def _ref(t: float):
         tc = np.clip(t, 0.0, duration)
         qr = np.array([np.interp(tc, times, traj_np[:, j]) for j in range(ndof)])
+        # Past the horizon the arm is *holding* the goal: the reference velocity and
+        # the feedforward must go to rest too. Clipping only `tc` would keep feeding
+        # the terminal velocity/accel of the plan into the PD term forever, which
+        # injects a constant kd * qd_ref torque bias and drives a large steady-state
+        # pose error (the arm sags away from the goal while "holding" it).
+        if t >= duration:
+            return qr, np.zeros(ndof), tau_hold
         qdr = np.array([np.interp(tc, times, np.gradient(traj_np[:, j], dt))
                         for j in range(ndof)])
         taur = np.array([np.interp(tc, times, tau_ff[:, j]) for j in range(ndof)])
-        fr = np.array([np.interp(tc, times, grip_f[:, a]) for a in range(3)])
-        tr = np.array([np.interp(tc, times, grip_tau[:, a]) for a in range(3)])
-        return qr, qdr, taur, fr, tr
+        return qr, qdr, taur
+
+    def _pin_box(d: mujoco.MjData):
+        """Rigidly place the box at gripper_pose @ (constant grasp offset)."""
+        box_world = _hand_se3(d) @ _pin_box.offset
+        d.qpos[ndof : ndof + 3] = np.array(box_world.translation())
+        d.qpos[ndof + 3 : ndof + 7] = np.array(box_world.rotation().wxyz)
+        d.qvel[ndof : ndof + 6] = 0.0
 
     def step_fn(m: mujoco.MjModel, d: mujoco.MjData):
         hold = 1.0
         if d.time >= duration + hold:
             reset_fn(m, d)
-        q_ref, qd_ref, tau, grip_force, grip_torque = _ref(d.time)
+        q_ref, qd_ref, tau = _ref(d.time)
         d.qfrc_applied[:ndof] = (
             tau + kp * (q_ref - d.qpos[:ndof]) + kd * (qd_ref - d.qvel[:ndof])
         )
-        d.xfrc_applied[box_body, :3] = grip_force
-        d.xfrc_applied[box_body, 3:] = grip_torque
         mujoco.mj_step(m, d)
+        _pin_box(d)  # box tracks the actual gripper (rigid grasp)
 
     def reset_fn(m: mujoco.MjModel, d: mujoco.MjData):
         mujoco.mj_resetData(m, d)
         d.qpos[:ndof] = traj_np[0]
-        d.qpos[ndof : ndof + 3] = box_center0
+        d.qpos[ndof : ndof + 3] = box_start
         d.qpos[ndof + 3 : ndof + 7] = [1.0, 0.0, 0.0, 0.0]
         mujoco.mj_forward(m, d)
+        # Capture the constant hand->box offset at the grasp configuration.
+        box_world0 = jaxlie.SE3.from_rotation_and_translation(
+            jaxlie.SO3.identity(), jnp.asarray(box_start)
+        )
+        _pin_box.offset = _hand_se3(d).inverse() @ box_world0
 
     reset_fn(mj_model, mj_data)
 
@@ -292,17 +337,6 @@ def _record_video(mj_model, mj_data, step_fn, duration: float, path: str,
         writer.close()
         renderer.close()
     print(f"Saved video to {path}")
-
-
-def _grip_wrenches(system: ContactSystem, traj_arr, forces):
-    """Per-waypoint net grasp wrench (force, torque about the box centre) the
-    optimized contact forces exert on the held object, in world axes. Applied to
-    the box body as an ideal actuated grip (see ``_maybe_visualize``)."""
-    centers = jax.vmap(object_center_world, in_axes=(None, 0))(system, traj_arr)
-    pts = jax.vmap(lambda q: jnp.stack(contact_points_world(system, q)))(traj_arr)
-    net_f = jnp.sum(forces, axis=1)
-    net_tau = jnp.sum(jnp.cross(pts - centers[:, None, :], forces), axis=1)
-    return np.array(net_f), np.array(net_tau)
 
 
 def _fd_vel_acc_np(q, dt: float):

@@ -254,14 +254,31 @@ def _maybe_visualize(system: ContactSystem, traj, forces, dt, goal_center,
 
     kp, kd = 1500.0, 80.0
 
+    # Static hold torque at the goal: gravity plus the contact reaction of the
+    # still-grasped box, with both arms at rest.
+    tau_hold = np.concatenate([
+        np.array(left.grid.inverse_dynamics(
+            qL[-1:], jnp.zeros((1, nL)), jnp.zeros((1, nL)), f_ext=fextL[-1:])),
+        np.array(right.grid.inverse_dynamics(
+            qR[-1:], jnp.zeros((1, nR)), jnp.zeros((1, nR)), f_ext=fextR[-1:])),
+    ], axis=1)[0]
+
     def _ref(t: float):
         tc = np.clip(t, 0.0, duration)
         qr = np.array([np.interp(tc, times, traj_np[:, j]) for j in range(nv_arms)])
+        fr = np.array([np.interp(tc, times, grip_f[:, a]) for a in range(3)])
+        tr = np.array([np.interp(tc, times, grip_tau[:, a]) for a in range(3)])
+        # Past the horizon the arms are *holding* the goal, so the reference velocity
+        # and the feedforward must go to rest too. Clipping only `tc` would keep
+        # feeding the plan's terminal velocity into the PD term forever, injecting a
+        # constant kd * qd_ref torque bias that drives a steady-state pose error.
+        # The grip wrench needs no such special case: the plan's terminal
+        # acceleration is already zero, so grip_f[-1] is the static support wrench.
+        if t >= duration:
+            return qr, np.zeros(nv_arms), tau_hold, fr, tr
         qdr = np.array([np.interp(tc, times, np.gradient(traj_np[:, j], dt))
                         for j in range(nv_arms)])
         taur = np.array([np.interp(tc, times, tau_ff[:, j]) for j in range(nv_arms)])
-        fr = np.array([np.interp(tc, times, grip_f[:, a]) for a in range(3)])
-        tr = np.array([np.interp(tc, times, grip_tau[:, a]) for a in range(3)])
         return qr, qdr, taur, fr, tr
 
     def step_fn(m: mujoco.MjModel, d: mujoco.MjData):

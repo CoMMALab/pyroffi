@@ -68,6 +68,15 @@ class ManipulatorSpec:
     world ``(x, y, 0)`` and rotated by ``yaw`` about world +z. ``grip_link``
     is the link whose frame defines the gripper; ``p_local`` is the contact
     point in that link's frame.
+
+    Parallel-jaw pinch model (used by :func:`parallel_jaw_grip_penalty`):
+    ``close_axis_local`` is the gripper's finger-closing direction in the
+    grip-link frame (the two pads face each other along this axis); ``+z`` and
+    friction act in the plane perpendicular to it. ``f_grip_max`` is the applied
+    clamp force magnitude (N) available at the pads -- friction capacity in the
+    pad plane is ``2 * mu * f_grip_max``, squeeze capacity along the axis is
+    ``f_grip_max``. For the Franka hand the fingers close along the hand-frame
+    ``y`` axis, so ``close_axis_local = (0, 1, 0)``.
     """
 
     robot: "Robot"
@@ -75,6 +84,8 @@ class ManipulatorSpec:
     grip_link: str
     base_xy_yaw: tuple[float, float, float] = (0.0, 0.0, 0.0)
     p_local: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    close_axis_local: tuple[float, float, float] = (0.0, 1.0, 0.0)
+    f_grip_max: float = 40.0
 
     @property
     def grip_link_index(self) -> int:
@@ -290,6 +301,55 @@ def grip_validity_penalty(
         push = jnp.maximum(0.0, f_min - f_n) ** 2
         cone = jnp.maximum(0.0, jnp.linalg.norm(f_t) - mu * f_n) ** 2
         return push + cone
+
+    total = jnp.array(0.0, forces.dtype)
+    for m, qm, f in zip(system.manipulators, qs, forces):
+        total = total + per_contact(m, qm, f)
+    return total
+
+
+def _closing_axis_world(m: ManipulatorSpec, q: Float[Array, "n"]) -> Array:
+    """Unit world direction of the gripper's finger-closing axis at ``q``."""
+    R = _gripper_world_pose(m, q).rotation()
+    a = R.apply(jnp.asarray(m.close_axis_local, jnp.float32))
+    return a / (jnp.linalg.norm(a) + 1e-9)
+
+
+def parallel_jaw_grip_penalty(
+    system: ContactSystem,
+    q: Float[Array, "n"],
+    forces: Float[Array, "k 3"],
+    mu_friction: float | None,
+) -> Array:
+    """Squared-hinge grip-feasibility penalty for a **parallel-jaw pinch**.
+
+    Unlike :func:`grip_validity_penalty` (a unilateral fingertip-push model whose
+    "inward normal" degenerates to zero whenever the contact point coincides with
+    the object centroid -- i.e. every single-arm grasp), this models a two-pad
+    clamp explicitly. Decompose each manipulator's world contact force ``f`` about
+    the closing axis ``a``:
+
+      * ``f_axis = (f . a) a``  -- along the closing axis: resisted by the clamp,
+        capacity ``f_grip_max`` (pushing along the axis unloads one pad -> escape).
+      * ``f_shear = f - f_axis`` -- in the pad plane: resisted by Coulomb friction
+        at both pads, capacity ``2 * mu * f_grip_max``.
+
+    Zero iff the grip is feasible. ``mu`` defaults to the grasped object's own
+    ``geom.friction``. Physically correct behaviour: a top-down pinch (closing
+    axis horizontal) bears the object weight as *shear*, so it slips when
+    ``mass * g > 2 * mu * f_grip_max`` -- monotone in both ``mu`` and mass.
+    """
+    mu = system.body.friction if mu_friction is None else mu_friction
+    qs = system.split_q(q)
+
+    def per_contact(m, qm, f):
+        a = _closing_axis_world(m, qm)
+        f_ax = jnp.dot(f, a)
+        f_shear = f - f_ax * a
+        fg = m.f_grip_max
+        squeeze = jnp.maximum(0.0, jnp.abs(f_ax) - fg) ** 2
+        shear = jnp.maximum(0.0, jnp.linalg.norm(f_shear) - 2.0 * mu * fg) ** 2
+        return squeeze + shear
 
     total = jnp.array(0.0, forces.dtype)
     for m, qm, f in zip(system.manipulators, qs, forces):

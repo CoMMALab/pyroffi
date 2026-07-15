@@ -6,11 +6,16 @@ collision-checker pattern (a separate class rather than ``Robot`` methods,
 since compiled-library handles cannot live in a jdc pytree).
 
 Differentiability: ``inverse_dynamics`` and ``forward_dynamics`` carry
-``jax.custom_vjp`` rules whose backward passes use GRiD's *analytic gradient*
+``jax.custom_jvp`` rules whose tangent maps use GRiD's *analytic gradient*
 kernels (``inverse_dynamics_gradient`` / ``forward_dynamics_gradient``) —
 this is the main payoff of GRiD for trajectory optimization inner loops.
-For forward-mode or higher-order derivatives use the pure-JAX
-``Robot.inverse_dynamics`` / ``Robot.forward_dynamics`` instead.
+Because the tangent rule is a plain linear map of the input tangents
+(analytic-Jacobian @ tangent), JAX serves **both** forward-mode
+(``jvp`` / ``jacfwd``) directly *and* reverse-mode (``grad`` / ``jacrev``) by
+transposing that same linear rule — a single analytic rule covers both. For
+second-order derivatives the analytic Jacobian kernels are treated as
+constants (their own derivatives are not available); use the pure-JAX
+``Robot.inverse_dynamics`` / ``Robot.forward_dynamics`` there instead.
 """
 
 from __future__ import annotations
@@ -443,62 +448,91 @@ class GRiDDynamics:
 
 
 # ---------------------------------------------------------------------------
-# custom_vjp rules (module-level, with the GRiDDynamics instance nondiff).
+# custom_jvp rules (module-level, with the GRiDDynamics instance nondiff).
+#
+# The tangent rule pushes the input tangents through GRiD's analytic Jacobian
+# (a plain linear map, ``J @ tangent``, with ``J`` computed by the gradient
+# kernels at the primal point). JAX gets forward-mode from this rule directly
+# and reverse-mode by transposing it, so both modes share one analytic rule and
+# a single fused kernel launch under ``vmap`` (the kernels are ``_batchable``).
+# ``symbolic_zeros=True`` lets us skip the kernel work (and the mass-matrix
+# solve) for any input whose tangent is a structural zero.
 # ---------------------------------------------------------------------------
 
+_SymZero = jax.custom_derivatives.SymbolicZero
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+
+def _nz(t) -> bool:
+    """True iff tangent ``t`` is not a structural (symbolic) zero."""
+    return not isinstance(t, _SymZero)
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
 def _id_differentiable(gd: GRiDDynamics, q, qd, qdd):
     return gd._id_raw_b(q, qd, qdd)
 
 
-def _id_fwd(gd, q, qd, qdd):
-    return gd._id_raw_b(q, qd, qdd), (q, qd, qdd)
-
-
-def _id_bwd(gd, res, g):
-    q, qd, qdd = res
+def _id_jvp(gd, primals, tangents):
+    q, qd, qdd = primals
+    t_q, t_qd, t_qdd = tangents
+    out = gd._id_raw_b(q, qd, qdd)
     n = gd.num_dof
-    G = gd._idgrad_call(q, qd, qdd)  # (*b, n, 2n)
-    dq = jnp.einsum("...ij,...i->...j", G[..., :n], g)
-    dqd = jnp.einsum("...ij,...i->...j", G[..., n:], g) + gd._damping * g
-    if gd._dyn_info is None:
-        raise NotImplementedError(
-            "Differentiating inverse_dynamics w.r.t. qdd requires the "
-            "pure-JAX mass matrix, which is unavailable for this URDF."
-        )
-    # d tau / d qdd = M(q); M is symmetric so the VJP is M @ g.
-    M = mass_matrix_jax(gd._dyn_info, q.astype(jnp.float32))
-    dqdd = jnp.einsum("...ij,...i->...j", M, g)
-    return dq, dqd, dqdd
+    tan = jnp.zeros_like(out)
+    if _nz(t_q) or _nz(t_qd):
+        G = gd._idgrad_call(q, qd, qdd)  # (*b, n, 2n) = [d tau/d q | d tau/d qd]
+        if _nz(t_q):
+            tan = tan + jnp.einsum("...ij,...j->...i", G[..., :n], t_q)
+        if _nz(t_qd):
+            tan = (
+                tan
+                + jnp.einsum("...ij,...j->...i", G[..., n:], t_qd)
+                + gd._damping * t_qd
+            )
+    if _nz(t_qdd):
+        if gd._dyn_info is None:
+            raise NotImplementedError(
+                "Differentiating inverse_dynamics w.r.t. qdd requires the "
+                "pure-JAX mass matrix, which is unavailable for this URDF."
+            )
+        # d tau / d qdd = M(q).
+        M = mass_matrix_jax(gd._dyn_info, q.astype(jnp.float32))
+        tan = tan + jnp.einsum("...ij,...j->...i", M, t_qdd)
+    return out, tan
 
 
-_id_differentiable.defvjp(_id_fwd, _id_bwd)
+_id_differentiable.defjvp(_id_jvp, symbolic_zeros=True)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
 def _fd_differentiable(gd: GRiDDynamics, q, qd, u):
     return gd._fd_raw_b(q, qd, u)
 
 
-def _fd_fwd(gd, q, qd, u):
-    return gd._fd_raw_b(q, qd, u), (q, qd, u)
-
-
-def _fd_bwd(gd, res, g):
-    q, qd, u = res
+def _fd_jvp(gd, primals, tangents):
+    q, qd, u = primals
+    t_q, t_qd, t_u = tangents
+    out = gd._fd_raw_b(q, qd, u)
     n = gd.num_dof
-    # Gradient kernel is evaluated at the effective (damping-compensated)
-    # torque used by _fd_raw's forward pass.
-    G = gd._fdgrad_call(q, qd, u - gd._damping * qd)  # (*b, n, 2n)
-    dq = jnp.einsum("...ij,...i->...j", G[..., :n], g)
-    dqd = jnp.einsum("...ij,...i->...j", G[..., n:], g)
-    # d qdd / d u = Minv(q); symmetric, so the VJP is Minv @ g.
-    Minv = gd._minv_call(q)
-    du = jnp.einsum("...ij,...i->...j", Minv, g)
-    # Chain rule through u_eff = u - d*qd.
-    dqd = dqd - gd._damping * du
-    return dq, dqd, du
+    tan = jnp.zeros_like(out)
+    if _nz(t_q) or _nz(t_qd):
+        # Gradient kernel at the effective (damping-compensated) torque, matching
+        # _fd_raw's forward pass. G = [d qdd/d q | d qdd/d qd] holding u_eff fixed.
+        G = gd._fdgrad_call(q, qd, u - gd._damping * qd)
+        if _nz(t_q):
+            tan = tan + jnp.einsum("...ij,...j->...i", G[..., :n], t_q)
+        if _nz(t_qd):
+            tan = tan + jnp.einsum("...ij,...j->...i", G[..., n:], t_qd)
+    # d qdd / d u_eff = Minv(q), with u_eff = u - d*qd, so both t_u and t_qd feed
+    # it: d qdd += Minv @ (t_u - d*t_qd).
+    if _nz(t_u) or _nz(t_qd):
+        rhs = jnp.zeros_like(out)
+        if _nz(t_u):
+            rhs = rhs + t_u
+        if _nz(t_qd):
+            rhs = rhs - gd._damping * t_qd
+        Minv = gd._minv_call(q)
+        tan = tan + jnp.einsum("...ij,...j->...i", Minv, rhs)
+    return out, tan
 
 
-_fd_differentiable.defvjp(_fd_fwd, _fd_bwd)
+_fd_differentiable.defjvp(_fd_jvp, symbolic_zeros=True)

@@ -181,10 +181,10 @@ def _contact_rich_cost(
     )  # (T,6)
     cost += jnp.sum(nu * b) + 0.5 * rho_o * jnp.sum(b**2)
 
-    # --- Grip validity (friction cone) + force regularization ------------
+    # --- Grip validity (parallel-jaw pinch) + force regularization -------
     grip = jax.vmap(
-        C.grip_validity_penalty, in_axes=(None, 0, 0, None, None)
-    )(system, q, lam, cfg.mu_friction, cfg.f_min)
+        C.parallel_jaw_grip_penalty, in_axes=(None, 0, 0, None)
+    )(system, q, lam, cfg.mu_friction)
     cost += cfg.w_grip * jnp.sum(grip)
     cost += cfg.w_force_reg * jnp.sum(lam**2)
 
