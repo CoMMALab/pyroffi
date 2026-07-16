@@ -66,6 +66,11 @@ _CPU_ONLY = "--cpu-only" in sys.argv[1:]
 if _CPU_ONLY:
     os.environ["JAX_PLATFORMS"] = "cpu"
 
+# ``--no-jax`` skips all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, Learned-JAX,
+# PyRoKi) but keeps CUDA/FFI kernel solvers and GPU monitoring enabled, so the
+# FFI kernels can be benchmarked in isolation.  ``--cpu-only`` implies it.
+_NO_JAX = _CPU_ONLY or "--no-jax" in sys.argv[1:]
+
 import jax
 import jax.numpy as jnp
 import jaxlie
@@ -1455,6 +1460,10 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     if _CPU_ONLY:
         print("CPU-only mode: running only CPU-native solvers (QuIK); "
               "skipping all CUDA and JAX solvers; JAX_PLATFORMS=cpu")
+    elif _NO_JAX:
+        print("No-JAX mode: skipping all JAX-based solvers "
+              "(HJCD/LS/SQP/MPPI-JAX, Learned-JAX, PyRoKi); "
+              "CUDA/FFI kernel solvers and QuIK still run")
     print(f"GPU monitoring: {gpu_mon_status}")
     print("=" * 80)
 
@@ -1496,8 +1505,8 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     _pyroki_coll_solve_fn = None
     _pyroki_coll_batch_fn = None
 
-    if _CPU_ONLY:
-        print("\nPyRoKi disabled (--cpu-only: JAX-based solvers are skipped).")
+    if _NO_JAX:
+        print("\nPyRoKi disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
     elif _PYROKI_AVAILABLE:
         print("\nSetting up PyRoKi solver ...")
         _pyroki_robot = _pyroki.Robot.from_urdf(urdf)
@@ -1582,15 +1591,12 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print(f"  Obstacles: {len(env_dict.get('spheres', []))} spheres"
               f" + {len(env_dict.get('cuboids', []))} cuboids")
 
-        # vmap collide over the link axis of the robot's capsule representation.
-        _coll_vs_world = jax.vmap(collide, in_axes=(-2, None), out_axes=-2)
-
         # All obstacles are captured in the closure — no dynamic arg needed.
         def _collision_penalty(cfg, robot_arg, _dummy):
             coll_geom = robot_coll.at_config(robot_arg, cfg)
             penalty   = jnp.zeros(())
             for obs in _obs_geoms:
-                d = _coll_vs_world(coll_geom, obs.broadcast_to((1,)))
+                d = collide(coll_geom, obs.broadcast_to((1,)))
                 penalty = penalty + jnp.sum(jax.nn.softplus(-d / _COLL_EPS) * _COLL_EPS)
             return penalty
 
@@ -1624,7 +1630,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
             coll_geom = robot_coll.at_config(robot, cfg)
             dists = []
             for obs in _obs_geoms:
-                dists.append(jnp.min(_coll_vs_world(coll_geom, obs.broadcast_to((1,)))))
+                dists.append(jnp.min(collide(coll_geom, obs.broadcast_to((1,)))))
             if not dists:
                 return jnp.inf
             return jnp.min(jnp.stack(dists))
@@ -1679,8 +1685,8 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     _learned_ik_available = False
     _learned_ik_fn        = None
     _learned_ik_fn_batch  = None
-    if _CPU_ONLY:
-        print("\nLearned-IK disabled (--cpu-only: JAX-based solvers are skipped).")
+    if _NO_JAX:
+        print("\nLearned-IK disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
     elif _LEARNED_IK_IMPORT_OK:
         _model_path = get_default_model_path(robot_name)
         if _model_path.exists():
@@ -1832,7 +1838,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
             mppi_ik_solve, {**IK_KWARGS_MPPI_JAX, **coll_kwargs_jax}
         )
 
-    warmup_seq = [] if _CPU_ONLY else [
+    warmup_seq = [] if _NO_JAX else [
         ("HJCD-JAX",   jit_hjcd,          {}),
         ("LS-JAX",     jit_ls,            {}),
         ("SQP-JAX",    jit_sqp,           {}),
@@ -1847,13 +1853,14 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         ]
     if _learned_ik_available:
         warmup_seq.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
-    if COLLISION_FREE and not _CPU_ONLY:
-        warmup_seq += [
-            ("HJCD-JAX-COLL",  jit_hjcd_coll,         coll_kwargs_jax),
-            ("LS-JAX-COLL",    jit_ls_coll,            coll_kwargs_jax),
-            ("SQP-JAX-COLL",   jit_sqp_coll,           coll_kwargs_jax),
-            ("MPPI-JAX-COLL",  jit_mppi_coll,          coll_kwargs_jax),
-        ]
+    if COLLISION_FREE:
+        if not _NO_JAX:
+            warmup_seq += [
+                ("HJCD-JAX-COLL",  jit_hjcd_coll,         coll_kwargs_jax),
+                ("LS-JAX-COLL",    jit_ls_coll,            coll_kwargs_jax),
+                ("SQP-JAX-COLL",   jit_sqp_coll,           coll_kwargs_jax),
+                ("MPPI-JAX-COLL",  jit_mppi_coll,          coll_kwargs_jax),
+            ]
         if not _CPU_ONLY:
             warmup_seq += [
                 ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
@@ -1862,7 +1869,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
                 ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
             ]
 
-    warmup_batch_jax = [] if _CPU_ONLY else [
+    warmup_batch_jax = [] if _NO_JAX else [
         ("HJCD-JAX-BATCH",  jit_hjcd_batch,  {}),
         ("LS-JAX-BATCH",    jit_ls_batch,    {}),
         ("SQP-JAX-BATCH",   jit_sqp_batch,   {}),
@@ -1870,7 +1877,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     ]
     if _learned_ik_available:
         warmup_batch_jax.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}))
-    if COLLISION_FREE and not _CPU_ONLY:
+    if COLLISION_FREE and not _NO_JAX:
         warmup_batch_jax += [
             ("HJCD-JAX-COLL-BATCH", jit_hjcd_coll_batch, {}),
             ("LS-JAX-COLL-BATCH",   jit_ls_coll_batch,   {}),
@@ -1964,7 +1971,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     print("Sequential evaluation (per-problem latency) ...")
     print(f"{'─'*80}")
 
-    seq_solvers = [] if _CPU_ONLY else [
+    seq_solvers = [] if _NO_JAX else [
         ("HJCD-JAX",  jit_hjcd,          {},                seq_timers["HJCD-JAX"]),
         ("LS-JAX",    jit_ls,            {},                seq_timers["LS-JAX"]),
         ("SQP-JAX",   jit_sqp,          {},                seq_timers["SQP-JAX"]),
@@ -2014,7 +2021,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print("Sequential evaluation — collision-free IK ...")
         print(f"{'─'*80}")
 
-        seq_coll_solvers = [] if _CPU_ONLY else [
+        seq_coll_solvers = [] if _NO_JAX else [
             ("HJCD-JAX",  jit_hjcd_coll,     coll_kwargs_jax,                              seq_timers["HJCD-JAX-COLL"]),
             ("LS-JAX",    jit_ls_coll,        coll_kwargs_jax,                              seq_timers["LS-JAX-COLL"]),
             ("SQP-JAX",   jit_sqp_coll,       coll_kwargs_jax,                              seq_timers["SQP-JAX-COLL"]),
@@ -2056,7 +2063,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     print("Batch evaluation (all targets in one kernel launch) ...")
     print(f"{'─'*80}")
 
-    batch_solvers = [] if _CPU_ONLY else [
+    batch_solvers = [] if _NO_JAX else [
         ("LS-JAX-BATCH",    jit_ls_batch,            {},                 rng_keys_batch, batch_timers["LS-JAX-BATCH"]),
         ("HJCD-JAX-BATCH",  jit_hjcd_batch,           {},                 rng_keys_batch, batch_timers["HJCD-JAX-BATCH"]),
         ("SQP-JAX-BATCH",   jit_sqp_batch,            {},                 rng_keys_batch, batch_timers["SQP-JAX-BATCH"]),
@@ -2107,7 +2114,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print("Batch evaluation — collision-free IK ...")
         print(f"{'─'*80}")
 
-        batch_coll_solvers = [] if _CPU_ONLY else [
+        batch_coll_solvers = [] if _NO_JAX else [
             ("LS-JAX",    jit_ls_coll_batch,      {},                                          rng_keys_batch, batch_timers["LS-JAX-COLL-BATCH"]),
             ("HJCD-JAX",  jit_hjcd_coll_batch,    {},                                          rng_keys_batch, batch_timers["HJCD-JAX-COLL-BATCH"]),
             ("SQP-JAX",   jit_sqp_coll_batch,     {},                                          rng_keys_batch, batch_timers["SQP-JAX-COLL-BATCH"]),
@@ -2157,16 +2164,23 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
                        "rot_med(rad)", "rot_p95(rad)", "success", "coll_free",
                        "gpu_pk(%)", "gpu_avg(%)", "vram_pk(MB)"]
 
-    seq_order = (
-        []
-        if _CPU_ONLY else
-        [
-            "HJCD-JAX", "HJCD-CUDA",
-            "LS-JAX",   "LS-CUDA",
-            "SQP-JAX",  "SQP-CUDA",
-            "MPPI-JAX", "MPPI-CUDA",
-        ]
-    )
+    _method_pairs = [
+        ("HJCD-JAX", "HJCD-CUDA"),
+        ("LS-JAX",   "LS-CUDA"),
+        ("SQP-JAX",  "SQP-CUDA"),
+        ("MPPI-JAX", "MPPI-CUDA"),
+    ]
+
+    def _method_order(jax_batch_suffix: str = "") -> list[str]:
+        order = []
+        for jax_label, cuda_label in _method_pairs:
+            if not _NO_JAX:
+                order.append(jax_label + jax_batch_suffix)
+            if not _CPU_ONLY:
+                order.append(cuda_label + jax_batch_suffix)
+        return order
+
+    seq_order = _method_order()
     if _learned_ik_available:
         seq_order.append("Learned-JAX")
     if _pyroki_solve_fn is not None:
@@ -2174,16 +2188,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     if "QuIK-CPU" in seq_results:
         seq_order.append("QuIK-CPU")
 
-    batch_order = (
-        []
-        if _CPU_ONLY else
-        [
-            "HJCD-JAX-BATCH",  "HJCD-CUDA-BATCH",
-            "LS-JAX-BATCH",    "LS-CUDA-BATCH",
-            "SQP-JAX-BATCH",   "SQP-CUDA-BATCH",
-            "MPPI-JAX-BATCH",  "MPPI-CUDA-BATCH",
-        ]
-    )
+    batch_order = _method_order("-BATCH")
     if _learned_ik_available:
         batch_order.append("Learned-JAX-BATCH")
     if _pyroki_batch_fn is not None:
@@ -2191,30 +2196,12 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     if "QuIK-CPU-BATCH" in batch_results:
         batch_order.append("QuIK-CPU-BATCH")
 
-    coll_seq_order = (
-        []
-        if _CPU_ONLY else
-        [
-            "HJCD-JAX", "HJCD-CUDA",
-            "LS-JAX",   "LS-CUDA",
-            "SQP-JAX",  "SQP-CUDA",
-            "MPPI-JAX", "MPPI-CUDA",
-        ]
-    )
+    coll_seq_order = _method_order()
     if _pyroki_coll_solve_fn is not None:
         coll_seq_order.append("PyRoKi")
     if "QuIK-CPU" in seq_coll_results:
         coll_seq_order.append("QuIK-CPU")
-    coll_batch_order = (
-        []
-        if _CPU_ONLY else
-        [
-            "HJCD-JAX", "HJCD-CUDA",
-            "LS-JAX",   "LS-CUDA",
-            "SQP-JAX",  "SQP-CUDA",
-            "MPPI-JAX", "MPPI-CUDA",
-        ]
-    )
+    coll_batch_order = _method_order()
     if _pyroki_coll_batch_fn is not None:
         coll_batch_order.append("PyRoKi")
     if "QuIK-CPU" in batch_coll_results:
@@ -2238,7 +2225,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         row, _ = _batch_row(label, batch_results[label])
         print(row)
 
-    if not _CPU_ONLY:
+    if not _NO_JAX:
         print(f"\n{'='*80}")
         print("Batch correctness — JAX vs CUDA agreement")
         print(f"  thresholds: pos <= {AGREE_POS_THR_MM:.3f} mm, rot <= {AGREE_ROT_THR_RAD:.3f} rad")
@@ -2293,7 +2280,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
             row, _ = _batch_row_coll(label, batch_coll_results[label], batch_coll_free[label])
             print(row)
 
-        if not _CPU_ONLY:
+        if not _NO_JAX:
             print(f"\n{'='*80}")
             print("Batch correctness (collision-free) — JAX vs CUDA agreement")
             print(f"  thresholds: pos <= {AGREE_POS_THR_MM:.3f} mm, rot <= {AGREE_ROT_THR_RAD:.3f} rad")
@@ -2357,6 +2344,17 @@ def main() -> None:
             "skip all CUDA solvers AND all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, "
             "Learned-JAX, PyRoKi), force JAX_PLATFORMS=cpu, and disable GPU (pynvml) "
             "monitoring. This flag is parsed before jax is imported (see top of file)."
+        ),
+    )
+    parser.add_argument(
+        "--no-jax",
+        action="store_true",
+        help=(
+            "Skip all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, Learned-JAX, "
+            "PyRoKi) so only the CUDA/FFI kernel solvers (and QuIK) run, to "
+            "benchmark the FFI kernels in isolation. Unlike --cpu-only, CUDA "
+            "solvers and GPU (pynvml) monitoring stay enabled. This flag is "
+            "parsed before jax is imported (see top of file)."
         ),
     )
     args = parser.parse_args()
