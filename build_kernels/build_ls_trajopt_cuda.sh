@@ -7,44 +7,12 @@
 
 set -euo pipefail
 
-DEBUG=0
-MAX_JOINTS_OVERRIDE=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --debug)
-      DEBUG=1
-      shift
-      ;;
-    --max-joints)
-      if [[ $# -lt 2 ]]; then
-        echo "ERROR: --max-joints requires an integer value"
-        exit 1
-      fi
-      MAX_JOINTS_OVERRIDE="$2"
-      shift 2
-      ;;
-    --max-joints=*)
-      MAX_JOINTS_OVERRIDE="${1#*=}"
-      shift
-      ;;
-    *)
-      echo "ERROR: Unknown argument: $1"
-      exit 1
-      ;;
-  esac
-done
-
-MAX_JOINTS_FLAG=""
-if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
-  if ! [[ "${MAX_JOINTS_OVERRIDE}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: --max-joints must be a positive integer, got '${MAX_JOINTS_OVERRIDE}'"
-    exit 1
-  fi
-  MAX_JOINTS_FLAG="-DMAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
-  echo "Overriding MAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
-fi
-
+# Build parameters (--max-joints / --max-act / --debug) + guardrails live in one
+# place so the 15 kernel builds cannot drift apart. Defaults are applied there and
+# ALWAYS passed as -D, so a .so never depends on a header fallback for its capacity.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_build_params.sh"
+parse_build_params "$@"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
 SRC="${KERNELS_DIR}/trajopt/_ls_trajopt_cuda_kernel.cu"
 OUT="${KERNELS_DIR}/trajopt/_ls_trajopt_cuda_lib.so"
@@ -69,7 +37,7 @@ fi
 nvcc \
   ${NVCC_OPT} \
   -std=c++17 \
-  ${MAX_JOINTS_FLAG} \
+  ${BUILD_PARAM_FLAGS} \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \

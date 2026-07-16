@@ -52,6 +52,8 @@ from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
+import pathlib
+
 import numpy as np
 from jax import Array
 from jaxtyping import Float
@@ -59,10 +61,29 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._ls_ik import _prepare_ls_collision_buffers
 
-_REGION_IK_MAX_TPB_BY_SMEM = 384  # MAX_JOINTS=64, MAX_ACT=16 build of CUDA kernel.
+# Measured (not derived) against a MAX_JOINTS=64, MAX_ACT=16 build: shared-memory use
+# scales with BOTH limits, so this ceiling does not transfer to a --max-act/--max-joints
+# rebuild. _assert_region_ik_build() ties it to the .so's self-reported limits so a
+# rebuild fails loudly here instead of silently capping occupancy (limits shrunk) or
+# failing the launch with a bare cudaErrorInvalidValue (limits grown).
+_REGION_IK_BUILD = (64, 16)  # (MAX_JOINTS, MAX_ACT) this bound was measured on
+_REGION_IK_MAX_TPB_BY_SMEM = 384
+
+
+def _assert_region_ik_build() -> None:
+    """Verify the region-IK .so matches the build _REGION_IK_MAX_TPB_BY_SMEM assumes."""
+    from ..cuda_kernels._build_params import assert_built_for
+    from ..cuda_kernels import region_ik as _rik
+
+    lib = pathlib.Path(_rik.__file__).parent / "_svgd_region_ik_cuda_lib.so"
+    if lib.exists():
+        assert_built_for(str(lib), lib.name,
+                         max_joints=_REGION_IK_BUILD[0], max_act=_REGION_IK_BUILD[1],
+                         what="_REGION_IK_MAX_TPB_BY_SMEM")
 
 
 def _validate_threads_per_block(threads_per_block: int, max_tpb: int = _REGION_IK_MAX_TPB_BY_SMEM) -> None:
+    _assert_region_ik_build()
     if threads_per_block < 32 or threads_per_block > 1024 or threads_per_block % 32 != 0:
         raise ValueError("threads_per_block must be a multiple of 32 in [32, 1024].")
     if threads_per_block > max_tpb:
@@ -1083,7 +1104,9 @@ def svgd_sample_box_region_cuda(
 
 # ── Hit-and-run sampler ───────────────────────────────────────────────────────
 
-_HIT_AND_RUN_MAX_TPB_BY_SMEM = 384  # MAX_JOINTS=64, MAX_ACT=16 build of CUDA kernel.
+# Same measured-not-derived caveat as _REGION_IK_MAX_TPB_BY_SMEM above; validated by
+# _assert_region_ik_build() against the .so's self-reported limits.
+_HIT_AND_RUN_MAX_TPB_BY_SMEM = 384
 
 
 @functools.partial(

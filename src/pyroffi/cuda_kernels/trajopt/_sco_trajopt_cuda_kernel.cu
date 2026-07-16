@@ -19,6 +19,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "glass.cuh"
 #include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
@@ -141,27 +142,27 @@ static constexpr int PYROFFI_MAX_GPUS = 16;
 // Warp / block reduction
 // ---------------------------------------------------------------------------
 
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    for (int offset = 16; offset > 0; offset >>= 1)
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    return val;
-}
-
-__device__ float block_reduce_sum(float val, float* smem, int tid, int bdim) {
-    int lane    = tid & 31;
-    int warp_id = tid >> 5;
-
-    val = warp_reduce_sum(val);
-    if (lane == 0) smem[warp_id] = val;
-    __syncthreads();
-
-    int n_warps = bdim >> 5;
-    float ws = (tid < n_warps) ? smem[tid] : 0.0f;
-    ws = warp_reduce_sum(ws);
-
-    if (tid == 0) smem[0] = ws;
-    __syncthreads();
-    return smem[0];
+/**
+ * Block-sum of one per-thread value, broadcast to every thread.
+ *
+ * Thin shim over glass::reduce_fast, kept only so the ~10 call sites below keep
+ * their (val, smem, tid, bdim) shape — GLASS derives rank/size from threadIdx and
+ * blockDim itself, so tid/bdim are now unused.
+ *
+ * This replaced a hand-rolled shuffle reduce that was bit-identical but 1.3-1.6x
+ * slower: its inter-warp stage ran the 5-step shuffle tree on EVERY warp and used
+ * only warp 0's answer, where GLASS guards the stage with `if (rank < 32)`. The gap
+ * grew with block size (32 redundant warps at bdim=1024). Measurements and the
+ * reasoning are in docs/reduce_benchmark.txt.
+ *
+ * NOTE this uses the default TRAILING_SYNC=true, which makes `smem` safe to reuse
+ * on return. The old version did NOT guarantee that (it ended on a read of smem[0]),
+ * so several call sites below were relying on their own following barrier. The
+ * trailing barrier measured free, so it is not worth the audit to elide it.
+ */
+__device__ __forceinline__ float block_reduce_sum(float val, float* smem, int tid, int bdim) {
+    (void)tid; (void)bdim;
+    return glass::reduce_fast<float>(val, smem);
 }
 
 // ---------------------------------------------------------------------------

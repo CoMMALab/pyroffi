@@ -24,6 +24,8 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_glass_solve.cuh"
+#include "_tier_kernel.cuh"
 #include "_collision_cuda_helpers.cuh"
 
 #include "xla/ffi/api/ffi.h"
@@ -320,6 +322,21 @@ void hjcd_ik_coarse_kernel(
  * @param ancestor_masks (n_ee, n_joints)              ancestor bitmask per EE
  * @param target_Ts     (n_problems, n_ee, 7)          target poses
  */
+// Launch shape per tier (LM is register/local-memory heavy, so blocks stay modest).
+#define PYROFFI_HJCD_THREAD_TPB 32
+#define PYROFFI_HJCD_BLOCK_TPB  64
+
+// Trial step sizes in the LM line search; also sizes the warp/block reduction buffer.
+#define N_HJCD_ALPHAS 5
+
+// Tiered: one seed per thread / warp / block. See _tier_kernel.cuh for the pattern —
+// every cooperative loop is `for (i = rank; i < n; i += size)`, which collapses to the
+// original sequential code at Tier::Thread.
+//
+// Unlike ls_ik, this kernel's line search EARLY-EXITS on sufficient descent, so the
+// tiers genuinely differ there rather than sharing one loop; see the line-search
+// comment below.
+template <pyroffi::Tier TIER, uint32_t N>
 __global__
 void hjcd_ik_lm_kernel(
     const float* __restrict__ seeds,
@@ -394,11 +411,23 @@ void hjcd_ik_lm_kernel(
         s_ancestor_masks[i] = ancestor_masks[i];
     __syncthreads();
 
-    const int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= n_seeds) return;
+    PYROFFI_TIER_GROUP_VARS(TIER);
+    const int s = PYROFFI_TIER_SEED_INDEX(TIER);
+    if (s >= n_seeds) return;   // group-uniform: whole thread/warp/block retires
     const int gs = p * n_seeds + s;
 
-    // Thread-private state.
+    // Per-seed normal equations. Thread tier: thread-local so nvcc can promote it.
+    // Warp/block: shared, since every cooperating lane reads it.
+    constexpr int SLOTS  = PYROFFI_TIER_SLOTS(TIER, N);
+    constexpr int SMEM_N = PYROFFI_TIER_SMEM_N(TIER, N);
+    __shared__ double sh_A   [SLOTS][SMEM_N * SMEM_N];
+    __shared__ double sh_rhs [SLOTS][SMEM_N];
+    __shared__ int    sh_fail[SLOTS];
+    __shared__ float  sh_ls  [SLOTS][N_HJCD_ALPHAS];
+    const int slot = PYROFFI_TIER_SLOT(TIER);
+
+    // Per-lane state. At the warp/block tiers every lane of the group runs the same
+    // FK/Jacobian on the same seed, so these stay identical across the group.
     float cfg[MAX_ACT], best_cfg[MAX_ACT];
     float T_world[MAX_JOINTS * 7];
     float r[6 * MAX_EE];
@@ -556,44 +585,63 @@ void hjcd_ik_lm_kernel(
                 J[k * n_act + a] /= col_scale[a];
 
         // ── Normal equations (float64 for numerical stability) ───────────
-        double A_s[MAX_ACT * MAX_ACT];
-        double rhs_s[MAX_ACT];
+        // Assembled at stride N (the compile-time bucket), not n_act, so the GLASS
+        // solve reads the buffer directly with no serial repack.
+        double  A_local[(TIER == pyroffi::Tier::Thread) ? N * N : 1];
+        double  rhs_local[(TIER == pyroffi::Tier::Thread) ? N : 1];
+        double* A_s   = (TIER == pyroffi::Tier::Thread) ? A_local   : sh_A[slot];
+        double* rhs_s = (TIER == pyroffi::Tier::Thread) ? rhs_local : sh_rhs[slot];
 
-        for (int i = 0; i < n_act; i++) {
-            for (int j = 0; j < n_act; j++) {
-                double acc = 0.0;
-                for (int k = 0; k < 6 * n_ee; k++)
-                    acc += (double)J[k*n_act+i] * (double)J[k*n_act+j];
-                A_s[i*n_act + j] = acc;
-            }
+        // Every lane of the group holds an identical J, so the (i,j) entries of
+        // A = J^T J distribute with no communication. This is the O(n_act^2 * 6*n_ee)
+        // inner product — the heaviest step after the FKs.
+        for (int idx = rank; idx < n_act * n_act; idx += size) {
+            const int i = idx / n_act, j = idx % n_act;
+            double acc = 0.0;
+            for (int k = 0; k < 6 * n_ee; k++)
+                acc += (double)J[k*n_act+i] * (double)J[k*n_act+j];
+            A_s[i*(int)N + j] = acc;
+        }
+        for (int i = rank; i < n_act; i += size) {
             double rb = 0.0;
             for (int k = 0; k < 6 * n_ee; k++)
                 rb += (double)J[k*n_act+i] * (double)fw[k];
             rhs_s[i] = rb;
         }
+        group_sync();
 
-        // Add joint-limit prior and LM damping (in scaled space).
-        for (int a = 0; a < n_act; a++) {
+        // Joint-limit prior + LM damping (in scaled space). Diagonal-only, so each
+        // lane owns its own `a` with no overlap.
+        for (int a = rank; a < n_act; a += size) {
             const double D_prior_raw  = (double)limit_prior_weight /
                                         ((double)half_range[a] * (double)half_range[a]);
             const double cs2          = (double)col_scale[a] * (double)col_scale[a];
             const double D_prior_s    = D_prior_raw / cs2;
             const double g_prior_s    = D_prior_raw * (double)(cfg[a] - mid[a])
                                         / (double)col_scale[a];
-            A_s[a*n_act + a] += (double)lam + D_prior_s;
-            rhs_s[a]          = -(rhs_s[a] + g_prior_s);
+            A_s[a*(int)N + a] += (double)lam + D_prior_s;
+            rhs_s[a]           = -(rhs_s[a] + g_prior_s);
         }
+        group_sync();
 
-        // Mask fixed joints: zero row and col, set diagonal to 1, rhs to 0.
-        for (int a = 0; a < n_act; a++) {
+        // Mask fixed joints. Lane `a` owns row a and column a; two masked lanes
+        // a != a' overlap only at A[a][a'] and A[a'][a], where both write 0 — same
+        // value, benign. No lane but `a` writes the diagonal A[a][a].
+        for (int a = rank; a < n_act; a += size) {
             if (!s_fixed_mask[a]) continue;
-            for (int j = 0; j < n_act; j++) A_s[a*n_act+j] = A_s[j*n_act+a] = 0.0;
-            A_s[a*n_act+a] = 1.0;
+            for (int j = 0; j < n_act; j++)
+                A_s[a*(int)N + j] = A_s[j*(int)N + a] = 0.0;
+            A_s[a*(int)N + a] = 1.0;
             rhs_s[a] = 0.0;
         }
+        // Identity-pad [n_act, N) — disjoint from the masking above (top-left block
+        // vs the tail), so no barrier is needed between them.
+        pyroffi::pad_tail_identity<double, N>(rank, size, n_act, A_s, rhs_s);
+        group_sync();
 
         // Solve (overwrites A_s and rhs_s; solution in rhs_s).
-        chol_solve(A_s, rhs_s, n_act);
+        pyroffi::tier_posv<TIER, double, N>(A_s, rhs_s, &sh_fail[slot]);
+        group_sync();
 
         // Unscale: delta_a = p_s[a] / col_scale[a].
         float delta[MAX_ACT];
@@ -621,14 +669,28 @@ void hjcd_ik_lm_kernel(
             }
         }
 
-        // ── Line search: 5 candidates with unweighted error ───────────────
-        const float alphas[5] = { 1.0f, 0.5f, 0.25f, 0.1f, 0.025f };
+        // ── Line search: candidates with unweighted error ─────────────────
+        // This search EARLY-EXITS: it scans alphas in order, tracks the running best,
+        // and stops at the first new best that also achieves sufficient descent. The
+        // common case therefore costs ONE FK, not five — so the tiers must differ:
+        //
+        //   Thread: keep the sequential scan. The early exit saves real work here and
+        //           there are no idle lanes to spend on speculation.
+        //   Warp/Block: evaluate every alpha in parallel (one per lane, on lanes that
+        //           would otherwise idle), then REPLAY the identical scan over the
+        //           precomputed errors. Each trial's error is independent of the scan,
+        //           so the replay reproduces the early exit's choice EXACTLY, including
+        //           which alpha wins a tie. Speculation costs nothing: those lanes have
+        //           no other work, and the wall time is one FK either way.
+        const float alphas[N_HJCD_ALPHAS] = { 1.0f, 0.5f, 0.25f, 0.1f, 0.025f };
+        const float suff_thresh = curr_err * (1.0f - 1e-4f);
         float best_alpha_err  = 1e30f;
         int   best_alpha_idx  = 0;
-        float r_trial[6 * MAX_EE];
 
-        for (int ai = 0; ai < 5; ai++) {
+        // One trial evaluation, shared by both paths so they cannot drift apart.
+        auto eval_alpha = [&](int ai) -> float {
             float cfg_trial[MAX_ACT];
+            float r_trial[6 * MAX_EE];
             for (int a = 0; a < n_act; a++)
                 cfg_trial[a] = clampf(cfg[a] + alphas[ai] * delta[a],
                                       s_lower[a], s_upper[a]);
@@ -637,13 +699,33 @@ void hjcd_ik_lm_kernel(
                 s_twists, s_parent_tf, s_parent_idx, s_act_idx,
                 s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
                 s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r_trial);
-            float err_trial = 0.0f;
-            for (int k = 0; k < 6 * n_ee; k++) err_trial += r_trial[k] * r_trial[k];
-            err_trial += collision_penalty(cfg_trial, T_world);
-            if (err_trial < best_alpha_err) {
-                best_alpha_err = err_trial;
-                best_alpha_idx = ai;
-                if (err_trial < curr_err * (1.0f - 1e-4f)) break;
+            float e = 0.0f;
+            for (int k = 0; k < 6 * n_ee; k++) e += r_trial[k] * r_trial[k];
+            return e + collision_penalty(cfg_trial, T_world);
+        };
+
+        if constexpr (TIER == pyroffi::Tier::Thread) {
+            for (int ai = 0; ai < N_HJCD_ALPHAS; ai++) {
+                const float e = eval_alpha(ai);
+                if (e < best_alpha_err) {
+                    best_alpha_err = e;
+                    best_alpha_idx = ai;
+                    if (e < suff_thresh) break;
+                }
+            }
+        } else {
+            for (int ai = rank; ai < N_HJCD_ALPHAS; ai += size)
+                sh_ls[slot][ai] = eval_alpha(ai);
+            group_sync();
+            // Identical scan over the precomputed errors: same winner, same tie-break,
+            // and every lane reaches the same answer, so no broadcast is needed.
+            for (int ai = 0; ai < N_HJCD_ALPHAS; ai++) {
+                const float e = sh_ls[slot][ai];
+                if (e < best_alpha_err) {
+                    best_alpha_err = e;
+                    best_alpha_idx = ai;
+                    if (e < suff_thresh) break;
+                }
             }
         }
 
@@ -683,8 +765,13 @@ void hjcd_ik_lm_kernel(
     }
 
     // Write best-seen config and error.
-    for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
-    out_err[gs] = best_err;
+    // At the warp/block tiers every lane of the group ran the same FK on the same seed
+    // and read the same solved rhs_s, so all lanes hold bit-identical state here. The
+    // leader guard avoids a redundant same-value write race, not a disagreement.
+    if (leader) {
+        for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
+        out_err[gs] = best_err;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -823,49 +910,43 @@ static ffi::Error HjcdIkLmCudaImpl(
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
 
-    constexpr int THREADS_MAX = 32;
-    const int threads  = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
-    const int blocks_x = (n_seeds + threads - 1) / threads;
+    // N: the compile-time bucket holding n_act (identity-padded). 0 => past MAX_ACT's
+    // ceiling, which _build_params.py should already have refused.
+    const int bucket = pyroffi::solve_bucket(n_act);
+    if (bucket == 0)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "hjcd_ik_cuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ").");
+    const pyroffi::Tier tier = pyroffi_tier_from_env();
 
     // Zero per-problem stop flags before kernel launch.
     cudaMemsetAsync(stop_flag->typed_data(), 0, n_problems * sizeof(int), stream);
 
-    hjcd_ik_lm_kernel<<<dim3(blocks_x, n_problems), threads, 0, stream>>>(
-        seeds.typed_data(),
-        noise.typed_data(),
-        twists.typed_data(),
-        parent_tf.typed_data(),
-        parent_idx.typed_data(),
-        act_idx.typed_data(),
-        mimic_mul.typed_data(),
-        mimic_off.typed_data(),
-        mimic_act_idx.typed_data(),
-        topo_inv.typed_data(),
-        target_jnts.typed_data(),
-        ancestor_masks.typed_data(),
-        target_Ts.typed_data(),
-        robot_spheres_local.typed_data(),
-        robot_sphere_joint_idx.typed_data(),
-        world_spheres.typed_data(),
-        world_capsules.typed_data(),
-        world_boxes.typed_data(),
-        world_halfspaces.typed_data(),
-        lower.typed_data(),
-        upper.typed_data(),
-        fixed_mask.typed_data(),
-        out->typed_data(),
-        out_err->typed_data(),
-        stop_flag->typed_data(),
-        n_problems, n_seeds, n_joints, n_act, n_ee,
-        static_cast<int>(max_iter),
-        n_robot_spheres, n_world_spheres, n_world_capsules,
-        n_world_boxes, n_world_halfspaces,
-        lambda_init, limit_prior_weight, kick_scale,
-        eps_pos, eps_ori,
-        static_cast<int>(stall_patience),
-        static_cast<int>(enable_collision),
-        collision_weight,
-        collision_margin);
+#define PYROFFI_HJCD_ARGS                                                      \
+        seeds.typed_data(), noise.typed_data(), twists.typed_data(),           \
+        parent_tf.typed_data(), parent_idx.typed_data(), act_idx.typed_data(), \
+        mimic_mul.typed_data(), mimic_off.typed_data(),                        \
+        mimic_act_idx.typed_data(), topo_inv.typed_data(),                     \
+        target_jnts.typed_data(), ancestor_masks.typed_data(),                 \
+        target_Ts.typed_data(), robot_spheres_local.typed_data(),              \
+        robot_sphere_joint_idx.typed_data(), world_spheres.typed_data(),       \
+        world_capsules.typed_data(), world_boxes.typed_data(),                 \
+        world_halfspaces.typed_data(), lower.typed_data(), upper.typed_data(), \
+        fixed_mask.typed_data(), out->typed_data(), out_err->typed_data(),     \
+        stop_flag->typed_data(),                                               \
+        n_problems, n_seeds, n_joints, n_act, n_ee,                            \
+        static_cast<int>(max_iter),                                            \
+        n_robot_spheres, n_world_spheres, n_world_capsules,                    \
+        n_world_boxes, n_world_halfspaces,                                     \
+        lambda_init, limit_prior_weight, kick_scale,                           \
+        eps_pos, eps_ori,                                                      \
+        static_cast<int>(stall_patience),                                      \
+        static_cast<int>(enable_collision),                                    \
+        collision_weight, collision_margin
+
+    PYROFFI_TIER_DISPATCH(hjcd_ik_lm_kernel, bucket, tier, n_problems, n_seeds,
+                          PYROFFI_HJCD_THREAD_TPB, PYROFFI_HJCD_BLOCK_TPB, stream,
+                          PYROFFI_HJCD_ARGS);
+#undef PYROFFI_HJCD_ARGS
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)

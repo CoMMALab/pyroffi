@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ctypes
 from functools import lru_cache
+from .._build_params import check_capacity
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
@@ -194,6 +195,12 @@ def sco_trajopt_cuda(
         )
 
     _load_and_register()
+    # Refuse robots larger than this .so was compiled to hold. The kernels do
+    # no bounds checking, so exceeding MAX_ACT/MAX_JOINTS silently corrupts
+    # per-thread state rather than crashing. Shapes are static under jit, so
+    # this costs nothing at runtime and fails at trace time.
+    check_capacity(__file__, _LIB_NAME, n_joints=twists.shape[0],
+                   n_act=init_trajs.shape[-1], kernel="sco_trajopt_cuda")
 
     B, T, n_act = init_trajs.shape
     n_joints = robot.joints.num_joints

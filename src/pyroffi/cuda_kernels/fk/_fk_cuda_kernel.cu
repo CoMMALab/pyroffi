@@ -29,9 +29,25 @@ namespace ffi = xla::ffi;
 // graph on another (illegal access).
 static constexpr int PYROFFI_MAX_GPUS = 16;
 
-// Maximum number of joints supported by the FK shared-memory cache.
-// Increase if your robot has more joints.
-#define FK_MAX_JOINTS 64
+// Maximum number of joints supported by the FK constant-memory model cache.
+//
+// Derived from the shared MAX_JOINTS build parameter (see _build_params.cuh) so
+// `build_fk_cuda.sh --max-joints N` actually takes effect. It previously read
+// `#define FK_MAX_JOINTS 64` with NO include guard, which silently REDEFINED the
+// `-DFK_MAX_JOINTS=N` the build script passed — so the flag compiled, printed
+// "Overriding FK_MAX_JOINTS=N", and changed nothing. Do not remove the #ifndef.
+#include "_build_params.cuh"
+#ifndef FK_MAX_JOINTS
+#define FK_MAX_JOINTS MAX_JOINTS
+#endif
+
+// FK caches the robot model in __constant__ memory (64KB/device budget). The
+// arrays below total FK_MAX_JOINTS * (6+7+1+1+1+1+1) words ≈ 18 words/joint,
+// so 64 joints ≈ 4.6KB and 256 joints ≈ 18KB — within budget, but assert it
+// rather than discover it as a cryptic nvcc "constant memory exceeded".
+static_assert(FK_MAX_JOINTS * 18 * 4 <= 60 * 1024,
+              "FK_MAX_JOINTS too large: the __constant__ robot model would exceed "
+              "the 64KB constant-memory budget. Lower --max-joints.");
 
 // Robot model constants cached in device constant memory for FK launches.
 __device__ __constant__ float c_twists[FK_MAX_JOINTS * 6];

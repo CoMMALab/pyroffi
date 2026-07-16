@@ -32,6 +32,8 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_glass_solve.cuh"
+#include "_tier_kernel.cuh"
 #include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
@@ -67,6 +69,19 @@ namespace ffi = xla::ffi;
  * @param eps_ori       scalar                         orientation convergence [rad]
  * @param max_iter      int                            outer SQP iteration budget
  */
+// Launch shape per tier (SQP is register/local-memory heavy; keep blocks modest).
+#define PYROFFI_SQP_THREAD_TPB 32
+#define PYROFFI_SQP_BLOCK_TPB  64
+
+// Tiered: one seed per thread / warp / block. See _tier_kernel.cuh — every cooperative
+// loop is `for (i = rank; i < n; i += size)`, which collapses to the original
+// sequential code at Tier::Thread.
+//
+// SCOPE NOTE: the ACTIVE-SET box-QP algorithm below is deliberately left as-is (it
+// outperforms glass::box_qp). Only the plain Cholesky solves inside it are routed
+// through GLASS; the projection, active-set selection, and refinement loop are
+// untouched.
+template <pyroffi::Tier TIER, uint32_t N>
 __global__
 void sqp_ik_kernel(
     const float* __restrict__ seeds,
@@ -141,9 +156,24 @@ void sqp_ik_kernel(
         s_ancestor_masks[i] = ancestor_masks[i];
     __syncthreads();
 
-    const int s  = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= n_seeds) return;
+    PYROFFI_TIER_GROUP_VARS(TIER);
+    const int s  = PYROFFI_TIER_SEED_INDEX(TIER);
+    if (s >= n_seeds) return;   // group-uniform: whole thread/warp/block retires
     const int gs = p * n_seeds + s;
+
+    // One shared solve slot per resident seed, REUSED for the initial Newton solve and
+    // for every active-set refinement solve (they are strictly sequential, so they
+    // cannot alias). Thread tier: local, so nvcc can promote it.
+    constexpr int SLOTS  = PYROFFI_TIER_SLOTS(TIER, N);
+    constexpr int SMEM_N = PYROFFI_TIER_SMEM_N(TIER, N);
+    __shared__ double sh_A   [SLOTS][SMEM_N * SMEM_N];
+    __shared__ double sh_rhs [SLOTS][SMEM_N];
+    __shared__ int    sh_fail[SLOTS];
+    const int slot = PYROFFI_TIER_SLOT(TIER);
+    double  A_local[(TIER == pyroffi::Tier::Thread) ? N * N : 1];
+    double  rhs_local[(TIER == pyroffi::Tier::Thread) ? N : 1];
+    double* A_g   = (TIER == pyroffi::Tier::Thread) ? A_local   : sh_A[slot];
+    double* rhs_g = (TIER == pyroffi::Tier::Thread) ? rhs_local : sh_rhs[slot];
 
     // ── Thread-private weight vector ─────────────────────────────────────
     float W[6];
@@ -288,6 +318,13 @@ void sqp_ik_kernel(
         double H_s[MAX_ACT * MAX_ACT];
         double g_s[MAX_ACT];
 
+        // NOT group-parallel, deliberately. H_s/g_s are THREAD-LOCAL buffers that must
+        // survive the destructive solves and be re-read by every active-set refinement
+        // step, so each lane needs its OWN complete copy. Distributing the (i,j) entries
+        // across lanes would leave 31/32 of each lane's H_s uninitialized (caught in
+        // testing: thread tier correct, warp/block off by ~1000x). Every lane therefore
+        // rebuilds all of H_s, the same redundancy the FK/Jacobian above already has.
+        // Only the SOLVE is group-parallel here; its buffer is packed at stride N below.
         for (int i = 0; i < n_act; i++) {
             for (int j = 0; j < n_act; j++) {
                 double acc = 0.0;
@@ -313,22 +350,37 @@ void sqp_ik_kernel(
         // ── Step 1: unconstrained Newton step via Cholesky (same as LM) ─
         // chol_solve modifies A/b in-place; preserve H_s and g_s for the
         // active-set refinement steps that follow.
-        double A_init[MAX_ACT * MAX_ACT];
-        double rhs_init[MAX_ACT];
-        for (int i = 0; i < n_act * n_act; i++) A_init[i] = H_s[i];
-        for (int a = 0; a < n_act; a++) rhs_init[a] = -g_s[a];
-
-        // Handle fixed joints: unit row/col, zero rhs.
-        for (int a = 0; a < n_act; a++) {
-            if (!s_fixed_mask[a]) continue;
-            for (int j = 0; j < n_act; j++) A_init[a*n_act+j] = A_init[j*n_act+a] = 0.0;
-            A_init[a*n_act+a] = 1.0;
-            rhs_init[a] = 0.0;
+        // Copy H_s -> the group's solve buffer, repacking stride n_act -> N. The solve
+        // is destructive (A is overwritten with its factor) and the active-set steps
+        // below re-read H_s, hence the copy.
+        for (int idx = rank; idx < n_act * n_act; idx += size) {
+            const int i = idx / n_act, j = idx % n_act;
+            A_g[i*(int)N + j] = H_s[i*n_act + j];
         }
-        chol_solve(A_init, rhs_init, n_act);
+        for (int a = rank; a < n_act; a += size) rhs_g[a] = -g_s[a];
+        group_sync();
+
+        // Handle fixed joints: unit row/col, zero rhs. Lane `a` owns row a and col a;
+        // two masked lanes overlap only where both write 0 — benign.
+        for (int a = rank; a < n_act; a += size) {
+            if (!s_fixed_mask[a]) continue;
+            for (int j = 0; j < n_act; j++)
+                A_g[a*(int)N + j] = A_g[j*(int)N + a] = 0.0;
+            A_g[a*(int)N + a] = 1.0;
+            rhs_g[a] = 0.0;
+        }
+        pyroffi::pad_tail_identity<double, N>(rank, size, n_act, A_g, rhs_g);
+        group_sync();
+
+        pyroffi::tier_posv<TIER, double, N>(A_g, rhs_g, &sh_fail[slot]);
+        group_sync();
 
         float p_s[MAX_ACT];
-        for (int a = 0; a < n_act; a++) p_s[a] = (float)rhs_init[a];
+        for (int a = 0; a < n_act; a++) p_s[a] = (float)rhs_g[a];
+        // Every lane must finish reading the solution out of the shared rhs_g before
+        // the active-set loop below rebuilds it in place. Without this, a fast lane
+        // clobbers rhs_g while a slow lane is still copying it into p_s.
+        group_sync();
 
         // ── Step 2: project to joint-limit box ──────────────────────────
         for (int a = 0; a < n_act; a++)
@@ -345,28 +397,34 @@ void sqp_ik_kernel(
                 p_bounded[a] = clampf(p_s[a], lb_s[a], ub_s[a]) * active[a];
             }
 
-            // g_adj = g_s + H_s @ p_bounded; masked system for free joints.
-            double A_ref[MAX_ACT * MAX_ACT];
-            double rhs_ref[MAX_ACT];
-            for (int a = 0; a < n_act; a++) {
+            // g_adj = g_s + H_s @ p_bounded; masked system for free joints. Rebuilt
+            // into the same group buffer each step (the previous solve destroyed it).
+            // `active` is identical on every lane of the group, so the mask each lane
+            // applies agrees. Assembled at stride N for GLASS.
+            for (int a = rank; a < n_act; a += size) {
                 double adj = 0.0;
                 for (int b = 0; b < n_act; b++)
                     adj += H_s[a*n_act+b] * (double)p_bounded[b];
-                rhs_ref[a] = -(g_s[a] + adj) * (double)(1.0f - active[a]);
+                rhs_g[a] = -(g_s[a] + adj) * (double)(1.0f - active[a]);
 
                 for (int b = 0; b < n_act; b++) {
-                    A_ref[a*n_act+b] = (active[a] > 0.5f || active[b] > 0.5f)
-                                       ? 0.0 : H_s[a*n_act+b];
+                    A_g[a*(int)N + b] = (active[a] > 0.5f || active[b] > 0.5f)
+                                        ? 0.0 : H_s[a*n_act+b];
                 }
-                if (active[a] > 0.5f) A_ref[a*n_act+a] = 1.0;
+                if (active[a] > 0.5f) A_g[a*(int)N + a] = 1.0;
             }
-            chol_solve(A_ref, rhs_ref, n_act);
+            pyroffi::pad_tail_identity<double, N>(rank, size, n_act, A_g, rhs_g);
+            group_sync();
+
+            pyroffi::tier_posv<TIER, double, N>(A_g, rhs_g, &sh_fail[slot]);
+            group_sync();
 
             for (int a = 0; a < n_act; a++) {
                 p_s[a] = (active[a] > 0.5f)
                          ? p_bounded[a]
-                         : clampf((float)rhs_ref[a], lb_s[a], ub_s[a]);
+                         : clampf((float)rhs_g[a], lb_s[a], ub_s[a]);
             }
+            group_sync();   // p_s consumed before the next step rebuilds A_g
         }
 
         // ── Unscale to original joint space ─────────────────────────────
@@ -450,8 +508,12 @@ void sqp_ik_kernel(
     }
 
     // Write output.
-    for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
-    out_err[gs] = best_err;
+    // Every lane of the group holds bit-identical state (same seed, same FK, same
+    // solved step), so the leader guard avoids a redundant same-value write race.
+    if (leader) {
+        for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
+        out_err[gs] = best_err;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -505,45 +567,37 @@ static ffi::Error SqpIkCudaImpl(
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
 
-    // SQP is more register-heavy than LS due to the inner H_s/g_s buffers.
-    constexpr int THREADS_MAX = 32;
-    const int threads  = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
-    const int blocks_x = (n_seeds + threads - 1) / threads;
+    // N: the compile-time bucket holding n_act (identity-padded). 0 => past MAX_ACT's
+    // ceiling, which _build_params.py should already have refused.
+    const int bucket = pyroffi::solve_bucket(n_act);
+    if (bucket == 0)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "sqp_ik_cuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ").");
+    const pyroffi::Tier tier = pyroffi_tier_from_env();
 
-    sqp_ik_kernel<<<dim3(blocks_x, n_problems), threads, 0, stream>>>(
-        seeds.typed_data(),
-        twists.typed_data(),
-        parent_tf.typed_data(),
-        parent_idx.typed_data(),
-        act_idx.typed_data(),
-        mimic_mul.typed_data(),
-        mimic_off.typed_data(),
-        mimic_act_idx.typed_data(),
-        topo_inv.typed_data(),
-        target_jnts.typed_data(),
-        ancestor_masks.typed_data(),
-        target_Ts.typed_data(),
-        robot_spheres_local.typed_data(),
-        robot_sphere_joint_idx.typed_data(),
-        world_spheres.typed_data(),
-        world_capsules.typed_data(),
-        world_boxes.typed_data(),
-        world_halfspaces.typed_data(),
-        lower.typed_data(),
-        upper.typed_data(),
-        fixed_mask.typed_data(),
-        out->typed_data(),
-        out_err->typed_data(),
-        n_problems, n_seeds, n_joints, n_act, n_ee,
-        n_robot_spheres, n_world_spheres, n_world_capsules,
-        n_world_boxes, n_world_halfspaces,
-        static_cast<int>(max_iter),
-        static_cast<int>(n_inner_iters),
-        static_cast<int>(enable_collision),
-        collision_weight,
-        collision_margin,
-        pos_weight, ori_weight, lambda_init,
-        eps_pos, eps_ori);
+#define PYROFFI_SQP_ARGS                                                       \
+        seeds.typed_data(), twists.typed_data(), parent_tf.typed_data(),       \
+        parent_idx.typed_data(), act_idx.typed_data(), mimic_mul.typed_data(), \
+        mimic_off.typed_data(), mimic_act_idx.typed_data(),                    \
+        topo_inv.typed_data(), target_jnts.typed_data(),                       \
+        ancestor_masks.typed_data(), target_Ts.typed_data(),                   \
+        robot_spheres_local.typed_data(), robot_sphere_joint_idx.typed_data(), \
+        world_spheres.typed_data(), world_capsules.typed_data(),               \
+        world_boxes.typed_data(), world_halfspaces.typed_data(),               \
+        lower.typed_data(), upper.typed_data(), fixed_mask.typed_data(),       \
+        out->typed_data(), out_err->typed_data(),                              \
+        n_problems, n_seeds, n_joints, n_act, n_ee,                            \
+        n_robot_spheres, n_world_spheres, n_world_capsules,                    \
+        n_world_boxes, n_world_halfspaces,                                     \
+        static_cast<int>(max_iter), static_cast<int>(n_inner_iters),           \
+        static_cast<int>(enable_collision),                                    \
+        collision_weight, collision_margin,                                    \
+        pos_weight, ori_weight, lambda_init, eps_pos, eps_ori
+
+    PYROFFI_TIER_DISPATCH(sqp_ik_kernel, bucket, tier, n_problems, n_seeds,
+                          PYROFFI_SQP_THREAD_TPB, PYROFFI_SQP_BLOCK_TPB, stream,
+                          PYROFFI_SQP_ARGS);
+#undef PYROFFI_SQP_ARGS
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)

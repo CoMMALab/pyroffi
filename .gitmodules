@@ -4,3 +4,6 @@
 [submodule "external/QuIK"]
 	path = external/QuIK
 	url = https://github.com/steffanlloyd/quik.git
+[submodule "external/GLASS"]
+	path = external/GLASS
+	url = https://github.com/saiccoumar/GLASS.git

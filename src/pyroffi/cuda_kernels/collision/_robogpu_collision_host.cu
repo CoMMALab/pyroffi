@@ -144,8 +144,16 @@ struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitGroupRecord {
 // CUDA prepare kernel constants
 // ---------------------------------------------------------------------------
 
+// Guarded so build_robogpu_collision.sh's -DRGB_MAX_JOINTS/-DRGB_MAX_LINKS actually
+// take effect. These were previously unguarded #defines, which silently REDEFINED the
+// -D the build script passed — the flag compiled, printed "Custom bounds: ...", and
+// changed nothing (the same trap FK's FK_MAX_JOINTS had). Do not remove the #ifndef.
+#ifndef RGB_MAX_JOINTS
 #define RGB_MAX_JOINTS 64
+#endif
+#ifndef RGB_MAX_LINKS
 #define RGB_MAX_LINKS  64
+#endif
 #define RGB_THREADS    64
 
 // ---------------------------------------------------------------------------

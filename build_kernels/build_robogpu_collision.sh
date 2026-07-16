@@ -25,24 +25,12 @@
 
 set -euo pipefail
 
-DEBUG=0
-MAX_JOINTS_OVERRIDE=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --debug)
-      DEBUG=1; shift ;;
-    --max-joints)
-      [[ $# -lt 2 ]] && { echo "ERROR: --max-joints requires a value"; exit 1; }
-      MAX_JOINTS_OVERRIDE="$2"; shift 2 ;;
-    --max-joints=*)
-      MAX_JOINTS_OVERRIDE="${1#*=}"; shift ;;
-    *)
-      echo "ERROR: Unknown argument: $1"; exit 1 ;;
-  esac
-done
-
+# Build parameters (--max-joints / --max-act / --debug) + guardrails live in one
+# place so the kernel builds cannot drift apart. Defaults are applied there and
+# ALWAYS passed as -D, so a .so never depends on a header fallback for its capacity.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_build_params.sh"
+parse_build_params "$@"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
 
 DEVICE_SRC="${KERNELS_DIR}/collision/_robogpu_optix_programs.cu"
@@ -121,11 +109,11 @@ else
   PTX_OPT="-O3"
 fi
 
-EXTRA_DEFS=""
-if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
-  EXTRA_DEFS="-DRGB_MAX_JOINTS=${MAX_JOINTS_OVERRIDE} -DRGB_MAX_LINKS=${MAX_JOINTS_OVERRIDE}"
-  echo "Custom bounds: RGB_MAX_JOINTS/LINKS=${MAX_JOINTS_OVERRIDE}"
-fi
+# robogpu sizes its own RGB_MAX_JOINTS/RGB_MAX_LINKS from the shared --max-joints
+# limit. Always passed (the default 64 matches the kernel's own default, so this is
+# behaviour-preserving) rather than only-when-overridden, so the .so's bounds are
+# explicit in the command line instead of resolved by a header fallback.
+EXTRA_DEFS="-DRGB_MAX_JOINTS=${PYROFFI_MAX_JOINTS} -DRGB_MAX_LINKS=${PYROFFI_MAX_JOINTS}"
 
 # ── Step 1: Compile OptiX device programs to PTX ────────────────────────────
 # The PTX is loaded at runtime by the host library via optixModuleCreate.

@@ -24,6 +24,8 @@
 
 #include "_ik_cuda_helpers.cuh"
 #include "_collision_cuda_helpers.cuh"
+#include "_glass_solve.cuh"
+#include "_tier_kernel.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -37,13 +39,46 @@ namespace ffi = xla::ffi;
 // Defined in _ik_cuda_helpers.cuh (override by defining before include).
 
 // ---------------------------------------------------------------------------
-// LS-IK LM kernel — one thread per seed
+// LS-IK LM kernel — one seed per thread / warp / block (see pyroffi::Tier)
 // ---------------------------------------------------------------------------
+
+// Launch shape per tier. These must agree between the kernel's shared-memory
+// sizing and the host launch, so they live here rather than at either site.
+//
+// LM is register/local-memory heavy (T_world[MAX_JOINTS*7] + J + a double A), so
+// every tier keeps blocks modest.
+// The warp tier's warps-per-block is N-dependent (its shared A[N*N] per warp caps
+// it) — see pyroffi::warp_tier_warps_per_block, which host and device share.
+#define PYROFFI_LS_IK_THREAD_TPB 32   // thread tier: 32 seeds/block, 1 warp
+#define PYROFFI_LS_IK_BLOCK_TPB  64   // block tier: 1 seed/block, 64 lanes cooperate
+
+// Trial step sizes in the LM line search. The warp/block tiers spread these across
+// lanes, so the count also sizes their reduction buffer.
+#define N_LS_ALPHAS 5
 
 /**
  * Multi-seed Levenberg-Marquardt IK with multi-EE support.
  *
- * Each thread independently refines one seed for max_iter iterations.
+ * Templated on the PARALLELISM TIER that owns one seed, and on the compile-time
+ * normal-equation size `N` (the padded bucket for `n_act` — see _glass_solve.cuh):
+ *
+ *   Tier::Thread  1 seed per thread  — A_s thread-local; glass::thread::potrf
+ *   Tier::Warp    1 seed per warp    — A_s shared per warp; glass::warp::potrf
+ *   Tier::Block   1 seed per block   — A_s shared per block; glass::posv
+ *
+ * The LM algorithm is IDENTICAL across tiers; only (a) which group owns a seed,
+ * (b) where the normal equations live, and (c) which GLASS surface factors them
+ * differ. Everything outside the solve runs on the group's LEADER (lane 0 / thread
+ * 0); for Tier::Thread every thread is its own leader, so that path is exactly the
+ * original kernel. This means the warp/block tiers currently buy a parallel SOLVE
+ * against a serial FK/Jacobian — if the autotune shows either tier winning, the
+ * next step is to lane-parallelize the Jacobian build and the 5-way line search
+ * (both are embarrassingly parallel; the FK chain is not, being parent->child).
+ *
+ * Ragged-tail safety: the seed index is GROUP-uniform at every tier (warp tier
+ * derives it from the warp id, block tier from blockIdx.x), so the `>= n_seeds`
+ * early return retires a whole group at once and never leaves a barrier with
+ * divergent participation. Do not make the seed index depend on the lane.
  *
  * @param seeds        (n_problems, n_seeds, n_act)  initial configurations
  * @param target_jnts  (n_ee,)                       joint index per EE
@@ -61,6 +96,7 @@ namespace ffi = xla::ffi;
  * @param eps_ori      scalar                          orientation convergence threshold [rad]
  * @param max_iter     int                             LM iteration budget
  */
+template <pyroffi::Tier TIER, uint32_t N>
 __global__
 void ls_ik_lm_kernel(
     const float* __restrict__ seeds,
@@ -133,9 +169,29 @@ void ls_ik_lm_kernel(
         s_ancestor_masks[i] = ancestor_masks[i];
     __syncthreads();
 
-    const int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= n_seeds) return;
+    // ── Group -> seed mapping ────────────────────────────────────────────
+    // GROUP-uniform by construction (see the ragged-tail note in the docstring):
+    // the warp tier keys off the warp id and the block tier off blockIdx.x, so a
+    // group retires together and no barrier sees divergent participation.
+    PYROFFI_TIER_GROUP_VARS(TIER);
+    const int s = PYROFFI_TIER_SEED_INDEX(TIER);
+    if (s >= n_seeds) return;   // group-uniform: whole thread/warp/block retires
     const int gs = p * n_seeds + s;
+
+    // ── Per-seed normal equations ────────────────────────────────────────
+    // Residency is dictated by the tier and is NOT interchangeable: the thread
+    // tier keeps A in thread-local storage (the whole point — nvcc can promote a
+    // small N*N to registers), while the warp/block tiers must place it in SHARED
+    // so every cooperating lane sees the same buffer.
+    constexpr int SLOTS  = PYROFFI_TIER_SLOTS(TIER, N);
+    constexpr int SMEM_N = PYROFFI_TIER_SMEM_N(TIER, N);
+    __shared__ double sh_A   [SLOTS][SMEM_N * SMEM_N];
+    __shared__ double sh_rhs [SLOTS][SMEM_N];
+    __shared__ int    sh_fail[SLOTS];
+    // Line-search reduction: one error slot per trial step size. Tiny, and only the
+    // warp/block tiers read it (the thread tier reduces in registers).
+    __shared__ float  sh_ls  [SLOTS][N_LS_ALPHAS];
+    const int slot = PYROFFI_TIER_SLOT(TIER);
 
     // ── Thread-private weight vector ─────────────────────────────────────
     // W = [pos_weight x3, ori_weight x3] — applied per-EE row block
@@ -279,34 +335,56 @@ void ls_ik_lm_kernel(
                 J[k*n_act+a] /= col_scale[a];
 
         // ── Normal equations + LM damping (float64) ────────────────────
-        double A_s[MAX_ACT * MAX_ACT];
-        double rhs_s[MAX_ACT];
+        // Built at stride n_act (as before), then padded up to the compile-time
+        // bucket N by pad_identity before the GLASS solve. Thread tier: local, so
+        // nvcc can promote it. Warp/block: the group's shared slot.
+        double  A_local[(TIER == pyroffi::Tier::Thread) ? N * N : 1];
+        double  rhs_local[(TIER == pyroffi::Tier::Thread) ? N : 1];
+        double* A_s   = (TIER == pyroffi::Tier::Thread) ? A_local   : sh_A[slot];
+        double* rhs_s = (TIER == pyroffi::Tier::Thread) ? rhs_local : sh_rhs[slot];
 
-        for (int i = 0; i < n_act; i++) {
-            for (int j = 0; j < n_act; j++) {
-                double acc = 0.0;
-                for (int k = 0; k < 6 * n_ee; k++)
-                    acc += (double)J[k*n_act+i] * (double)J[k*n_act+j];
-                A_s[i*n_act + j] = acc;
-            }
+        // Assemble A = J^T J + lam*I. Every lane of the group holds an identical J
+        // (it ran the same FK/Jacobian on the same seed), so any lane can compute any
+        // entry — the (i,j) pairs distribute freely with no communication. This is
+        // the O(n_act^2 * 6*n_ee) inner product, the heaviest step after the FKs.
+        //
+        // Assembled at stride N (not n_act) so the GLASS solve reads it directly and
+        // no serial repack is needed.
+        for (int idx = rank; idx < n_act * n_act; idx += size) {
+            const int i = idx / n_act, j = idx % n_act;
+            double acc = 0.0;
+            for (int k = 0; k < 6 * n_ee; k++)
+                acc += (double)J[k*n_act+i] * (double)J[k*n_act+j];
+            A_s[i*(int)N + j] = acc + ((i == j) ? (double)lam : 0.0);
+        }
+        for (int i = rank; i < n_act; i += size) {
             double rb = 0.0;
             for (int k = 0; k < 6 * n_ee; k++)
                 rb += (double)J[k*n_act+i] * (double)fw[k];
             rhs_s[i] = -rb;
-            A_s[i*n_act + i] += (double)lam;
         }
+        group_sync();
 
-        // Mask fixed joints (zero row+col, unit diagonal, zero rhs).
-        for (int a = 0; a < n_act; a++) {
+        // Mask fixed joints (zero row+col, unit diagonal, zero rhs), one lane per
+        // masked index. Lane `a` owns row a and column a; two masked lanes a != a'
+        // overlap only at A[a][a'] and A[a'][a], where both write 0 — same value, so
+        // the race is benign. No lane but `a` ever writes the diagonal A[a][a].
+        for (int a = rank; a < n_act; a += size) {
             if (!s_fixed_mask[a]) continue;
-            for (int j = 0; j < n_act; j++) A_s[a*n_act+j] = A_s[j*n_act+a] = 0.0;
-            A_s[a*n_act+a] = 1.0;
+            for (int j = 0; j < n_act; j++)
+                A_s[a*(int)N + j] = A_s[j*(int)N + a] = 0.0;
+            A_s[a*(int)N + a] = 1.0;
             rhs_s[a] = 0.0;
         }
+        // Identity-pad [n_act, N). Same construction as the masking above, so
+        // delta[a] == 0 for every padded index and the real DOF are untouched.
+        pyroffi::pad_tail_identity<double, N>(rank, size, n_act, A_s, rhs_s);
+        group_sync();
 
-        chol_solve(A_s, rhs_s, n_act);
+        pyroffi::tier_posv<TIER, double, N>(A_s, rhs_s, &sh_fail[slot]);
+        group_sync();
 
-        // Unscale.
+        // Unscale. Only indices [0, n_act) are real; the padded tail solved to 0.
         float delta[MAX_ACT];
         for (int a = 0; a < n_act; a++)
             delta[a] = (float)rhs_s[a] / col_scale[a];
@@ -334,13 +412,22 @@ void ls_ik_lm_kernel(
             }
         }
 
-        // ── Line search over 5 step sizes ──────────────────────────────
-        const float alphas[5] = { 1.0f, 0.5f, 0.25f, 0.1f, 0.025f };
+        // ── Line search over the trial step sizes ──────────────────────
+        // Each alpha is an INDEPENDENT full FK + residual evaluation, and the FKs
+        // dominate an LM step (5 here vs 1 for the residual/Jacobian above). At the
+        // warp/block tiers the trials therefore go one-per-lane rather than all-five
+        // on every lane. Only N_LS_ALPHAS lanes have work — the algorithm offers no
+        // more independent trials than that, and the FK chain itself is parent->child
+        // and cannot be split further — but it removes the redundancy that made these
+        // tiers ~10x slower than thread.
+        //
+        // The thread tier (rank=0, size=1) walks all five in sequence, exactly as before.
+        const float alphas[N_LS_ALPHAS] = { 1.0f, 0.5f, 0.25f, 0.1f, 0.025f };
         float best_alpha_err = 1e30f;
         int   best_alpha_idx = 0;
         float r_trial[6 * MAX_EE];
 
-        for (int ai = 0; ai < 5; ai++) {
+        for (int ai = rank; ai < N_LS_ALPHAS; ai += size) {
             float cfg_trial[MAX_ACT];
             for (int a = 0; a < n_act; a++)
                 cfg_trial[a] = clampf(cfg[a] + alphas[ai] * delta[a],
@@ -360,9 +447,29 @@ void ls_ik_lm_kernel(
                 }
             err_trial += collision_penalty(cfg_trial, T_world);
 
-            if (err_trial < best_alpha_err) {
-                best_alpha_err = err_trial;
-                best_alpha_idx = ai;
+            if constexpr (TIER == pyroffi::Tier::Thread) {
+                // Sole owner of every trial — reduce in registers, as before.
+                if (err_trial < best_alpha_err) {
+                    best_alpha_err = err_trial;
+                    best_alpha_idx = ai;
+                }
+            } else {
+                sh_ls[slot][ai] = err_trial;
+            }
+        }
+
+        // Reduce the trials. Every lane rescans all N_LS_ALPHAS in index order with a
+        // strict `<`, which (a) reproduces the thread tier's tie-break exactly — the
+        // LOWEST index wins a tie — and (b) leaves every lane holding the same winner,
+        // so no broadcast is needed and the group stays in lockstep for the next
+        // iteration's FK. Rescanning 5 floats is cheaper than a shuffle reduction.
+        if constexpr (TIER != pyroffi::Tier::Thread) {
+            group_sync();
+            for (int ai = 0; ai < N_LS_ALPHAS; ai++) {
+                if (sh_ls[slot][ai] < best_alpha_err) {
+                    best_alpha_err = sh_ls[slot][ai];
+                    best_alpha_idx = ai;
+                }
             }
         }
 
@@ -388,9 +495,14 @@ void ls_ik_lm_kernel(
         }
     }
 
-    // Write output.
-    for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
-    out_err[gs] = best_err;
+    // Write output. At the warp/block tiers every lane of the group ran the same
+    // FK/Jacobian on the same seed and read the same solved rhs_s, so all lanes
+    // hold bit-identical state here — the leader guard is to avoid a redundant
+    // same-value write race, not to select a winner among differing lanes.
+    if (leader) {
+        for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
+        out_err[gs] = best_err;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,46 +555,42 @@ static ffi::Error LsIkCudaImpl(
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
 
-    // LM is register/local-memory heavy; keep block size modest.
-    constexpr int THREADS_MAX = 32;
-    const int threads  = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
-    const int blocks_x = (n_seeds + threads - 1) / threads;
+    // ── Tier x N dispatch ────────────────────────────────────────────────
+    // N: the compile-time bucket holding n_act (identity-padded). 0 => n_act is
+    // past MAX_ACT's ceiling, which _build_params.py should already have refused.
+    const int bucket = pyroffi::solve_bucket(n_act);
+    if (bucket == 0)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "ls_ik_cuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ").");
 
-    ls_ik_lm_kernel<<<dim3(blocks_x, n_problems), threads, 0, stream>>>(
-        seeds.typed_data(),
-        twists.typed_data(),
-        parent_tf.typed_data(),
-        parent_idx.typed_data(),
-        act_idx.typed_data(),
-        mimic_mul.typed_data(),
-        mimic_off.typed_data(),
-        mimic_act_idx.typed_data(),
-        topo_inv.typed_data(),
-        target_jnts.typed_data(),
-        ancestor_masks.typed_data(),
-        target_Ts.typed_data(),
-        robot_spheres_local.typed_data(),
-        robot_sphere_joint_idx.typed_data(),
-        world_spheres.typed_data(),
-        world_capsules.typed_data(),
-        world_boxes.typed_data(),
-        world_halfspaces.typed_data(),
-        lower.typed_data(),
-        upper.typed_data(),
-        fixed_mask.typed_data(),
-        out->typed_data(),
-        out_err->typed_data(),
-        n_problems, n_seeds, n_joints, n_act, n_ee,
-        static_cast<int>(max_iter),
-        n_robot_spheres,
-        n_world_spheres,
-        n_world_capsules,
-        n_world_boxes,
-        n_world_halfspaces,
-        static_cast<int>(enable_collision),
-        pos_weight, ori_weight, lambda_init,
-        eps_pos, eps_ori,
-        collision_weight, collision_margin);
+    // Tier is a launch-shape decision (grid/block differ per tier), so it cannot be
+    // chosen on device.
+    const pyroffi::Tier tier = pyroffi_tier_from_env();
+
+// The kernel's argument list, shared verbatim by all (tier, N) instantiations
+// below so they cannot drift apart.
+#define PYROFFI_LS_IK_ARGS                                                     \
+        seeds.typed_data(), twists.typed_data(), parent_tf.typed_data(),       \
+        parent_idx.typed_data(), act_idx.typed_data(), mimic_mul.typed_data(), \
+        mimic_off.typed_data(), mimic_act_idx.typed_data(),                    \
+        topo_inv.typed_data(), target_jnts.typed_data(),                       \
+        ancestor_masks.typed_data(), target_Ts.typed_data(),                   \
+        robot_spheres_local.typed_data(), robot_sphere_joint_idx.typed_data(), \
+        world_spheres.typed_data(), world_capsules.typed_data(),               \
+        world_boxes.typed_data(), world_halfspaces.typed_data(),               \
+        lower.typed_data(), upper.typed_data(), fixed_mask.typed_data(),       \
+        out->typed_data(), out_err->typed_data(),                              \
+        n_problems, n_seeds, n_joints, n_act, n_ee,                            \
+        static_cast<int>(max_iter),                                            \
+        n_robot_spheres, n_world_spheres, n_world_capsules, n_world_boxes,     \
+        n_world_halfspaces, static_cast<int>(enable_collision),                \
+        pos_weight, ori_weight, lambda_init, eps_pos, eps_ori,                 \
+        collision_weight, collision_margin
+
+    PYROFFI_TIER_DISPATCH(ls_ik_lm_kernel, bucket, tier, n_problems, n_seeds,
+                          PYROFFI_LS_IK_THREAD_TPB, PYROFFI_LS_IK_BLOCK_TPB, stream,
+                          PYROFFI_LS_IK_ARGS);
+#undef PYROFFI_LS_IK_ARGS
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
