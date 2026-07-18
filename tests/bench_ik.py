@@ -31,6 +31,12 @@ Learned-IK
 Usage:
     python tests/bench_ik.py
 
+    Every solver is benchmarked in its OWN subprocess (one per robot x solver), so
+    no solver's JAX preallocation, GLASS-tier cache, JIT/kernel compilation or
+    allocator state can perturb another's timings. The top-level process is a thin
+    dispatcher that never touches the GPU; the ``--robot``/``--solver`` flags mark
+    the isolated child invocations and are not meant to be passed by hand.
+
 Prerequisites:
     1. A CUDA-capable GPU.
     2. CUDA libraries compiled:
@@ -55,6 +61,7 @@ import functools
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import threading
 import time
@@ -70,6 +77,18 @@ if _CPU_ONLY:
 # PyRoKi) but keeps CUDA/FFI kernel solvers and GPU monitoring enabled, so the
 # FFI kernels can be benchmarked in isolation.  ``--cpu-only`` implies it.
 _NO_JAX = _CPU_ONLY or "--no-jax" in sys.argv[1:]
+
+# Isolation model (see main() / _run_solver_subprocess): each solver is
+# benchmarked in its OWN subprocess, invoked with ``--solver LABEL``. A process
+# WITHOUT ``--solver`` is the dispatcher: it only spawns per-solver children and
+# never runs a solver itself, so it must not preallocate JAX's default 75% VRAM
+# chunk — that chunk would then be unavailable to every child and is exactly the
+# parent/child double-allocation that used to OOM the CUDA kernels. Children run
+# one at a time and each get the full card with the default (preallocating)
+# allocator, so their timings are not perturbed by any co-resident solver.
+_IS_SOLVER_CHILD = "--solver" in sys.argv[1:]
+if not _CPU_ONLY and not _IS_SOLVER_CHILD:
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
 import jax.numpy as jnp
@@ -187,6 +206,44 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 ROBOT_NAMES = ("panda", "fetch", "baxter", "g1")
+
+# GLASS parallelism tier per robot, passed to the CUDA IK kernels via the
+# PYROFFI_IK_TIER env var (see src/pyroffi/cuda_kernels/_tier_kernel.cuh).
+# The tier is cached process-globally on first CUDA kernel launch; since every
+# solver already runs in its own subprocess (see main()), the tier for a robot's
+# CUDA-solver children is set from this table. g1 is omitted: at 43 DOF it
+# exceeds TIER_CHOICE_MAX_N (32) and PYROFFI_TIER_DISPATCH forces Tier::Block
+# regardless of this env var.
+ROBOT_TIER = {
+    "panda":  "thread",
+    "fetch":  "warp",
+    "baxter": "block",
+}
+
+# The four core IK methods, each with a JAX and a CUDA backend. Everything in the
+# benchmark keys off these base solver labels (see _candidate_solvers / --solver).
+_CORE_METHODS = ("HJCD", "LS", "SQP", "MPPI")
+
+
+def _candidate_solvers(cpu_only: bool, no_jax: bool) -> list[str]:
+    """Base solver labels to benchmark, one subprocess each (see main()).
+
+    This is the STATIC candidate set implied by the mode flags; the optional
+    solvers (Learned/PyRoKi/QuIK) may still be unavailable at runtime, in which
+    case that solver's child finds nothing to run and exits without writing rows.
+    """
+    labels: list[str] = []
+    for m in _CORE_METHODS:
+        if not no_jax:
+            labels.append(f"{m}-JAX")
+        if not cpu_only:
+            labels.append(f"{m}-CUDA")
+    if not no_jax:
+        labels += ["Learned-JAX", "PyRoKi"]
+    labels.append("QuIK-CPU")
+    return labels
+
+
 RESOURCE_ROOT = pathlib.Path(__file__).resolve().parent.parent / "resources"
 ROBOT_URDFS = {
     "panda": RESOURCE_ROOT / "panda" / "panda_spherized.urdf",
@@ -340,11 +397,6 @@ _COLL_EPS = 0.005
 
 # Penalty weight applied to the collision cost inside the IK objective.
 COLL_WEIGHT = 1e8
-
-# Batch-level agreement thresholds (JAX vs CUDA), applied to absolute
-# differences in per-target pose errors.
-AGREE_POS_THR_MM = 0.5
-AGREE_ROT_THR_RAD = 0.02
 
 # ---------------------------------------------------------------------------
 # Data containers
@@ -1248,32 +1300,6 @@ def _disabled_pairs_from_srdf(srdf_path: pathlib.Path | None) -> tuple[tuple[str
         return ()
 
 
-def _compare_jax_cuda_batch(
-    batch_results: dict[str, BatchResult],
-    pairs: list[tuple[str, str, str]],
-    *,
-    pos_thr_mm: float,
-    rot_thr_rad: float,
-) -> None:
-    """Print batch-level JAX-vs-CUDA agreement summary."""
-    cols = ["pos_max(mm)", "rot_max(rad)", "status"]
-    print(_table_header(cols))
-    print(_table_sep(len(cols)))
-
-    for label, jax_name, cuda_name in pairs:
-        j = batch_results.get(jax_name)
-        c = batch_results.get(cuda_name)
-        if j is None or c is None:
-            print(_table_row(label, ["n/a", "n/a", "missing"]))
-            continue
-
-        pos_diff_mm = np.max(np.abs(j.pos_errs - c.pos_errs)) * 1e3
-        rot_diff = np.max(np.abs(j.rot_errs - c.rot_errs))
-        ok = (pos_diff_mm <= pos_thr_mm) and (rot_diff <= rot_thr_rad)
-        status = "PASS" if ok else "FAIL"
-        print(_table_row(label, [f"{pos_diff_mm:.4f}", f"{rot_diff:.5f}", status]))
-
-
 # ---------------------------------------------------------------------------
 # CSV output
 # ---------------------------------------------------------------------------
@@ -1446,9 +1472,24 @@ def _resolve_target_link_name(robot_name: str, robot: pk.Robot) -> str:
     )
 
 
-def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None:  # noqa: C901
+def _run_robot_benchmark(
+    robot_name: str,
+    csv_file: pathlib.Path | None,
+    solver_filter: str | None = None,
+) -> None:  # noqa: C901
+    # When ``solver_filter`` is set (the per-solver subprocess path, see main()),
+    # only that one base solver is set up, warmed up, timed and written. ``_want``
+    # normalises the ``-COLL`` / ``-BATCH`` variant suffixes back to the base label
+    # so all four phases of the selected solver pass the filter and nothing else does.
+    def _want(name: str) -> bool:
+        if solver_filter is None:
+            return True
+        return name.replace("-COLL", "").replace("-BATCH", "") == solver_filter
+
     print("=" * 80)
-    print(f"IK benchmark: HJCD-IK, LS-IK, SQP-IK, and MPPI-IK  (robot={robot_name}, "
+    _title_solver = solver_filter if solver_filter is not None else \
+        "HJCD-IK, LS-IK, SQP-IK, and MPPI-IK"
+    print(f"IK benchmark: {_title_solver}  (robot={robot_name}, "
           f"n_targets={N_TARGETS}, n_timed={N_TIMED})")
     gpu_mon_status = (
         "disabled (--cpu-only)"
@@ -1505,7 +1546,9 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     _pyroki_coll_solve_fn = None
     _pyroki_coll_batch_fn = None
 
-    if _NO_JAX:
+    if not _want("PyRoKi"):
+        pass  # not the selected solver; skip PyRoKi setup entirely
+    elif _NO_JAX:
         print("\nPyRoKi disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
     elif _PYROKI_AVAILABLE:
         print("\nSetting up PyRoKi solver ...")
@@ -1534,7 +1577,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     # ------------------------------------------------------------------
     _quik_solver = None
     _quik_num_seeds = 32
-    if _QUIK_IMPORT_OK:
+    if _QUIK_IMPORT_OK and _want("QuIK-CPU"):
         print("\nSetting up QuIK CPU solver (POE->DH + cricket JIT) ...")
         try:
             _quik_solver = QuIKSolver(robot, target_link_name)
@@ -1552,7 +1595,7 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         except Exception as e:  # noqa: BLE001
             print(f"  QuIK unavailable for {robot_name}: {type(e).__name__}: {str(e)[:90]}")
             _quik_solver = None
-    else:
+    elif _want("QuIK-CPU"):
         print("\nQuIK unavailable (needs cricket JIT; build external/cricket).")
 
     # ------------------------------------------------------------------
@@ -1685,7 +1728,9 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     _learned_ik_available = False
     _learned_ik_fn        = None
     _learned_ik_fn_batch  = None
-    if _NO_JAX:
+    if not _want("Learned-JAX"):
+        pass  # not the selected solver; skip Learned-IK setup entirely
+    elif _NO_JAX:
         print("\nLearned-IK disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
     elif _LEARNED_IK_IMPORT_OK:
         _model_path = get_default_model_path(robot_name)
@@ -1901,6 +1946,12 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
                 ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
             ]
 
+    # Per-solver isolation: keep only the selected solver's warmups so that only
+    # its timers are built (and only its kernels are JIT/compiled in this process).
+    warmup_seq        = [e for e in warmup_seq        if _want(e[0])]
+    warmup_batch_jax  = [e for e in warmup_batch_jax  if _want(e[0])]
+    warmup_batch_cuda = [e for e in warmup_batch_cuda if _want(e[0])]
+
     tli = (target_link_index,)
 
     # Pre-built rng sequences used to warm up the scan timers below.
@@ -1972,21 +2023,22 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     print(f"{'─'*80}")
 
     seq_solvers = [] if _NO_JAX else [
-        ("HJCD-JAX",  jit_hjcd,          {},                seq_timers["HJCD-JAX"]),
-        ("LS-JAX",    jit_ls,            {},                seq_timers["LS-JAX"]),
-        ("SQP-JAX",   jit_sqp,          {},                seq_timers["SQP-JAX"]),
-        ("MPPI-JAX",  jit_mppi,         {},                seq_timers["MPPI-JAX"]),
+        ("HJCD-JAX",  jit_hjcd,          {},                seq_timers.get("HJCD-JAX")),
+        ("LS-JAX",    jit_ls,            {},                seq_timers.get("LS-JAX")),
+        ("SQP-JAX",   jit_sqp,          {},                seq_timers.get("SQP-JAX")),
+        ("MPPI-JAX",  jit_mppi,         {},                seq_timers.get("MPPI-JAX")),
     ]
     if not _CPU_ONLY:
         seq_solvers += [
-            ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers["HJCD-CUDA"]),
-            ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers["LS-CUDA"]),
-            ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers["SQP-CUDA"]),
-            ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers["MPPI-CUDA"]),
+            ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
+            ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
+            ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
+            ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
         ]
     if _learned_ik_available:
         seq_solvers.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX,
-                            seq_timers["Learned-JAX"]))
+                            seq_timers.get("Learned-JAX")))
+    seq_solvers = [s for s in seq_solvers if _want(s[0])]
 
     seq_results: dict[str, list[SolveResult]] = {}
 
@@ -2022,18 +2074,19 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print(f"{'─'*80}")
 
         seq_coll_solvers = [] if _NO_JAX else [
-            ("HJCD-JAX",  jit_hjcd_coll,     coll_kwargs_jax,                              seq_timers["HJCD-JAX-COLL"]),
-            ("LS-JAX",    jit_ls_coll,        coll_kwargs_jax,                              seq_timers["LS-JAX-COLL"]),
-            ("SQP-JAX",   jit_sqp_coll,       coll_kwargs_jax,                              seq_timers["SQP-JAX-COLL"]),
-            ("MPPI-JAX",  jit_mppi_coll,      coll_kwargs_jax,                              seq_timers["MPPI-JAX-COLL"]),
+            ("HJCD-JAX",  jit_hjcd_coll,     coll_kwargs_jax,                              seq_timers.get("HJCD-JAX-COLL")),
+            ("LS-JAX",    jit_ls_coll,        coll_kwargs_jax,                              seq_timers.get("LS-JAX-COLL")),
+            ("SQP-JAX",   jit_sqp_coll,       coll_kwargs_jax,                              seq_timers.get("SQP-JAX-COLL")),
+            ("MPPI-JAX",  jit_mppi_coll,      coll_kwargs_jax,                              seq_timers.get("MPPI-JAX-COLL")),
         ]
         if not _CPU_ONLY:
             seq_coll_solvers += [
-                ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers["HJCD-CUDA-COLL"]),
-                ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers["LS-CUDA-COLL"]),
-                ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers["SQP-CUDA-COLL"]),
-                ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers["MPPI-CUDA-COLL"]),
+                ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
+                ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
+                ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
+                ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
             ]
+        seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0])]
 
         for name, fn, kwargs, timer in seq_coll_solvers:
             print(f"  Running {name}-COLL ...")
@@ -2064,21 +2117,22 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     print(f"{'─'*80}")
 
     batch_solvers = [] if _NO_JAX else [
-        ("LS-JAX-BATCH",    jit_ls_batch,            {},                 rng_keys_batch, batch_timers["LS-JAX-BATCH"]),
-        ("HJCD-JAX-BATCH",  jit_hjcd_batch,           {},                 rng_keys_batch, batch_timers["HJCD-JAX-BATCH"]),
-        ("SQP-JAX-BATCH",   jit_sqp_batch,            {},                 rng_keys_batch, batch_timers["SQP-JAX-BATCH"]),
-        ("MPPI-JAX-BATCH",  jit_mppi_batch,           {},                 rng_keys_batch, batch_timers["MPPI-JAX-BATCH"]),
+        ("LS-JAX-BATCH",    jit_ls_batch,            {},                 rng_keys_batch, batch_timers.get("LS-JAX-BATCH")),
+        ("HJCD-JAX-BATCH",  jit_hjcd_batch,           {},                 rng_keys_batch, batch_timers.get("HJCD-JAX-BATCH")),
+        ("SQP-JAX-BATCH",   jit_sqp_batch,            {},                 rng_keys_batch, batch_timers.get("SQP-JAX-BATCH")),
+        ("MPPI-JAX-BATCH",  jit_mppi_batch,           {},                 rng_keys_batch, batch_timers.get("MPPI-JAX-BATCH")),
     ]
     if not _CPU_ONLY:
         batch_solvers += [
-            ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers["LS-CUDA-BATCH"]),
-            ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers["HJCD-CUDA-BATCH"]),
-            ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers["SQP-CUDA-BATCH"]),
-            ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers["MPPI-CUDA-BATCH"]),
+            ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
+            ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
+            ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
+            ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
         ]
     if _learned_ik_available:
         batch_solvers.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}, rng_keys_batch,
-                              batch_timers["Learned-JAX-BATCH"]))
+                              batch_timers.get("Learned-JAX-BATCH")))
+    batch_solvers = [s for s in batch_solvers if _want(s[0])]
 
     batch_results: dict[str, BatchResult] = {}
 
@@ -2115,18 +2169,19 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print(f"{'─'*80}")
 
         batch_coll_solvers = [] if _NO_JAX else [
-            ("LS-JAX",    jit_ls_coll_batch,      {},                                          rng_keys_batch, batch_timers["LS-JAX-COLL-BATCH"]),
-            ("HJCD-JAX",  jit_hjcd_coll_batch,    {},                                          rng_keys_batch, batch_timers["HJCD-JAX-COLL-BATCH"]),
-            ("SQP-JAX",   jit_sqp_coll_batch,     {},                                          rng_keys_batch, batch_timers["SQP-JAX-COLL-BATCH"]),
-            ("MPPI-JAX",  jit_mppi_coll_batch,    {},                                          rng_keys_batch, batch_timers["MPPI-JAX-COLL-BATCH"]),
+            ("LS-JAX",    jit_ls_coll_batch,      {},                                          rng_keys_batch, batch_timers.get("LS-JAX-COLL-BATCH")),
+            ("HJCD-JAX",  jit_hjcd_coll_batch,    {},                                          rng_keys_batch, batch_timers.get("HJCD-JAX-COLL-BATCH")),
+            ("SQP-JAX",   jit_sqp_coll_batch,     {},                                          rng_keys_batch, batch_timers.get("SQP-JAX-COLL-BATCH")),
+            ("MPPI-JAX",  jit_mppi_coll_batch,    {},                                          rng_keys_batch, batch_timers.get("MPPI-JAX-COLL-BATCH")),
         ]
         if not _CPU_ONLY:
             batch_coll_solvers += [
-                ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers["LS-CUDA-COLL-BATCH"]),
-                ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers["HJCD-CUDA-COLL-BATCH"]),
-                ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers["SQP-CUDA-COLL-BATCH"]),
-                ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers["MPPI-CUDA-COLL-BATCH"]),
+                ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
+                ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
+                ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
+                ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
             ]
+        batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0])]
 
         for name, fn, kwargs, rng, timer in batch_coll_solvers:
             print(f"  Running {name}-COLL-BATCH ...")
@@ -2207,6 +2262,13 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
     if "QuIK-CPU" in batch_coll_results:
         coll_batch_order.append("QuIK-CPU")
 
+    # In the per-solver isolation path only one solver's results exist; keep the
+    # canonical ordering but drop labels this process did not run.
+    seq_order        = [l for l in seq_order        if l in seq_results]
+    batch_order      = [l for l in batch_order      if l in batch_results]
+    coll_seq_order   = [l for l in coll_seq_order   if l in seq_coll_results]
+    coll_batch_order = [l for l in coll_batch_order if l in batch_coll_results]
+
     print(f"\n{'='*80}")
     print(f"Sequential results — per-problem latency  (N={N_TARGETS}, timed={N_TIMED})")
     print(f"{'='*80}")
@@ -2225,22 +2287,9 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         row, _ = _batch_row(label, batch_results[label])
         print(row)
 
-    if not _NO_JAX:
-        print(f"\n{'='*80}")
-        print("Batch correctness — JAX vs CUDA agreement")
-        print(f"  thresholds: pos <= {AGREE_POS_THR_MM:.3f} mm, rot <= {AGREE_ROT_THR_RAD:.3f} rad")
-        print(f"{'='*80}")
-        _compare_jax_cuda_batch(
-            batch_results,
-            [
-                ("HJCD", "HJCD-JAX-BATCH", "HJCD-CUDA-BATCH"),
-                ("LS", "LS-JAX-BATCH", "LS-CUDA-BATCH"),
-                ("SQP", "SQP-JAX-BATCH", "SQP-CUDA-BATCH"),
-                ("MPPI", "MPPI-JAX-BATCH", "MPPI-CUDA-BATCH"),
-            ],
-            pos_thr_mm=AGREE_POS_THR_MM,
-            rot_thr_rad=AGREE_ROT_THR_RAD,
-        )
+    # NOTE: the JAX-vs-CUDA batch agreement check was removed with the switch to
+    # per-solver isolation — a solver's JAX and CUDA backends now run in separate
+    # processes, so no single process holds both error arrays to compare.
 
     if COLLISION_FREE:
         # Compute coll_free counts for sequential results.
@@ -2280,23 +2329,6 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
             row, _ = _batch_row_coll(label, batch_coll_results[label], batch_coll_free[label])
             print(row)
 
-        if not _NO_JAX:
-            print(f"\n{'='*80}")
-            print("Batch correctness (collision-free) — JAX vs CUDA agreement")
-            print(f"  thresholds: pos <= {AGREE_POS_THR_MM:.3f} mm, rot <= {AGREE_ROT_THR_RAD:.3f} rad")
-            print(f"{'='*80}")
-            _compare_jax_cuda_batch(
-                batch_coll_results,
-                [
-                    ("HJCD", "HJCD-JAX", "HJCD-CUDA"),
-                    ("LS", "LS-JAX", "LS-CUDA"),
-                    ("SQP", "SQP-JAX", "SQP-CUDA"),
-                    ("MPPI", "MPPI-JAX", "MPPI-CUDA"),
-                ],
-                pos_thr_mm=AGREE_POS_THR_MM,
-                rot_thr_rad=AGREE_ROT_THR_RAD,
-            )
-
     # ------------------------------------------------------------------
     # CSV output
     # ------------------------------------------------------------------
@@ -2312,6 +2344,39 @@ def _run_robot_benchmark(robot_name: str, csv_file: pathlib.Path | None) -> None
         print(f"\nResults appended to {csv_file}")
 
     print()
+
+
+def _run_solver_subprocess(
+    robot_name: str, solver: str, csv_file: pathlib.Path, args: argparse.Namespace,
+) -> None:
+    """Re-invoke this script to benchmark ONE solver on ONE robot, in isolation.
+
+    Each solver gets a fresh process so nothing it does — JAX preallocation, the
+    process-global GLASS tier cache, JIT/kernel compilation, allocator pool state —
+    can perturb another solver's timings. For CUDA solvers the robot's GLASS tier
+    (ROBOT_TIER) is pinned via PYROFFI_IK_TIER, which is read once on first kernel
+    launch; it is harmless (ignored) for JAX/CPU solvers.
+    """
+    tier = ROBOT_TIER.get(robot_name)
+    tier_note = f", PYROFFI_IK_TIER={tier}" if tier is not None else ""
+    print(f"\n=== Running {robot_name} / {solver} in subprocess{tier_note} ===")
+
+    cmd = [sys.executable, __file__, "--robot", robot_name, "--solver", solver]
+    if args.outdir is not None:
+        cmd += ["--outdir", str(args.outdir)]
+    if args.no_jax:
+        cmd += ["--no-jax"]
+    if args.cpu_only:
+        cmd += ["--cpu-only"]
+
+    env = os.environ.copy()
+    if tier is not None:
+        env["PYROFFI_IK_TIER"] = tier
+    # Children benchmark a real solver, so they use JAX's default (preallocating)
+    # allocator and get the whole card to themselves — clear the dispatcher's
+    # no-preallocate override that env.copy() would otherwise inherit.
+    env.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+    subprocess.run(cmd, env=env, check=True)
 
 
 def main() -> None:
@@ -2357,18 +2422,48 @@ def main() -> None:
             "parsed before jax is imported (see top of file)."
         ),
     )
+    # The next two flags mark a per-solver child process (see _run_solver_subprocess).
+    # A run WITHOUT --solver is the dispatcher: it spawns one child per (robot, solver).
+    parser.add_argument(
+        "--robot",
+        choices=ROBOT_NAMES,
+        default=None,
+        help="Benchmark exactly this one robot (per-solver child process; internal).",
+    )
+    parser.add_argument(
+        "--solver",
+        default=None,
+        metavar="LABEL",
+        help=(
+            "Benchmark exactly this one solver, e.g. HJCD-CUDA, LS-JAX, QuIK-CPU "
+            "(per-solver child process; internal). Runs it in isolation and appends "
+            "only its rows to the CSV."
+        ),
+    )
     args = parser.parse_args()
 
     csv_file = (args.outdir / CSV_FILE.name) if args.outdir is not None else CSV_FILE
 
+    # Child path: one solver, one robot, in this process (no further dispatch).
+    if args.solver is not None:
+        if args.robot is None:
+            raise SystemExit("--solver requires --robot (internal child invocation).")
+        _run_robot_benchmark(args.robot, csv_file, solver_filter=args.solver)
+        return
+
+    # Dispatcher path: fan out one isolated subprocess per (robot, solver).
     disabled = set(args.disable_robot)
     selected = [name for name in ROBOT_NAMES if name not in disabled]
     if not selected:
         raise SystemExit("No robots selected. Re-enable at least one robot.")
 
+    # --cpu-only implies --no-jax (mirrors _NO_JAX at the top of the file).
+    solvers = _candidate_solvers(args.cpu_only, args.no_jax or args.cpu_only)
     print("Selected robots:", ", ".join(selected))
+    print("Solvers (one isolated subprocess each):", ", ".join(solvers))
     for robot_name in selected:
-        _run_robot_benchmark(robot_name, csv_file)
+        for solver in solvers:
+            _run_solver_subprocess(robot_name, solver, csv_file, args)
 
 
 if __name__ == "__main__":

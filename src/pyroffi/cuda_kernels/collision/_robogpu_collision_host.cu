@@ -569,8 +569,56 @@ static bool refit_bvh(cudaStream_t stream, const float* d_pc, BVHEntry* e, int d
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Call-scoped device scratch, sourced from XLA's own allocator.
+//
+// The world-frame robot spheres [B*K, 4] and the transient OptiX BVH-build
+// buffers used to live on private `cudaMalloc`s (a persistent, monotonically
+// growing pool for the spheres; per-build temporaries for the BVH).  That put
+// them in a separate memory pool from JAX/XLA, so with XLA preallocating the
+// device up front the FFI mallocs competed for the sliver XLA left behind and
+// eventually OOM'd.  Instead we draw them from `ffi::ScratchAllocator`, which
+// allocates stream-ordered from XLA's device allocator and reclaims everything
+// when the handler returns — so all device memory lives in one BFC pool (the
+// same caller-owns-scratch contract GLASS uses for its cuBLASDx workspace).
+//
+// Only genuinely persistent structures that must outlive a single call (the
+// cached GAS, its env-sphere/AABB buffers, the SBT records, launch params, and
+// the updatable-GAS refit scratch) stay on explicit `cudaMalloc`; a call-scoped
+// allocator cannot own those.
+//
+// OptiX requires 128-byte alignment (OPTIX_ACCEL_BUFFER_BYTE_ALIGNMENT) for the
+// GAS temp/output buffers it writes.
+// ---------------------------------------------------------------------------
+
+// XLA's FFI device allocator validates the *requested* alignment against its
+// natural allocator alignment (64 B) and rejects anything larger — so asking for
+// OptiX's 128 B directly fails — but the memory it hands back is BFC-pool memory
+// aligned to >= 256 B.  We therefore request a small, always-accepted alignment
+// and round the returned pointer up to `align` ourselves (over-allocating by
+// `align - 1`), which is correct no matter what XLA actually delivers.
+static constexpr size_t RGB_SCRATCH_REQ_ALIGN = 16;  // proven-accepted by XLA
+
+// Allocate `bytes` of call-scoped scratch, aligned to `align`.  Mirrors
+// CUDA_CHECK_VOID: on failure it logs and yields nullptr rather than returning
+// early, for the void-returning build path.
+static void* scratch_alloc_void(ffi::ScratchAllocator& scratch, size_t bytes,
+                                size_t align, const char* what) {
+    const size_t pad = (align > RGB_SCRATCH_REQ_ALIGN) ? (align - 1) : 0;
+    auto p = scratch.Allocate(bytes + pad, RGB_SCRATCH_REQ_ALIGN);
+    if (!p.has_value()) {
+        fprintf(stderr, "RoboGPU scratch alloc failed: %s (%zu bytes)\n",
+                what, bytes);
+        return nullptr;
+    }
+    uintptr_t a = reinterpret_cast<uintptr_t>(*p);
+    a = (a + (align - 1)) & ~static_cast<uintptr_t>(align - 1);
+    return reinterpret_cast<void*>(a);
+}
+
 static BVHEntry* build_bvh(
     cudaStream_t stream,
+    ffi::ScratchAllocator& scratch,
     const float* d_pc,    // [Mp, 3] device pointer (from JAX buffer)
     int  Mp,
     float r_env,
@@ -614,13 +662,17 @@ static BVHEntry* build_bvh(
     OptixAccelBufferSizes bs = {};
     OPTIX_CHECK_VOID(optixAccelComputeMemoryUsage(gp.ctx, &abo, &bi, 1, &bs));
 
-    CUdeviceptr d_tmp = 0, d_out = 0;
-    CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_tmp), bs.tempSizeInBytes));
-    CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_out), bs.outputSizeInBytes));
+    // Build temp buffer is transient in both paths — draw it from call-scoped
+    // XLA scratch (auto-reclaimed at handler return, so no explicit free).
+    CUdeviceptr d_tmp = reinterpret_cast<CUdeviceptr>(scratch_alloc_void(
+        scratch, bs.tempSizeInBytes, OPTIX_ACCEL_BUFFER_BYTE_ALIGNMENT, "gas_tmp"));
 
     if (updatable) {
-        // No compaction: keep the build-output buffer as the live GAS and a
-        // persistent refit-scratch buffer for subsequent UPDATE operations.
+        // No compaction: the build output *is* the live GAS, so it must outlive
+        // this call and stays on an explicit cudaMalloc (freed by destroy_bvh).
+        // A persistent refit-scratch buffer serves subsequent UPDATE operations.
+        CUdeviceptr d_out = 0;
+        CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_out), bs.outputSizeInBytes));
         e->d_gas             = d_out;
         e->d_gas_size        = bs.outputSizeInBytes;
         e->d_update_tmp_size = bs.tempUpdateSizeInBytes;
@@ -632,10 +684,14 @@ static BVHEntry* build_bvh(
                                          d_out, bs.outputSizeInBytes,
                                          &e->handle, nullptr, 0));
         CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
-        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_tmp)));
     } else {
-        CUdeviceptr d_compact_sz = 0;
-        CUDA_CHECK_VOID(cudaMalloc(reinterpret_cast<void**>(&d_compact_sz), sizeof(size_t)));
+        // Compacted (static) path: the uncompacted output and the compacted-size
+        // readback are both transient — from scratch.  Only the final compacted
+        // GAS (e->d_gas) persists, so it keeps its cudaMalloc.
+        CUdeviceptr d_out = reinterpret_cast<CUdeviceptr>(scratch_alloc_void(
+            scratch, bs.outputSizeInBytes, OPTIX_ACCEL_BUFFER_BYTE_ALIGNMENT, "gas_out"));
+        CUdeviceptr d_compact_sz = reinterpret_cast<CUdeviceptr>(scratch_alloc_void(
+            scratch, sizeof(size_t), alignof(size_t), "gas_compact_sz"));
 
         OptixAccelEmitDesc emit = {};
         emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
@@ -658,10 +714,6 @@ static BVHEntry* build_bvh(
         OPTIX_CHECK_VOID(optixAccelCompact(gp.ctx, stream, raw_handle,
                                            e->d_gas, compact_sz, &e->handle));
         CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
-
-        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_tmp)));
-        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_out)));
-        CUDA_CHECK_VOID(cudaFree(reinterpret_cast<void*>(d_compact_sz)));
     }
 
     // Build SBT
@@ -695,6 +747,7 @@ static BVHEntry* build_bvh(
 
 static BVHEntry* get_or_build_bvh(
     cudaStream_t stream,
+    ffi::ScratchAllocator& scratch,
     const float* d_pc, int Mp,
     float r_env, float r_robot_max,
     const std::string& key,
@@ -705,7 +758,7 @@ static BVHEntry* get_or_build_bvh(
         auto it = g_bvh_cache[dev].find(key);
         if (it != g_bvh_cache[dev].end()) return it->second;
     }
-    BVHEntry* e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max, dev,
+    BVHEntry* e = build_bvh(stream, scratch, d_pc, Mp, r_env, r_robot_max, dev,
                             /*updatable=*/false);
     if (e) {
         std::lock_guard<std::mutex> lk(g_bvh_mtx[dev]);
@@ -733,6 +786,7 @@ static BVHEntry* g_dyn_bvh[PYROFFI_MAX_GPUS] = {};
 
 static BVHEntry* get_or_update_dynamic_bvh(
     cudaStream_t stream,
+    ffi::ScratchAllocator& scratch,
     const float* d_pc, int Mp,
     float r_env, float r_robot_max,
     int dev)
@@ -748,44 +802,9 @@ static BVHEntry* get_or_update_dynamic_bvh(
     }
 
     if (e) { destroy_bvh(e); g_dyn_bvh[dev] = nullptr; }
-    e = build_bvh(stream, d_pc, Mp, r_env, r_robot_max, dev, /*updatable=*/true);
+    e = build_bvh(stream, scratch, d_pc, Mp, r_env, r_robot_max, dev, /*updatable=*/true);
     g_dyn_bvh[dev] = e;
     return e;
-}
-
-// ---------------------------------------------------------------------------
-// Persistent scratch buffer for the world-frame robot spheres [B*K, 4].
-//
-// Allocating this per call with cudaMallocAsync forces synchronization against
-// JAX's own caching GPU allocator (they manage separate pools), adding a fixed
-// ~0.5 ms stall to every check.  Instead we keep one buffer that grows
-// monotonically and is reused across calls.  JAX serialises FFI calls on a
-// single stream, so sequential reuse is safe; the mutex guards the rare grow.
-// ---------------------------------------------------------------------------
-
-struct ScratchBuffer {
-    float4* ptr      = nullptr;
-    size_t  capacity = 0;   // in float4 elements
-};
-static ScratchBuffer g_scratch[PYROFFI_MAX_GPUS];
-static std::mutex    g_scratch_mtx[PYROFFI_MAX_GPUS];
-
-// Returns a device buffer of at least `n` float4 elements (nullptr on failure).
-static float4* get_scratch(size_t n, int dev) {
-    ScratchBuffer& sc = g_scratch[dev];
-    std::lock_guard<std::mutex> lk(g_scratch_mtx[dev]);
-    if (n <= sc.capacity) return sc.ptr;
-    if (sc.ptr) cudaFree(sc.ptr);
-    // Over-allocate (1.5x) to amortise growth across increasing batch sizes.
-    size_t want = n + n / 2;
-    if (cudaMalloc(reinterpret_cast<void**>(&sc.ptr),
-                   want * sizeof(float4)) != cudaSuccess) {
-        sc.ptr = nullptr;
-        sc.capacity = 0;
-        return nullptr;
-    }
-    sc.capacity = want;
-    return sc.ptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +813,7 @@ static float4* get_scratch(size_t n, int dev) {
 
 static ffi::Error RoboGPUCheckImpl(
     cudaStream_t                    stream,
+    ffi::ScratchAllocator           scratch,
     ffi::Buffer<ffi::DataType::F32> cfg,               // [B, n_act]
     ffi::Buffer<ffi::DataType::F32> twists,            // [J, 6]
     ffi::Buffer<ffi::DataType::F32> parent_tf,         // [J, 7]
@@ -847,10 +867,12 @@ static ffi::Error RoboGPUCheckImpl(
 
     // ── Stage 1: CUDA prepare (FK + world geom + self-collision) ─────────────
 
-    float4* d_spheres = get_scratch(static_cast<size_t>(B) * K, dev);
-    if (!d_spheres)
+    auto d_spheres_alloc =
+        scratch.Allocate(static_cast<size_t>(B) * K * sizeof(float4), alignof(float4));
+    if (!d_spheres_alloc.has_value())
         return ffi::Error(ffi::ErrorCode::kInternal,
                           "RoboGPU: scratch allocation failed");
+    float4* d_spheres = static_cast<float4*>(*d_spheres_alloc);
 
     robogpu_prepare_kernel<<<B, RGB_THREADS, 0, stream>>>(
         cfg.typed_data(), twists.typed_data(), parent_tf.typed_data(),
@@ -892,9 +914,9 @@ static ffi::Error RoboGPUCheckImpl(
         std::string key(keybuf);
 
         BVHEntry* bvh = dynamic
-            ? get_or_update_dynamic_bvh(stream, point_cloud.typed_data(), Mp,
+            ? get_or_update_dynamic_bvh(stream, scratch, point_cloud.typed_data(), Mp,
                                         r_env, r_robot_max, dev)
-            : get_or_build_bvh(stream, point_cloud.typed_data(), Mp,
+            : get_or_build_bvh(stream, scratch, point_cloud.typed_data(), Mp,
                                r_env, r_robot_max, key, dev);
         if (!bvh)
             return ffi::Error(ffi::ErrorCode::kInternal, "RoboGPU: BVH build failed");
@@ -928,6 +950,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     RoboGPUCollisionFfi, RoboGPUCheckImpl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::ScratchAllocator>()
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // cfg
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // twists
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // parent_tf

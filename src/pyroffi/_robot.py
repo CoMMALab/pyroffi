@@ -4,7 +4,6 @@ from typing import Sequence
 
 import jax_dataclasses as jdc
 import jaxlie
-import jaxls
 import yourdfpy
 from jax import Array
 from jax import numpy as jnp
@@ -28,8 +27,8 @@ class Robot:
     links: LinkInfo
     """Link information for the robot."""
 
-    joint_var_cls: jdc.Static[type[jaxls.Var[Array]]]
-    """Variable class for the robot configuration."""
+    default_cfg: Float[Array, "actuated_count"]
+    """Default joint configuration (actuated joints), used to seed solvers."""
 
     dynamics: DynamicsInfo | None = None
     """Rigid body dynamics information (None when the URDF lacks inertials
@@ -124,12 +123,6 @@ class Robot:
             default_joint_cfg = jnp.array(default_joint_cfg)
         assert default_joint_cfg.shape == (joints.num_actuated_joints,)
 
-        # Variable class for the robot configuration.
-        class JointVar(  # pylint: disable=missing-class-docstring
-            jaxls.Var[Array],
-            default_factory=lambda: default_joint_cfg,
-        ): ...
-
         try:
             dynamics = RobotURDFParser.parse_dynamics(urdf)
         except NotImplementedError as e:
@@ -145,7 +138,7 @@ class Robot:
         robot = Robot(
             joints=joints,
             links=links,
-            joint_var_cls=JointVar,
+            default_cfg=default_joint_cfg,
             dynamics=dynamics,
             _backends=CudaBackends(
                 urdf,

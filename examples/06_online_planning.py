@@ -59,7 +59,7 @@ def main():
 
     sol_pos, sol_wxyz = None, None
     sol_traj = np.array(
-        robot.joint_var_cls.default_factory()[None].repeat(len_traj, axis=0)
+        np.asarray(robot.default_cfg)[None].repeat(len_traj, axis=0)
     )
     while True:
         start_time = time.time()

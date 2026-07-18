@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyroffi"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python Robot Kinematics Library with Accelerated Foreign Kinematics Kernels"
 readme = "README.md"
 license = { text="MIT" }
@@ -18,28 +18,43 @@ classifiers = [
     "Operating System :: OS Independent"
 ]
 dependencies = [
-    "tyro==0.9.35",
-    "jax==0.8.0",
-    "jaxlib==0.8.0",
+    "tyro==1.0.15",
+    "jax==0.10.2",
+    "jaxlib==0.10.2",
     "jaxlie==1.5.0",
-    "jax_dataclasses==1.6.2",
-    "jaxtyping==0.3.3",
+    "jax_dataclasses==1.6.3",
+    "jaxtyping==0.3.11",
     "loguru==0.7.3",
-    "robot_descriptions==1.21.0",
-    "yourdfpy==0.0.58",
-    "trimesh==4.9.0",
-    "viser==1.0.15",
+    "robot_descriptions==3.0.0",
+    "yourdfpy==0.0.60",
+    "trimesh==4.12.2",
+    "viser==1.0.30",
     "pyliblzfse==0.4.1", # Need for viser.extras import in viser==0.2.23
-    "flax==0.12.0",
+    "flax==0.12.7",
+    "numpy==2.3.4",
+    "scipy==1.16.3",
+    "termcolor==3.2.0",
+    "typing_extensions==4.15.0",
 ]
 
 [project.optional-dependencies]
 # GRiD-based CUDA dynamics codegen (pyroffi.dynamics.GRiDDynamics); also
 # requires nvcc and the external/GRiDCodeGenerator + external/URDFParser
-# modules on disk. scipy is used by the URDF->GRiD adapter.
+# modules on disk. sympy powers the URDF->GRiD symbolic codegen. (scipy is a
+# core dependency, used by the URDF->GRiD adapter and collision geometry.)
 dynamics = [
     "sympy>=1.7.1",
-    "scipy",
+]
+# Mesh <-> primitive conversion helpers (pyroffi.collision geometry, Robot mesh
+# loading) lazily import MuJoCo; only needed if you use those code paths.
+mesh = [
+    "mujoco==3.10.0",
+]
+# CUDA 13 GPU backend for JAX (the accelerated FK/IK/collision kernels). The
+# base install is CPU-only; `pip install pyroffi[cuda]` pulls the pjrt/plugin.
+cuda = [
+    "jax-cuda13-plugin==0.10.2",
+    "jax-cuda13-pjrt==0.10.2",
 ]
 dev = [
     "pyright>=1.1.308",

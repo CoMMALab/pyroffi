@@ -1,6 +1,5 @@
 from . import bindings as bindings
 from . import collision as collision
-from . import costs as costs
 from . import kinematics as kinematics
 from . import motion_generators as motion_generators
 from . import viewer as viewer
@@ -10,4 +9,4 @@ from ._splines import cubic_spline_interpolate as cubic_spline_interpolate
 from ._splines import bspline_interpolate as bspline_interpolate
 from ._splines import make_spline_init_trajs as make_spline_init_trajs
 
-__version__ = "0.0.0"
+__version__ = "0.2.0"
