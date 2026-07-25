@@ -4,6 +4,7 @@
 # Usage (from repo root):
 #   bash build_kernels/build_sqp_ik_cuda.sh
 #   bash build_kernels/build_sqp_ik_cuda.sh --debug
+#   bash build_kernels/build_sqp_ik_cuda.sh --max-act=24   # e.g. panda_allegro (23 DOF)
 #
 # Requirements:
 #   - nvcc (CUDA toolkit)
@@ -14,6 +15,7 @@ set -euo pipefail
 
 DEBUG=0
 MAX_JOINTS_OVERRIDE=""
+MAX_ACT_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug)
@@ -32,6 +34,18 @@ while [[ $# -gt 0 ]]; do
       MAX_JOINTS_OVERRIDE="${1#*=}"
       shift
       ;;
+    --max-act)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --max-act requires an integer value"
+        exit 1
+      fi
+      MAX_ACT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --max-act=*)
+      MAX_ACT_OVERRIDE="${1#*=}"
+      shift
+      ;;
     *)
       echo "ERROR: Unknown argument: $1"
       exit 1
@@ -47,6 +61,21 @@ if [[ -n "${MAX_JOINTS_OVERRIDE}" ]]; then
   fi
   MAX_JOINTS_FLAG="-DMAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
   echo "Overriding MAX_JOINTS=${MAX_JOINTS_OVERRIDE}"
+fi
+
+# MAX_ACT bounds the per-thread cfg/Jacobian/Hessian stack arrays, so it must be
+# >= the robot's actuated-joint count or the kernel writes out of bounds
+# (CUDA_ERROR_ILLEGAL_ADDRESS). Default 16 fits e.g. panda (7); panda_allegro
+# needs 23 -> build with --max-act=24. Cost: H_s/A_init are MAX_ACT^2 doubles per
+# thread, so raising it grows local memory quadratically and lowers occupancy.
+MAX_ACT_FLAG=""
+if [[ -n "${MAX_ACT_OVERRIDE}" ]]; then
+  if ! [[ "${MAX_ACT_OVERRIDE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --max-act must be a positive integer, got '${MAX_ACT_OVERRIDE}'"
+    exit 1
+  fi
+  MAX_ACT_FLAG="-DMAX_ACT=${MAX_ACT_OVERRIDE}"
+  echo "Overriding MAX_ACT=${MAX_ACT_OVERRIDE}"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,6 +104,7 @@ nvcc \
   ${NVCC_OPT} \
   -std=c++17 \
   ${MAX_JOINTS_FLAG} \
+  ${MAX_ACT_FLAG} \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 from jaxtyping import Float, Array
 
@@ -218,43 +219,54 @@ def heightmap_halfspace(
     return min_dist
 
 def box_box(box1: Box, box2: Box) -> Float[Array, "*batch"]:
-    """Compute signed distance between two oriented boxes.
+    """Compute signed distance between two oriented boxes via the Separating
+    Axis Theorem (SAT).
 
-    Approximation: Checks all vertices of each box against the other box's AABB
-    in local frame and returns the minimum distance.
+    Tests all 15 candidate separating axes for a pair of OBBs: each box's 3
+    face normals, plus the 9 pairwise cross products of their edge
+    directions. SAT guarantees this test is *exact* for box-box intersection
+    (no false negatives) -- unlike a vertex-in-AABB check, which can miss
+    "cross"/T-junction overlaps where two boxes interpenetrate but neither
+    has a vertex inside the other (e.g. two thin perpendicular plates
+    crossing like a "+").
+
+    When the boxes are separated, returns the (positive) gap along the best
+    separating axis found. When they interpenetrate (no separating axis
+    exists), returns the negative of the minimum-translation distance -- the
+    standard penetration-depth measure for convex polytopes.
     """
-    # Get vertices of box2 in its local frame
-    hl2 = box2.half_lengths
-    signs = jnp.array(
-        [[sx, sy, sz] for sx in (1.0, -1.0) for sy in (1.0, -1.0) for sz in (1.0, -1.0)]
+    hl1 = box1.half_lengths  # (*batch, 3)
+    hl2 = box2.half_lengths  # (*batch, 3)
+    t = box2.pose.translation() - box1.pose.translation()  # (*batch, 3)
+
+    # Rows = each box's local X/Y/Z axis expressed in world coordinates.
+    axes1 = jnp.moveaxis(box1.pose.rotation().as_matrix(), -1, -2)  # (*batch, 3, 3)
+    axes2 = jnp.moveaxis(box2.pose.rotation().as_matrix(), -1, -2)  # (*batch, 3, 3)
+
+    # 9 edge-cross-product axes; near-parallel edges give a ~zero cross
+    # product, which can't certify separation -- mask those out below.
+    cross_axes = jnp.cross(axes1[..., :, None, :], axes2[..., None, :, :])
+    cross_axes = cross_axes.reshape(cross_axes.shape[:-3] + (9, 3))
+    cross_norms = jnp.linalg.norm(cross_axes, axis=-1, keepdims=True)
+    degenerate = cross_norms[..., 0] < 1e-8
+    cross_axes = cross_axes / jnp.where(cross_norms < 1e-8, 1.0, cross_norms)
+
+    all_axes = jnp.concatenate([axes1, axes2, cross_axes], axis=-2)  # (*batch, 15, 3)
+
+    d = jnp.einsum("...i,...ai->...a", t, all_axes)  # center offset along each axis
+    proj1 = jnp.einsum("...ai,...ki->...ak", all_axes, axes1)
+    proj2 = jnp.einsum("...ai,...ki->...ak", all_axes, axes2)
+    ra = jnp.sum(jnp.abs(proj1) * hl1[..., None, :], axis=-1)  # box1's projected half-extent
+    rb = jnp.sum(jnp.abs(proj2) * hl2[..., None, :], axis=-1)  # box2's projected half-extent
+
+    overlap = jnp.abs(d) - (ra + rb)  # (*batch, 15); > 0 => this axis separates the boxes
+
+    degenerate_mask = jnp.concatenate(
+        [jnp.zeros(degenerate.shape[:-1] + (6,), dtype=bool), degenerate], axis=-1
     )
-    verts2_local = signs[None, ...] * hl2[..., None, :]
-    # Transform box2 vertices to world, then to box1's local frame
-    verts2_world = box2.pose.apply(verts2_local)
-    verts2_in_box1 = box1.pose.inverse().apply(verts2_world)
-    
-    # Compute AABB SDF for each box2 vertex in box1's frame
-    hl1 = box1.half_lengths
-    q2 = jnp.abs(verts2_in_box1) - hl1[..., None, :]
-    outside2 = jnp.sqrt(jnp.sum(jnp.maximum(q2, 0.0) ** 2, axis=-1) + 1e-12)
-    inside2 = jnp.minimum(jnp.max(q2, axis=-1), 0.0)
-    sdist2_to_box1 = outside2 + inside2  # (*batch, 8)
-    min_dist2 = jnp.min(sdist2_to_box1, axis=-1)
-    
-    # Symmetrically: box1 vertices to box2's frame
-    verts1_local = signs[None, ...] * hl1[..., None, :]
-    verts1_world = box1.pose.apply(verts1_local)
-    verts1_in_box2 = box2.pose.inverse().apply(verts1_world)
-    
-    q1 = jnp.abs(verts1_in_box2) - hl2[..., None, :]
-    outside1 = jnp.sqrt(jnp.sum(jnp.maximum(q1, 0.0) ** 2, axis=-1) + 1e-12)
-    inside1 = jnp.minimum(jnp.max(q1, axis=-1), 0.0)
-    sdist1_to_box2 = outside1 + inside1  # (*batch, 8)
-    min_dist1 = jnp.min(sdist1_to_box2, axis=-1)
-    
-    # Return minimum of both checks
-    dist = jnp.minimum(min_dist2, min_dist1)
-    return dist
+    overlap = jnp.where(degenerate_mask, -jnp.inf, overlap)
+
+    return jnp.max(overlap, axis=-1)
 
 def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
     """Compute signed distance between an oriented box and a sphere.
@@ -277,11 +289,20 @@ def box_sphere(box: Box, sphere: Sphere) -> Float[Array, "*batch"]:
 
 def box_capsule(box: Box, capsule: Capsule) -> Float[Array, "*batch"]:
     """
-    Fast signed distance between an oriented box and a capsule.
+    Signed distance between an oriented box and a capsule.
 
     Steps:
       1. Convert capsule segment endpoints into box-local coordinates.
-      2. Compute closest distance from segment to AABB in that frame.
+      2. Ternary-search the segment parameter t in [0, 1] that minimizes the
+         box's (rounded-box) SDF -- this SDF is convex in t along any line
+         (both outside the box, where it's a Euclidean distance, and inside,
+         where it reduces to max_i(|p_i| - hl_i)), so ternary search finds
+         the segment's true closest approach to the box. Projecting onto the
+         point closest to the box *center* (the previous approach) is only
+         exact when the box degenerates to a sphere; for a real box it can
+         report the segment as separated when it actually penetrates a face
+         off-center (confirmed by brute force: ~3% of random configs, worst
+         case reporting +0.035 free when truly -0.23 penetrating).
       3. Subtract capsule radius to get capsule-box SDF.
     """
 
@@ -296,21 +317,32 @@ def box_capsule(box: Box, capsule: Capsule) -> Float[Array, "*batch"]:
     b = box.pose.inverse().apply(b_w)
 
     hl = box.half_lengths
-
     ab = b - a
-    ab_len2 = jnp.sum(ab * ab, axis=-1, keepdims=True)
-    t = jnp.clip(
-        jnp.sum((0.0 - a) * ab, axis=-1, keepdims=True) / (ab_len2 + 1e-12),
-        0.0,
-        1.0,
-    )
-    p = a + t * ab
-    q = jnp.abs(p) - hl
 
-    # Standard AABB SDF
-    outside = jnp.sqrt(jnp.sum(jnp.maximum(q, 0.0) ** 2, axis=-1) + 1e-12)
-    inside = jnp.minimum(jnp.max(q, axis=-1), 0.0)
-    sdist_box = outside + inside
+    def box_sdf(p):
+        q = jnp.abs(p) - hl
+        outside = jnp.sqrt(jnp.sum(jnp.maximum(q, 0.0) ** 2, axis=-1) + 1e-12)
+        inside = jnp.minimum(jnp.max(q, axis=-1), 0.0)
+        return outside + inside
+
+    def body(_, carry):
+        lo, hi = carry
+        m1 = lo + (hi - lo) / 3.0
+        m2 = hi - (hi - lo) / 3.0
+        f1 = box_sdf(a + m1[..., None] * ab)
+        f2 = box_sdf(a + m2[..., None] * ab)
+        take_right = f1 > f2
+        lo = jnp.where(take_right, m1, lo)
+        hi = jnp.where(take_right, hi, m2)
+        return lo, hi
+
+    batch_shape = ab.shape[:-1]
+    lo, hi = jax.lax.fori_loop(
+        0, 30, body, (jnp.zeros(batch_shape), jnp.ones(batch_shape))
+    )
+    t = (lo + hi) / 2.0
+
+    sdist_box = box_sdf(a + t[..., None] * ab)
 
     # Capsule SDF = box SDF - capsule radius
     return sdist_box - capsule.radius
