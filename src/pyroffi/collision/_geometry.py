@@ -149,6 +149,34 @@ class CollGeom(abc.ABC):
 
         return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
 
+    def _to_local(
+        self, points: Float[ArrayLike, "*points 3"]
+    ) -> Float[Array, "*points 3"]:
+        """Map world-frame query point(s) into this geometry's local frame.
+
+        The geometry must be unbatched (index into a batch first); ``points`` may
+        be a single ``(3,)`` point or a batch ``(*points, 3)``.
+        """
+        pts = jnp.asarray(points)
+        rot_mat = self.pose.rotation().as_matrix()  # (3, 3)
+        translation = self.pose.translation()  # (3,)
+        # R^T @ (p - t), broadcast over the leading point axes.
+        return jnp.einsum("ji,...j->...i", rot_mat, pts - translation)
+
+    def sdf(self, points: Float[ArrayLike, "*points 3"]) -> Float[Array, "*points"]:
+        """Signed distance from world-frame query point(s) to the surface.
+
+        Negative inside the geometry, positive outside, zero on the surface.
+        ``points`` may be a single ``(3,)`` point or a batch ``(*points, 3)``;
+        the geometry itself must be unbatched (index into a batch first).
+
+        A query point is the ``radius -> 0`` limit of the sphere-vs-geometry
+        distances in :mod:`._geometry_pairs`; this exposes that as a first-class,
+        differentiable point query for reuse (reconstruction/fitting SDFs,
+        occupancy tests, sampling near surfaces, ...).
+        """
+        raise NotImplementedError(f"sdf() not implemented for {type(self).__name__}")
+
 
 def geom_from_mjcf_body(mj_model, body_name: str) -> "Box | Sphere | Capsule":
     """Build a physically-parameterized ``CollGeom`` from a compiled MJCF body.
@@ -305,6 +333,11 @@ class HalfSpace(CollGeom):
             friction=jnp.zeros(batch_axes, dtype=pos.dtype),
         )
 
+    def sdf(self, points: Float[ArrayLike, "*points 3"]) -> Float[Array, "*points"]:
+        """Signed distance to the boundary plane (positive on the +normal side)."""
+        pts = jnp.asarray(points)
+        return jnp.einsum("...i,i->...", pts - self.pose.translation(), self.normal)
+
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
         """Visualize HalfSpace as a large thin box aligned with its boundary plane."""
         pose_i: jaxlie.SE3 = jax.tree.map(lambda x: x[index], self.pose)
@@ -327,6 +360,13 @@ class Sphere(CollGeom):
     def radius(self) -> Float[Array, "*batch"]:
         """Radius of the sphere."""
         return self.size[..., 0]
+
+    def sdf(self, points: Float[ArrayLike, "*points 3"]) -> Float[Array, "*points"]:
+        """Signed distance to the sphere surface: ``||x - center|| - radius``."""
+        local = self._to_local(points)
+        # +eps under the sqrt keeps the gradient finite at the center (x == 0).
+        dist = jnp.sqrt(jnp.sum(local**2, axis=-1) + 1e-12)
+        return dist - self.radius
 
     @staticmethod
     def from_center_and_radius(
@@ -449,6 +489,20 @@ class Box(CollGeom):
     def extents(self) -> Float[Array, "*batch 3"]:
         """Full extents (width, depth, height) = 2 * half_lengths."""
         return 2.0 * self.half_lengths
+
+    def sdf(self, points: Float[ArrayLike, "*points 3"]) -> Float[Array, "*points"]:
+        """Signed distance to the (oriented) box surface (standard box SDF).
+
+        Matches the box-vs-sphere math in :func:`._geometry_pairs.box_sphere`
+        with ``radius = 0``.
+        """
+        local = self._to_local(points)
+        q = jnp.abs(local) - self.half_lengths
+        # +eps under the sqrt keeps the gradient finite for points strictly
+        # inside the box, where max(q, 0) is all-zero.
+        outside = jnp.sqrt(jnp.sum(jnp.maximum(q, 0.0) ** 2, axis=-1) + 1e-12)
+        inside = jnp.minimum(jnp.max(q, axis=-1), 0.0)
+        return outside + inside
 
     @staticmethod
     def from_center_and_half_lengths(
@@ -627,6 +681,21 @@ class Capsule(CollGeom):
     def axis(self) -> Float[Array, "*batch 3"]:
         """Axis direction (Z-axis of rotation matrix)."""
         return self.pose.rotation().as_matrix()[..., :, 2]
+
+    def sdf(self, points: Float[ArrayLike, "*points 3"]) -> Float[Array, "*points"]:
+        """Signed distance to the capsule surface.
+
+        The capsule is a segment of length ``height`` along local +Z, inflated by
+        ``radius``; distance is to the closest point on that segment minus radius.
+        """
+        local = self._to_local(points)
+        half_h = self.height / 2.0
+        z = jnp.clip(local[..., 2], -half_h, half_h)
+        closest = jnp.stack(
+            [jnp.zeros_like(z), jnp.zeros_like(z), z], axis=-1
+        )  # (*points, 3)
+        dist = jnp.sqrt(jnp.sum((local - closest) ** 2, axis=-1) + 1e-12)
+        return dist - self.radius
 
     @staticmethod
     def from_radius_height(

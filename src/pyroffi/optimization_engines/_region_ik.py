@@ -66,7 +66,12 @@ from ._ls_ik import _prepare_ls_collision_buffers
 # rebuild. _assert_region_ik_build() ties it to the .so's self-reported limits so a
 # rebuild fails loudly here instead of silently capping occupancy (limits shrunk) or
 # failing the launch with a bare cudaErrorInvalidValue (limits grown).
-_REGION_IK_BUILD = (64, 16)  # (MAX_JOINTS, MAX_ACT) this bound was measured on
+_REGION_IK_BUILD = (64, 24)  # (MAX_JOINTS, MAX_ACT) this bound was measured on
+# Re-measured after MAX_ACT's default moved 16 -> 24 (panda_allegro):
+# `cuobjdump -res-usage _svgd_region_ik_cuda_lib.so` reports SHARED=12580 B/block,
+# REG=48/thread. Both are per-BLOCK / per-thread constants that do not scale with
+# threads_per_block here, so 12580 B stays far inside the 48KB static budget and 48
+# regs allows 1024 threads; the 384 ceiling below is unchanged (and conservative).
 _REGION_IK_MAX_TPB_BY_SMEM = 384
 
 

@@ -77,12 +77,24 @@ __device__ __forceinline__ float capsule_box_dist(
     float bl2 = d2x * a2x + d2y * a2y + d2z * a2z;
     float bl3 = d2x * a3x + d2y * a3y + d2z * a3z;
     float ab1 = bl1 - al1, ab2 = bl2 - al2, ab3 = bl3 - al3;
-    float ab_len2 = ab1 * ab1 + ab2 * ab2 + ab3 * ab3;
-    float t = 0.0f;
-    if (ab_len2 > 1e-12f) {
-        t = (-al1 * ab1 - al2 * ab2 - al3 * ab3) / ab_len2;
-        t = fmaxf(0.0f, fminf(1.0f, t));
+
+    // box_sdf_local(a + t*ab) is convex in t (the rounded-box SDF is convex
+    // both outside the box and inside, where it reduces to
+    // max_i(|p_i| - hl_i)), so ternary search over t in [0, 1] finds the
+    // segment's true closest approach to the box. Projecting onto the point
+    // closest to the box center (the previous approach) is only exact when
+    // the box degenerates to a sphere; for an off-center penetration it can
+    // report the capsule as separated when it actually intersects a face.
+    float lo = 0.0f, hi = 1.0f;
+    #pragma unroll
+    for (int i = 0; i < 30; i++) {
+        float m1 = lo + (hi - lo) / 3.0f;
+        float m2 = hi - (hi - lo) / 3.0f;
+        float f1 = box_sdf_local(al1 + m1 * ab1, al2 + m1 * ab2, al3 + m1 * ab3, hl1, hl2, hl3);
+        float f2 = box_sdf_local(al1 + m2 * ab1, al2 + m2 * ab2, al3 + m2 * ab3, hl1, hl2, hl3);
+        if (f1 > f2) { lo = m1; } else { hi = m2; }
     }
+    float t = 0.5f * (lo + hi);
     return box_sdf_local(al1 + t * ab1, al2 + t * ab2, al3 + t * ab3,
                          hl1, hl2, hl3) - cr;
 }

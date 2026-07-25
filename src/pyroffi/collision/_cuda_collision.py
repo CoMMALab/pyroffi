@@ -183,6 +183,120 @@ def _extract_world_arrays(
 
 
 # ---------------------------------------------------------------------------
+# JAX-native world geometry extraction (traceable variants)
+# ---------------------------------------------------------------------------
+#
+# The ``*_np`` helpers above convert a CollGeom to host numpy so the result can
+# be handed to a CPU FFI kernel eagerly.  They therefore CANNOT run when the
+# CollGeom holds traced arrays (inside jax.jit / vmap / pmap / scan): a tracer
+# has no concrete value for ``np.asarray`` to read.
+#
+# The ``*_jax`` variants below perform the identical layout conversion using
+# pure JAX ops, so they are safe on tracers and return jnp arrays that can be
+# threaded straight into ``jax.ffi.ffi_call`` inside a trace.  Shapes are static
+# in JAX, so the ``get_batch_axes`` / half-space guards still work.
+
+def _pose_translation_jax(pose) -> jax.Array:
+    """Traceable analogue of :func:`_pose_translation_np` (returns a jnp array)."""
+    return jnp.asarray(pose.wxyz_xyz)[..., 4:7].astype(jnp.float32)
+
+
+def _pose_rotation_matrix_jax(pose) -> jax.Array:
+    """Traceable analogue of :func:`_pose_rotation_matrix_np`.
+
+    Quaternion (w, x, y, z) → rotation matrix, in pure JAX so it works on
+    traced poses.
+    """
+    wxyz = jnp.asarray(pose.wxyz_xyz)[..., :4].astype(jnp.float32)
+    w, x, y, z = wxyz[..., 0], wxyz[..., 1], wxyz[..., 2], wxyz[..., 3]
+    r00 = 1 - 2 * (y * y + z * z)
+    r01 = 2 * (x * y - w * z)
+    r02 = 2 * (x * z + w * y)
+    r10 = 2 * (x * y + w * z)
+    r11 = 1 - 2 * (x * x + z * z)
+    r12 = 2 * (y * z - w * x)
+    r20 = 2 * (x * z - w * y)
+    r21 = 2 * (y * z + w * x)
+    r22 = 1 - 2 * (x * x + y * y)
+    R = jnp.stack(
+        [r00, r01, r02, r10, r11, r12, r20, r21, r22], axis=-1
+    ).reshape(wxyz.shape[:-1] + (3, 3))
+    return R.astype(jnp.float32)
+
+
+def _extract_world_arrays_jax(
+    world_geom: CollGeom,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Traceable analogue of :func:`_extract_world_arrays` (returns jnp arrays).
+
+    Safe to call inside a JAX trace: performs no host-side numpy conversion, so
+    a CollGeom holding traced arrays is handled correctly.
+
+    Returns:
+        spheres    — float32 [Ms, 4]
+        capsules   — float32 [Mc, 7]
+        boxes      — float32 [Mb, 15]
+        halfspaces — float32 [Mh, 6]
+    """
+    empty_s = jnp.zeros((0, 4),  dtype=jnp.float32)
+    empty_c = jnp.zeros((0, 7),  dtype=jnp.float32)
+    empty_b = jnp.zeros((0, 15), dtype=jnp.float32)
+    empty_h = jnp.zeros((0, 6),  dtype=jnp.float32)
+
+    axes = world_geom.get_batch_axes()
+
+    # Normalize: scalar → single obstacle
+    if len(axes) == 0:
+        world_geom = world_geom.broadcast_to((1,))
+        axes = (1,)
+
+    if len(axes) > 1:
+        raise ValueError(
+            "VAMP/CUDA world extraction only supports world_geom without leading "
+            f"batch dimensions; got shape {axes}. Pre-flatten the world geometry."
+        )
+
+    if isinstance(world_geom, Sphere):
+        centers = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        radii   = jnp.asarray(world_geom.radius, dtype=jnp.float32)      # (M,)
+        spheres = jnp.concatenate([centers, radii[:, None]], axis=-1)    # (M, 4)
+        return spheres, empty_c, empty_b, empty_h
+
+    if isinstance(world_geom, Capsule):
+        centers = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        axes_v  = jnp.asarray(world_geom.axis,   dtype=jnp.float32)      # (M, 3)
+        heights = jnp.asarray(world_geom.height, dtype=jnp.float32)      # (M,)
+        radii   = jnp.asarray(world_geom.radius, dtype=jnp.float32)      # (M,)
+        half_h  = heights[:, None] * 0.5
+        a       = centers - axes_v * half_h                              # (M, 3)
+        b_      = centers + axes_v * half_h                              # (M, 3)
+        capsules = jnp.concatenate([a, b_, radii[:, None]], axis=-1)     # (M, 7)
+        return empty_s, capsules, empty_b, empty_h
+
+    if isinstance(world_geom, Box):
+        centers = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        R       = _pose_rotation_matrix_jax(world_geom.pose)             # (M, 3, 3)
+        ax1     = R[..., :, 0]                                           # (M, 3)
+        ax2     = R[..., :, 1]                                           # (M, 3)
+        ax3     = R[..., :, 2]                                           # (M, 3)
+        hl      = jnp.asarray(world_geom.half_lengths, dtype=jnp.float32)  # (M, 3)
+        boxes   = jnp.concatenate([centers, ax1, ax2, ax3, hl], axis=-1)   # (M, 15)
+        return empty_s, empty_c, boxes, empty_h
+
+    if isinstance(world_geom, HalfSpace):
+        R       = _pose_rotation_matrix_jax(world_geom.pose)             # (M, 3, 3)
+        normals = R[..., :, 2].astype(jnp.float32)                       # (M, 3)
+        points  = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        halfspaces = jnp.concatenate([normals, points], axis=-1)         # (M, 6)
+        return empty_s, empty_c, empty_b, halfspaces
+
+    raise NotImplementedError(
+        f"World extraction does not support world_geom of type "
+        f"{type(world_geom).__name__}. Supported: Sphere, Capsule, Box, HalfSpace."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
 

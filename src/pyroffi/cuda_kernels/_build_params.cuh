@@ -26,8 +26,12 @@
 #define MAX_JOINTS 64
 #endif
 
+// 24, not 16: the CRISP-EE benchmarks run panda_allegro (23 actuated DOF), and a
+// 16-wide build writes past `delta`/`J`/`A_s` on it (CUDA_ERROR_ILLEGAL_ADDRESS).
+// Keeping 24 as the DEFAULT rather than a build flag is deliberate — at 16 a
+// plain rebuild silently reverted allegro support.
 #ifndef MAX_ACT
-#define MAX_ACT 16
+#define MAX_ACT 24
 #endif
 
 // ── Guardrails ───────────────────────────────────────────────────────────────

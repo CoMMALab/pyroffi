@@ -23,7 +23,9 @@
 # ── Defaults ─────────────────────────────────────────────────────────────────
 # Keep in sync with _build_params.cuh's #ifndef fallbacks.
 PYROFFI_MAX_JOINTS_DEFAULT=64
-PYROFFI_MAX_ACT_DEFAULT=16
+# 24, not 16, so panda_allegro (23 actuated DOF) builds out of the box; see the
+# matching note in _build_params.cuh.
+PYROFFI_MAX_ACT_DEFAULT=24
 
 # ── Guardrail bounds ─────────────────────────────────────────────────────────
 # Mirrored from _build_params.cuh's static_asserts. Enforced here too so the user

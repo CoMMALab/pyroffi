@@ -1,0 +1,162 @@
+{
+  "task_id": "block_stacking_panda",
+  "version": 1,
+  "robot": "panda_spherized",
+  "description": "Stack three 5 cm cubes into a single tower on the red block's footprint, using a Franka Panda. Planning runs against the pyroffi MCP server; execution runs in a stepped MuJoCo simulation with a real tendon-driven gripper closing on real blocks. The arm is mounted at the world origin and the ground plane is z=0.",
+  "conventions": {
+    "units": {
+      "length": "m",
+      "angle": "rad",
+      "time": "s"
+    },
+    "frame": "world",
+    "quaternion_convention": "wxyz",
+    "joint_order": "name-keyed; use the actuated joint names from get_capabilities"
+  },
+  "robot_setup": {
+    "grip_link": "panda_hand",
+    "grasp_standoff_m": 0.095,
+    "grasp_note": "A top-down grasp puts the panda_hand frame origin grasp_standoff_m above the block centre, with the hand's local +z along world -z (wxyz [0, 0, 1, 0], yaw free). Plan with the fingers ignored: the planning model has 7 actuated joints and the gripper is commanded separately with set_gripper.",
+    "start_config": {
+      "panda_joint1": 0.0,
+      "panda_joint2": -0.785,
+      "panda_joint3": 0.0,
+      "panda_joint4": -2.356,
+      "panda_joint5": 0.0,
+      "panda_joint6": 1.571,
+      "panda_joint7": 0.785
+    }
+  },
+  "block_size_m": [
+    0.05,
+    0.05,
+    0.05
+  ],
+  "blocks": [
+    {
+      "name": "block_red",
+      "position": [
+        0.45,
+        -0.2,
+        0.025
+      ],
+      "wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rgba": [
+        0.85,
+        0.25,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "name": "block_green",
+      "position": [
+        0.45,
+        0.0,
+        0.025
+      ],
+      "wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rgba": [
+        0.3,
+        0.75,
+        0.35,
+        1.0
+      ]
+    },
+    {
+      "name": "block_blue",
+      "position": [
+        0.5,
+        0.28,
+        0.025
+      ],
+      "wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rgba": [
+        0.3,
+        0.45,
+        0.85,
+        1.0
+      ]
+    }
+  ],
+  "variants": {
+    "easy": {
+      "obstacles": [],
+      "note": "Free tabletop. Tests the pipeline, not the geometry."
+    },
+    "wall": {
+      "obstacles": [
+        {
+          "name": "divider",
+          "shape": "box",
+          "position": [
+            0.45,
+            0.15,
+            0.125
+          ],
+          "wxyz": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "params": {
+            "length": 0.25,
+            "width": 0.02,
+            "height": 0.25
+          }
+        }
+      ],
+      "note": "A 25 cm divider stands between block_blue and the rest of the workspace. A straight-line joint-space transfer drives through it, so optimize_between alone is not enough: the seed has to lift over the wall. It is placed 0.15 m out so the hand can still reach block_green without fouling it -- the spherized hand is a coarse collision blob and clears less than its visual mesh suggests."
+    }
+  },
+  "goal": {
+    "type": "stack",
+    "order": [
+      "block_red",
+      "block_green",
+      "block_blue"
+    ],
+    "base_position_xy": [
+      0.45,
+      -0.2
+    ],
+    "tolerances": {
+      "stack_xy_m": 0.015,
+      "stack_yaw_rad": 0.262,
+      "release_drop_m": 0.02
+    }
+  },
+  "scoring": {
+    "metrics": [
+      "success",
+      "n_motions",
+      "n_unretimed_motions",
+      "commanded_duration_s",
+      "sim_time_s",
+      "max_tracking_error_rad"
+    ],
+    "note": "report() reads the simulator, so it cannot be satisfied by a plan that was never executed."
+  },
+  "execution": {
+    "planning_model": "panda_spherized (7 DOF, primitive collision geometry)",
+    "simulation_model": "MuJoCo Menagerie franka_emika_panda (real finger meshes, tendon gripper)",
+    "kinematic_agreement": "panda_hand and the Menagerie 'hand' body agree to 1e-7 m; a joint-space plan transfers with no translation",
+    "note": "Motions start from the configuration observe() reports -- execution does not teleport. Pass times_s from retime(): an unretimed reference pulls a held block out of the gripper."
+  }
+}

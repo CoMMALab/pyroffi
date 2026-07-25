@@ -56,12 +56,37 @@ cuda = [
     "jax-cuda13-plugin==0.10.2",
     "jax-cuda13-pjrt==0.10.2",
 ]
+# MCP server exposing the pyroffi.toolbox primitives over stdio
+# (pyroffi.mcp / the `pyroffi-mcp` script). The toolbox layer itself has no new
+# dependencies -- only the transport adapter needs `mcp`.
+mcp = [
+    "mcp>=1.2.0",
+]
+# Execution sandbox: a stepped MuJoCo world with a viser render layer, exposed
+# over MCP by `pyroffi-sandbox`. Deliberately a separate extra from `mcp`,
+# because it is a separate adapter: that server computes, this one acts.
+sandbox = [
+    "mcp>=1.2.0",
+    "mujoco>=3.2",
+    "robot_descriptions",
+    "viser",
+    "imageio",
+]
 dev = [
     "pyright>=1.1.308",
     "scikit-sparse",
     "ruff",
     "pytest",
     "m2r2",
+]
+
+[project.scripts]
+pyroffi-mcp = "pyroffi.mcp._server:main"
+pyroffi-sandbox = "pyroffi.sandbox._server:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that build an extra session or pay a large compile",
 ]
 
 [tool.ruff.lint]
