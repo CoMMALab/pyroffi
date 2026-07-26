@@ -17,7 +17,9 @@ silently changes renderer is worse than no image. Open the URL.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import sys
 import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
@@ -107,7 +109,14 @@ class RenderViewer:
         self.source = source
         self.rate_hz = float(rate_hz)
         self.viewpoints = dict(viewpoints or DEFAULT_VIEWPOINTS)
-        self._server = server or viser.ViserServer(port=port)
+        # viser announces itself with a rich panel on *stdout*, and its
+        # `verbose` flag does not gate that panel. When the viewer runs inside
+        # an MCP server stdout is the JSON-RPC transport, so the banner corrupts
+        # the stream and the client drops the connection before the first tool
+        # call. Redirect rather than silence: the URL is genuinely useful, it
+        # just belongs on stderr with everything else humans read.
+        with contextlib.redirect_stdout(sys.stderr):
+            self._server = server or viser.ViserServer(port=port, verbose=False)
         self._port = port
         self.view = SceneView(
             self._server, source.describe(), show_collision_meshes=show_collision_meshes

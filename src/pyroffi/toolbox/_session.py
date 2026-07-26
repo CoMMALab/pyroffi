@@ -257,6 +257,8 @@ class Session:
         import jax
         import pyroffi as pk
 
+        from pyroffi.attachments import AttachmentSet as _AttachmentSet
+
         from ._handles import HandleTable
         from ._scene import Scene
 
@@ -267,6 +269,8 @@ class Session:
         self.robot_coll, self.collision_model = _build_collision_model(
             self.urdf, collision_model
         )
+        self.attachments = _AttachmentSet.empty()
+        self._attachment_meta: dict[str, dict[str, Any]] = {}
         self.scene = Scene(max_objects=max_objects, ground_plane=ground_plane)
         self.handles = HandleTable()
         self.ledger = CompileLedger()
@@ -299,6 +303,15 @@ class Session:
         self.self_collision_report: dict[str, Any] = {"calibrated": False}
         if calibrate_self_collision:
             self.self_collision_report = self._calibrate_self_collision()
+
+        # The un-attached models are the composition base: attachments are
+        # composed onto them from scratch whenever the grasp topology changes,
+        # rather than stacked, so attach/detach is an exact round trip.
+        # Captured *after* calibration, which prunes the self-collision pair
+        # table in place -- capturing earlier would silently discard it on the
+        # first attach.
+        self.robot_coll_base = self.robot_coll
+        self.robot_base = self.robot
 
         logger.info(
             f"session {session_id!r}: {robot} ({self.dof} DOF), ee={self.ee_link}, "
@@ -338,15 +351,65 @@ class Session:
         spread = _np.abs(poses - poses[:1]).max(axis=(0, 2))    # per link
         return tuple(int(i) for i in _np.argwhere(spread < 1e-9).reshape(-1))
 
+    def collision_row_names(self) -> tuple[str, ...]:
+        """Names for every row of the collision arrays: links, then attachments.
+
+        Attaching an object appends a row to the collision model, so the arrays
+        are *longer* than ``link_names`` whenever the robot is holding
+        something. Everything that turns a row index back into a name has to go
+        through here, or a carried object's collision is reported under the
+        wrong name — or, worse, raises while trying.
+        """
+        return tuple(self.link_names) + tuple(self.attachments.names())
+
     def world_link_mask(self):
-        """``(n_links,)`` bool — True for links whose world collisions are worth
-        reporting (i.e. everything the configuration can actually move)."""
+        """``(n_rows,)`` bool — True for rows whose world collisions are worth
+        reporting (i.e. everything the configuration can actually move).
+
+        Attachments are always True: a carried object colliding with the world
+        is the entire reason to attach it.
+        """
         from jax import numpy as jnp
 
-        mask = np.ones(len(self.link_names), dtype=bool)
+        mask = np.ones(len(self.collision_row_names()), dtype=bool)
         for i in self.static_link_indices:
             mask[i] = False
         return jnp.asarray(mask)
+
+    def world_pair_masks(self) -> tuple:
+        """Per-pool ``(n_rows, M)`` bool masks: which (row, object slot) pairs
+        are worth reporting.
+
+        The row-level :meth:`world_link_mask` broadcast over every slot, which
+        left no way to say "this *carried* object is allowed to touch *that*
+        obstacle". It has to be sayable, because the conservative bounding
+        sphere makes an attached block overlap the surface it is resting on by
+        construction: a 5 cm cube gets a 0.0433 m radius against a 0.025 m
+        half-height, so every legitimate lift-off would report ~18 mm of
+        penetration at its first waypoint and an agent could not tell that
+        apart from a real fault.
+
+        Safe to bake into a compiled program: it can only change on attach or
+        detach, and both clear the jit cache.
+        """
+        from jax import numpy as jnp
+
+        row_mask = np.asarray(self.world_link_mask())
+        names = self.collision_row_names()
+        row_of = {n: i for i, n in enumerate(names)}
+
+        masks = []
+        for _shape, slot_names in self.scene.geom_names():
+            m = np.repeat(row_mask[:, None], len(slot_names), axis=1)
+            for att_name, meta in self._attachment_meta.items():
+                row = row_of.get(att_name)
+                if row is None:
+                    continue
+                for obj in meta.get("ignore_objects", ()):
+                    if obj in slot_names:
+                        m[row, slot_names.index(obj)] = False
+            masks.append(jnp.asarray(m))
+        return tuple(masks)
 
     # ── self-collision calibration ────────────────────────────────────────
 
@@ -566,12 +629,18 @@ class Session:
         return out
 
     def self_pair_names(self) -> list[tuple[str, str]]:
-        """Named link pairs, aligned with the self-collision distance vector."""
+        """Named pairs, aligned with the self-collision distance vector.
+
+        Indexed by ``collision_row_names`` rather than ``link_names``: with an
+        object attached, the pair table gains rows for it, and a
+        "carried block vs. forearm" collision has to come back named rather
+        than as an index error.
+        """
+        names = self.collision_row_names()
         idx_i = np.asarray(self.robot_coll.active_idx_i)
         idx_j = np.asarray(self.robot_coll.active_idx_j)
         return [
-            (self.link_names[int(i)], self.link_names[int(j)])
-            for i, j in zip(idx_i, idx_j)
+            (names[int(i)], names[int(j)]) for i, j in zip(idx_i, idx_j)
         ]
 
     def iter_world_slots(self) -> Iterator[tuple[int, int, str | None]]:
@@ -579,6 +648,76 @@ class Session:
         for pool_idx, (_shape, names) in enumerate(self.scene.geom_names()):
             for slot, name in enumerate(names):
                 yield pool_idx, slot, name
+
+    # ── attached bodies (tool use) ────────────────────────────────────────
+
+    def _rebuild_attached_models(self) -> None:
+        """Recompose the collision and dynamics models from the base + current
+        attachments.
+
+        Composed from the *base* every time rather than incrementally: that
+        makes attach/detach an exact round trip and keeps a double-attach from
+        silently stacking geometry. The self-collision pair table is rebuilt
+        with it, so any calibration-time pruning applies to the robot's own
+        pairs only -- attachment pairs are always freshly derived.
+        """
+        if len(self.attachments):
+            self.robot_coll = self.robot_coll_base.with_attachments(self.attachments)
+            # Dynamics composition is a bonus, not a requirement: a URDF with no
+            # <inertial> data still gets full collision-side tool use.
+            self.robot = (
+                self.robot_base.with_attachments(self.attachments)
+                if self.robot_base.dynamics is not None
+                else self.robot_base
+            )
+        else:
+            self.robot_coll = self.robot_coll_base
+            self.robot = self.robot_base
+        # Anything jitted against the old collision array shape is stale.
+        self._jitted.clear()
+
+    def attach_object(
+        self,
+        name: str,
+        link: str | None = None,
+        ignore_links: tuple[str, ...] = (),
+        ignore_objects: tuple[str, ...] = (),
+        mass: float | None = None,
+    ) -> dict[str, Any]:
+        """Grasp a scene object: it stops being an obstacle and starts being
+        part of the robot's body. See :mod:`pyroffi.toolbox._attach`."""
+        from ._attach import attach
+
+        return attach(
+            self,
+            name,
+            link=link,
+            ignore_links=ignore_links,
+            ignore_objects=ignore_objects,
+            mass=mass,
+        )
+
+    def detach_object(self, name: str) -> dict[str, Any]:
+        """Release an attached object back into the world at its current pose."""
+        from ._attach import detach
+
+        return detach(self, name)
+
+    def attached(self) -> list[dict[str, Any]]:
+        """Report every currently attached object."""
+        out = []
+        for a in self.attachments:
+            out.append(
+                {
+                    "name": a.name,
+                    "link": self.link_names[a.parent_link_index],
+                    "T_link_body": [float(v) for v in np.asarray(a.T_parent_body)],
+                    "n_primitives": a.num_prims,
+                    "active": bool(a.active),
+                    "shape": self._attachment_meta.get(a.name, {}).get("shape"),
+                }
+            )
+        return out
 
     def close(self) -> None:
         self.handles.clear()

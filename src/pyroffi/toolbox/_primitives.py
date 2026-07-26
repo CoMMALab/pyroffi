@@ -77,6 +77,20 @@ class Toolbox:
         """Stash a structured cause so ``explain_failure`` has something real to say."""
         self._failures[request_id] = {"cause": cause, **detail}
 
+    def _inherit_failure(self, outer_id: str, *inner_ids: str) -> None:
+        """Republish an inner call's failure under the id the caller was handed.
+
+        Wrappers (``check_reachable``, ``optimize_between``) delegate to other
+        primitives, which record failures under *their* request id — an id the
+        caller never sees. Without this, ``explain_failure`` on the only id the
+        agent has says "no failure recorded", which reads as "it succeeded".
+        """
+        for inner in inner_ids:
+            record = self._failures.get(inner)
+            if record is not None:
+                self._failures[outer_id] = {**record, "recorded_by": inner}
+                return
+
     # ── scene ─────────────────────────────────────────────────────────────
 
     def create_scene_info(self) -> dict[str, Any]:
@@ -84,6 +98,50 @@ class Toolbox:
         request_id, t0 = self._new_request()
         return self._envelope(
             request_id, t0, compiled=False, capabilities=self.session.capabilities()
+        )
+
+    def reset_scene(self, keep_ground_plane: bool = True) -> dict[str, Any]:
+        """Wipe the problem, keep the session: empty scene, no attachments, no
+        handles, robot back at its default configuration.
+
+        This is the between-problems operation for a long-lived server, and it
+        is deliberately not ``create_scene``. Recreating the session reparses
+        the URDF and throws away every compiled function, so the next call pays
+        the tens of seconds of XLA compilation again; a reset only mutates
+        state the problem owns, so the warm session survives it. Detaching does
+        change collision array shapes and so recompiles, but only if something
+        was actually attached.
+
+        Args:
+            keep_ground_plane: Keep the ``ground`` halfspace if the session was
+                built with one. It belongs to the world rather than to any one
+                problem, and dropping it silently lets the next problem plan
+                paths through the floor.
+        """
+        request_id, t0 = self._new_request()
+        s = self.session
+        detached = list(s.attachments.names())
+        for name in detached:
+            s.detach_object(name)
+        removed = [
+            name
+            for name in s.scene.names()
+            if not (keep_ground_plane and name == "ground")
+        ]
+        for name in removed:
+            s.scene.remove_object(name)
+        s.handles.clear()
+        self._failures.clear()
+        s.robot_state = np.asarray(s.robot.default_cfg, dtype=np.float64)
+        return self._envelope(
+            request_id,
+            t0,
+            compiled=bool(detached),
+            detached=detached,
+            removed_objects=removed,
+            handles_invalidated=True,
+            n_objects=len(s.scene.names()),
+            remaining_objects=s.scene.names(),
         )
 
     def add_object(
@@ -138,13 +196,18 @@ class Toolbox:
                 if object_name not in slot_names:
                     continue
                 slot = slot_names.index(object_name)
-                d = np.asarray(
-                    jax.jit(
+                # Via the session ledger, not a fresh `jax.jit(lambda ...)`: a
+                # new lambda every call is a new cache key, so add_object paid a
+                # full trace+compile per object while advertising itself as free.
+                fn, _ = s.jitted(
+                    f"static_overlap:{shape}",  # pools are fixed-capacity per shape
+                    lambda: jax.jit(
                         lambda c, g: s.robot_coll.compute_world_collision_distance(
                             s.robot, c, g
                         )
-                    )(cfg, pool)
+                    ),
                 )
+                d = np.asarray(fn(cfg, pool))
                 for i in s.static_link_indices:
                     if d[i, slot] < 0.0:
                         hits.append(s.link_names[i])
@@ -159,6 +222,76 @@ class Toolbox:
         return self._envelope(
             request_id, t0, compiled=False, removed=name,
             n_objects=len(self.session.scene.names()),
+        )
+
+    def attach_object(
+        self,
+        name: str,
+        link: str | None = None,
+        ignore_links: Sequence[str] = (),
+        ignore_objects: Sequence[str] = (),
+        mass: float | None = None,
+    ) -> dict[str, Any]:
+        """Grasp a scene object: it stops being an obstacle and becomes part of
+        the robot's body, moving with ``link``.
+
+        Not free, unlike ``add_object``: obstacle *count* is padded, but a
+        carried object genuinely lengthens the robot's collision array, so this
+        changes array shapes and forces a recompile of anything that reduces
+        over them. That is the deliberate trade -- a handful of recompiles per
+        plan (pick, place, handoff) in exchange for attach state that costs
+        nothing per query afterwards.
+
+        ``ignore_links`` are links the object is *allowed* to touch -- the
+        gripper fingers holding it. Leave it empty and the fingers will report a
+        collision with the thing they are gripping.
+
+        ``ignore_objects`` is the same idea for world obstacles, and the surface
+        the object was picked up from almost always belongs in it: the bounding
+        sphere of a 5 cm cube has a 0.0433 m radius against a 0.025 m half
+        height, so the block overlaps the table it is resting on the instant it
+        is attached, and the lift-off that fixes it validates as invalid.
+
+        ``mass`` is optional because scene objects are pure geometry: without it
+        the attachment is collision-only, which is all a kinematic planner needs.
+        Supply it to also load the robot's *dynamics*, so torque limits and
+        inverse dynamics account for what is being carried.
+        """
+        request_id, t0 = self._new_request()
+        report = self.session.attach_object(
+            name,
+            link=link,
+            ignore_links=tuple(ignore_links),
+            ignore_objects=tuple(ignore_objects),
+            mass=mass,
+        )
+        return self._envelope(
+            request_id, t0, compiled=True,
+            n_objects=len(self.session.scene.names()),
+            attachments=self.session.attached(),
+            **report,
+        )
+
+    def detach_object(self, name: str) -> dict[str, Any]:
+        """Release an attached object back into the world where the robot is
+        currently holding it. The exact inverse of ``attach_object``; also
+        changes array shapes, so it also recompiles."""
+        request_id, t0 = self._new_request()
+        report = self.session.detach_object(name)
+        return self._envelope(
+            request_id, t0, compiled=True,
+            n_objects=len(self.session.scene.names()),
+            attachments=self.session.attached(),
+            **report,
+        )
+
+    def list_attachments(self) -> dict[str, Any]:
+        """List objects currently carried by the robot. FREE."""
+        request_id, t0 = self._new_request()
+        return self._envelope(
+            request_id, t0, compiled=False,
+            attachments=self.session.attached(),
+            n_attached=len(self.session.attachments),
         )
 
     def list_objects(self) -> dict[str, Any]:
@@ -239,7 +372,10 @@ class Toolbox:
             from jax import numpy as jnp
 
             robot, robot_coll = s.robot, s.robot_coll
-            link_mask = s.world_link_mask()[:, None]
+            # Per-(row, slot), not per-row: an attachment may be permitted to
+            # touch the surface it was picked up from, which a row-wide mask
+            # cannot express.
+            pair_masks = s.world_pair_masks()
             far = jnp.asarray(1.0e4)
 
             def single(cfg, geoms):
@@ -249,11 +385,11 @@ class Toolbox:
                 # host-side slot-name tables index into.
                 world_d = tuple(
                     jnp.where(
-                        link_mask,
+                        mask,
                         robot_coll.compute_world_collision_distance(robot, cfg, g),
                         far,
                     )
-                    for g in geoms
+                    for mask, g in zip(pair_masks, geoms)
                 )
                 return self_d, world_d
 
@@ -292,6 +428,9 @@ class Toolbox:
         s = self.session
         pairs: list[dict[str, Any]] = []
         pool_names = s.scene.geom_names()
+        # Rows, not links: an attached object adds a row, and it is exactly the
+        # row a pick-and-place agent most needs to see named.
+        row_names = s.collision_row_names()
         for pool_idx, dists in enumerate(world_d):
             _shape, slot_names = pool_names[pool_idx]
             mat = dists[index] if index else dists          # (N_links, M_slots)
@@ -302,7 +441,7 @@ class Toolbox:
                     continue
                 pairs.append(
                     {
-                        "link": s.link_names[int(link_i)],
+                        "link": row_names[int(link_i)],
                         "object": name,
                         "distance_m": round(float(mat[link_i, slot]), 6),
                     }
@@ -560,6 +699,8 @@ class Toolbox:
         num_seeds: int = 32,
         max_iter: int = 60,
         seed_config: str | Mapping[str, float] | Sequence[float] | None = None,
+        collision_free: bool = False,
+        collision_weight: float = 1e8,
         pos_tolerance: float = _IK_POS_TOL,
         rot_tolerance: float = _IK_ROT_TOL,
         seed: int = 0,
@@ -573,6 +714,11 @@ class Toolbox:
 
         Target count is a static shape, so it is bucketed like path length: 5
         targets and 7 targets share the 8-wide program.
+
+        ``collision_free=True`` adds the same softplus obstacle penalty
+        ``solve_ik`` uses, and every result then carries ``min_clearance_m`` and
+        ``in_collision`` — enumerating grasps is precisely where a candidate
+        that reaches the pose *through* an obstacle needs filtering out.
         """
         request_id, t0 = self._new_request()
         s = self.session
@@ -603,10 +749,18 @@ class Toolbox:
         import jaxlie
         from pyroffi.optimization_engines._ls_ik import ls_ik_solve
 
-        key = f"ik_batch:{n_padded}:{num_seeds}:{max_iter}:{link}"
+        pools = tuple(s.world_geoms()) if collision_free else ()
+        key = (
+            f"ik_batch:{n_padded}:{num_seeds}:{max_iter}:{link}:{collision_free}"
+        )
 
         def build():
-            def one(pose_vec, prev_cfg, rng):
+            constraint_fns = (self._collision_constraint(),) if collision_free else ()
+            weights = (
+                s.as_array([collision_weight]) if collision_free else None
+            )
+
+            def one(pose_vec, prev_cfg, rng, *pool_args):
                 return ls_ik_solve(
                     s.robot,
                     (link_idx,),
@@ -615,17 +769,34 @@ class Toolbox:
                     prev_cfg,
                     num_seeds=num_seeds,
                     max_iter=max_iter,
+                    constraint_fns=constraint_fns,
+                    constraint_args=pool_args,
+                    constraint_weights=weights,
                 )
 
-            return jax.jit(jax.vmap(one, in_axes=(0, 0, 0)))
+            # The pools are arguments with ``in_axes=None``, not a closure: the
+            # scene is shared by every target, and closing over it would bake
+            # obstacle positions into the compiled program, so moving a block
+            # would silently plan against where it used to be.
+            return jax.jit(
+                jax.vmap(one, in_axes=(0, 0, 0) + (None,) * len(pools))
+            )
 
         fn, compiled = s.jitted(key, build)
 
         keys = jax.random.split(jax.random.PRNGKey(int(seed)), n_padded)
         prev = np.tile(np.asarray(seed_cfg, dtype=np.float64), (n_padded, 1))
         cfgs = np.asarray(
-            fn(s.as_array(stacked), s.as_array(prev), keys), dtype=np.float64
+            fn(s.as_array(stacked), s.as_array(prev), keys, *pools), dtype=np.float64
         )[:n]
+
+        clearances: list[float] | None = None
+        if collision_free:
+            self_d, world_d, _ = self._distances(cfgs)
+            clearances = [
+                self._min_clearance(self_d[i], [d[i] for d in world_d])
+                for i in range(n)
+            ]
 
         results = []
         n_converged = 0
@@ -646,15 +817,17 @@ class Toolbox:
                     "pos_error_m": pos_err,
                 },
             )
-            results.append(
-                {
-                    "target_index": i,
-                    "config_id": entry.handle,
-                    "converged": bool(ok),
-                    "pos_error_m": round(pos_err, 8),
-                    "rot_error_rad": round(rot_err, 8),
-                }
-            )
+            result = {
+                "target_index": i,
+                "config_id": entry.handle,
+                "converged": bool(ok),
+                "pos_error_m": round(pos_err, 8),
+                "rot_error_rad": round(rot_err, 8),
+            }
+            if clearances is not None:
+                result["min_clearance_m"] = round(clearances[i], 6)
+                result["in_collision"] = bool(clearances[i] < 0.0)
+            results.append(result)
 
         if n_converged == 0:
             self._record_failure(
@@ -675,6 +848,7 @@ class Toolbox:
             success=n_converged > 0,
             solver="ls",
             link=link,
+            collision_free=collision_free,
             n_targets=n,
             n_padded=n_padded,
             n_converged=n_converged,
@@ -705,6 +879,7 @@ class Toolbox:
             rot_tolerance=rot_tolerance,
         )
         self.session.handles.drop(res["config_id"])
+        self._inherit_failure(request_id, res["request_id"])
         return self._envelope(
             request_id,
             t0,
@@ -1190,6 +1365,13 @@ class Toolbox:
         res = self.optimize_path(
             [ex.joint_dict(row, s.joint_names) for row in seed_path],
             **optimize_kwargs,
+        )
+        # The envelope's request_id is rewritten to this call's, so the inner
+        # ids have to be forwarded first or the failure record is orphaned
+        # behind an id the caller never receives. Trajopt's own failure wins
+        # over an endpoint IK failure: it is the later, more specific one.
+        self._inherit_failure(
+            request_id, res["request_id"], *[r["request_id"] for r in ik_ids]
         )
         res["request_id"] = request_id
         res["solve_ms"] = round((time.perf_counter() - t0) * 1000.0, 3)

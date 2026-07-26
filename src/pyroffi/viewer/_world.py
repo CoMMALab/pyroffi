@@ -159,6 +159,10 @@ class ToolboxSource:
         "capsule": (150, 200, 160),
         "halfspace": (120, 120, 120),
     }
+    _ATTACHED_COLOR = (230, 190, 110)
+    """Carried objects get their own colour. An attached object has left the
+    world pool and moves with a link, so drawing it identically to an obstacle
+    would hide the single most useful thing about the picture."""
 
     def __init__(self, session, config: np.ndarray | None = None) -> None:
         self.session = session
@@ -184,6 +188,18 @@ class ToolboxSource:
                     color=self._COLORS.get(obj.shape, (180, 180, 190)),
                 )
             )
+        # Carried objects are no longer in the scene pool, so without this they
+        # would simply disappear from the render the moment they were grasped --
+        # exactly when you most want to see where they are.
+        for name, meta in getattr(self.session, "_attachment_meta", {}).items():
+            objects.append(
+                ObjectGeometry(
+                    name=name,
+                    shape=meta["shape"],
+                    params=dict(meta["params"]),
+                    color=self._ATTACHED_COLOR,
+                )
+            )
         return WorldDescription(
             robot_urdf=self.session.urdf,
             joint_names=tuple(self.session.joint_names),
@@ -193,17 +209,49 @@ class ToolboxSource:
 
     def read(self) -> WorldState:
         s = self.session
+        poses = {
+            o.name: Pose.of(o.position, o.wxyz)
+            for o in s.scene.objects()
+            if o.shape != "halfspace"
+        }
+        poses.update(self._attached_poses())
         return WorldState(
             joint_values={
                 n: float(v) for n, v in zip(s.joint_names, self.config)
             },
-            object_poses={
-                o.name: Pose.of(o.position, o.wxyz)
-                for o in s.scene.objects()
-                if o.shape != "halfspace"
+            object_poses=poses,
+            extras={
+                "scene_version": s.scene.version,
+                "source": "toolbox",
+                "attached": list(getattr(s, "_attachment_meta", {})),
             },
-            extras={"scene_version": s.scene.version, "source": "toolbox"},
         )
+
+    def _attached_poses(self) -> dict[str, "Pose"]:
+        """World poses of carried objects at the rendered configuration.
+
+        ``T_WB = T_WL(cfg) . T_LB`` -- the same composition the collision and
+        dynamics paths use, so the picture cannot drift from what was planned
+        against.
+        """
+        s = self.session
+        attachments = getattr(s, "attachments", ())
+        if not len(attachments):
+            return {}
+        import jax.numpy as jnp
+        import jaxlie
+
+        Ts = np.asarray(s.robot.forward_kinematics(s.as_array(self.config)))
+        out: dict[str, Pose] = {}
+        for a in attachments:
+            T = jaxlie.SE3(jnp.asarray(Ts[a.parent_link_index])) @ jaxlie.SE3(
+                a.T_parent_body
+            )
+            out[a.name] = Pose.of(
+                np.asarray(T.translation(), dtype=np.float64),
+                np.asarray(T.rotation().wxyz, dtype=np.float64),
+            )
+        return out
 
 
 class MuJoCoSource:

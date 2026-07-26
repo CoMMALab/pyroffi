@@ -21,13 +21,29 @@ actually happened".
 
 ```bash
 nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
-pyroffi-mcp --gpu 1 --robot panda_spherized --max-objects 8 --warmup
+python pyroffi_endpoint.py serve --gpu 1        # persistent, problem-agnostic
 pyroffi-sandbox --task examples/tasks/block_stacking_panda.json --variant wall
 ```
 
-`python examples/17_00_block_stacking_sandbox.py --mcp-config` prints the client
-entry wiring both at once. The sandbox prints a viser URL — **open it**, because
+`python pyroffi_endpoint.py config --gpu 1 [--sandbox-task <task.json>]` prints
+the client entry. The sandbox prints a viser URL — **open it**, because
 `render()` captures through a connected client and fails without one.
+
+The two servers do not share a lifetime. `pyroffi-mcp` is started once and kept
+across problems: its cost is all in the first call (tens of seconds of XLA
+compilation, milliseconds thereafter), so restarting it per problem throws away
+the only thing that makes it fast. The sandbox is one world for one problem and
+dies with it.
+
+That only works if the planning scene is emptied between problems, since a scene
+left behind by a dead problem is invisible to the next one and silently makes
+its paths invalid. `reset_scene` is the operation: it drops every obstacle,
+detaches everything, invalidates all handles and returns the robot to its
+default configuration, while keeping the compiled functions (`create_scene`
+rebuilds the session and does not). Call it at *both* ends of a problem — on
+connect, in case the last one never got to clean up, and on finish. Example 17
+does this in a `finally` around the whole problem, including on Ctrl-C and
+SIGTERM; an agent driving the endpoint over MCP calls the tool itself.
 
 ## Tools
 
@@ -78,22 +94,44 @@ written defensively.
 **Closing the gripper is a command, not an outcome.** `set_gripper("close")`
 reports `success: false` when it closed on nothing.
 
-## Two traps the task is built around
+## Picking things up
 
-Both are real gaps in the toolbox, stated rather than designed around.
+`attach_object` / `detach_object` move an object between the world and the
+robot's body, so a carried block is checked by every collision primitive —
+`validate_path` on a transfer reports the payload by name, alongside the robot's
+own links. The round trip is exact (1e-8 m), and an object is never both an
+obstacle and part of the robot.
 
-**1. The block you are picking up is not an obstacle to picking it up.** The
-planning server has no `attach_object`/`detach_object`, so scene bookkeeping is
-the orchestrator's job: `remove_object` before descending onto a grasp, and
-`add_object` at the new pose after releasing. Skipping this makes trajopt swerve
-away from the very thing you are reaching for — in testing it knocked the block
-aside and the gripper closed on air. A grasp pose is *supposed* to end in
-contact, which is also why the final descent should not be run through
-`optimize_path` at all.
+The pick sequence that works:
 
-**2. `validate_path` checks the robot, not the payload.** The server does not
-know a block is in the gripper, so a transfer that sweeps the held cube through
-the divider validates clean. The agent has to check the carried object itself.
+1. **Approach** with `optimize_path` — normal obstacle avoidance.
+2. **Descend unoptimized.** A grasp pose ends in contact by definition, so
+   trajopt would swerve away from the block you are reaching for. In testing it
+   knocked the block aside and the gripper closed on air. Expect
+   `validate_path` to report hand-vs-block contact here; that *is* the grasp.
+3. `set_gripper("close")`, check it actually caught something.
+4. `set_robot_state` to the grasp config, then `attach_object(name,
+   ignore_objects=["ground"])`. The target must still be in the scene — attach
+   moves it *from* the world, so removing it first makes it unpickable.
+5. **Transfer and place**, then `detach_object` to put it back in the world
+   where the robot is holding it.
+
+Two things to know:
+
+- **Attachment geometry is a conservative bounding sphere**, and it is wider
+  than the object is tall. A 5 cm cube becomes radius 0.0433 (its half-diagonal)
+  against a half-height of 0.025, so a block still resting on the table reports
+  ~18 mm of ground penetration the moment it is attached, and every legitimate
+  lift-off would validate as invalid at its first waypoint. The
+  over-approximation itself is deliberate — it never lets a carried object pass
+  through an obstacle — but an agent cannot tell that noise apart from a real
+  fault, so name the supporting surface in `ignore_objects` and the pair is
+  muted. It is muted per *(carried object, obstacle)*: the block's other
+  collisions still report, and so do the robot's own collisions with the
+  ground.
+- **Attaching is a topology change**, so it invalidates the jit cache for
+  anything reducing over the collision array: a handful of recompiles per plan,
+  not per state.
 
 ## The task
 

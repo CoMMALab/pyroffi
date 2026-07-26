@@ -206,6 +206,102 @@ TOOLS: tuple[ToolSpec, ...] = (
         method="remove_object",
     ),
     ToolSpec(
+        name="reset_scene",
+        description=(
+            "Wipe the problem and keep the server warm: every obstacle removed, "
+            "everything detached, all handles invalidated, robot back at its default "
+            "configuration. NEARLY FREE — unlike create_scene it keeps the compiled "
+            "functions, so nothing pays the cold-start compile again (it does "
+            "recompile once if something was attached). Call this when starting a new "
+            "problem on a long-lived server, and when finishing one: a scene left "
+            "behind is invisible to the next task and silently makes its paths "
+            "invalid. The ground plane is kept by default — it belongs to the world, "
+            "not to the problem."
+        ),
+        input_schema=_obj(
+            {
+                "keep_ground_plane": {
+                    "type": "boolean",
+                    "description": "Keep the 'ground' halfspace. Default true; pass "
+                                   "false only for a genuinely floorless problem.",
+                }
+            }
+        ),
+        method="reset_scene",
+    ),
+    ToolSpec(
+        name="attach_object",
+        description=(
+            "Grasp a scene object: it stops being a world obstacle and starts moving "
+            "with a robot link, so every later collision check accounts for what the "
+            "robot is carrying. Use this the moment a pick succeeds. NOT free (~1 "
+            "recompile, seconds): a carried object lengthens the robot's collision "
+            "array, unlike add_object where obstacle count is padded. Pass "
+            "ignore_links with the gripper finger links, or the fingers will report a "
+            "collision with the object they are holding. Collision geometry is the "
+            "object's bounding sphere — conservative, so it can refuse a tight plan "
+            "but never lets a carried object pass through an obstacle. That sphere is "
+            "wider than the object is tall (a 5 cm cube gets radius 0.0433), so it "
+            "overlaps whatever the object was resting on: pass that surface in "
+            "ignore_objects or every lift-off validates as invalid."
+        ),
+        input_schema=_obj(
+            {
+                "name": {
+                    "type": "string",
+                    "description": "Name of an existing scene object.",
+                },
+                "link": {
+                    "type": "string",
+                    "description": "Link that carries it. Defaults to the end effector.",
+                },
+                "ignore_links": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Links allowed to touch it (the gripper fingers).",
+                },
+                "ignore_objects": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "World obstacles this carried object may overlap — "
+                                   "normally the surface it was picked up from.",
+                },
+                "mass": {
+                    "type": "number",
+                    "description": (
+                        "Object mass in kg. Optional: scene objects carry no mass, so "
+                        "without it the attachment is collision-only. Supply it to "
+                        "also load the robot's dynamics, so torque limits account for "
+                        "what is being carried."
+                    ),
+                },
+            },
+            required=["name"],
+        ),
+        method="attach_object",
+    ),
+    ToolSpec(
+        name="detach_object",
+        description=(
+            "Release a carried object back into the world at wherever the robot is "
+            "currently holding it — the exact inverse of attach_object. Use this the "
+            "moment a place succeeds, so the object becomes an obstacle again. NOT "
+            "free (~1 recompile, seconds)."
+        ),
+        input_schema=_obj({"name": {"type": "string"}}, required=["name"]),
+        method="detach_object",
+    ),
+    ToolSpec(
+        name="list_attachments",
+        description=(
+            "List objects the robot is currently carrying, with the link and grasp "
+            "transform for each. FREE. Worth checking before diagnosing a surprising "
+            "collision result — a forgotten attachment explains most of them."
+        ),
+        input_schema=_obj({}),
+        method="list_attachments",
+    ),
+    ToolSpec(
         name="list_objects",
         description=(
             "List scene objects with poses and the current scene_version. FREE — call "
@@ -261,7 +357,7 @@ TOOLS: tuple[ToolSpec, ...] = (
             "success is real information, so read restarts_converged rather than "
             "just success. Set collision_free=true to fold the scene into the solve. "
             "'solver' is your choice and is never overridden. For more than one "
-            "target, use solve_ik_batch instead: it is barely more expensive than one."
+            "target, use solve_ik_batch instead: 8 targets cost ~2.5x one, not 8x."
         ),
         input_schema=_obj(
             {
@@ -304,13 +400,22 @@ TOOLS: tuple[ToolSpec, ...] = (
             "per-target cost falls from ~160 ms to ~40 ms. PREFER THIS over repeated "
             "solve_ik whenever you are enumerating candidate grasps, placements or "
             "approach poses. Returns one config handle per target, with per-target "
-            "convergence so you can see which candidates are actually viable."
+            "convergence so you can see which candidates are actually viable. "
+            "Set collision_free=true to also get min_clearance_m and in_collision "
+            "per target, which is how you drop a grasp that reaches the pose "
+            "through an obstacle."
         ),
         input_schema=_obj(
             {
                 "targets": {"type": "array", "items": _POSE_SCHEMA, "minItems": 1},
                 "link": {"type": "string"},
                 "num_seeds": {"type": "integer"},
+                "max_iter": {
+                    "type": "integer",
+                    "description": "LM iterations per seed (default 60). Raise for "
+                                   "targets near the workspace boundary.",
+                },
+                "collision_free": {"type": "boolean"},
                 "seed_config": _CONFIG_SCHEMA,
                 "pos_tolerance": {"type": "number"},
                 "rot_tolerance": {"type": "number"},

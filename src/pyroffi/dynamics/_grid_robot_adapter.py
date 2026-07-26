@@ -1,21 +1,25 @@
 """Translate a yourdfpy-parsed URDF into a GRiD ``Robot`` object.
 
-The robot-acceleration URDFParser re-parses the URDF XML with BeautifulSoup;
-instead we populate its ``Robot``/``Link``/``Joint`` object model — vendored into
+The A2R-Lab URDFParser re-parses the URDF XML with BeautifulSoup; instead we
+populate its ``Robot``/``Link``/``Joint`` object model — vendored into
 :mod:`pyroffi.dynamics._grid_urdf` so pyroffi carries no external ``URDFParser``
 dependency — directly from the yourdfpy model pyroffi already loaded, then reuse
 the vendored post-processing pipeline (fixed-joint elimination, DFS renumbering,
-subtree lists) untouched.  ``GRiDCodeGenerator`` (kept external) consumes the
-resulting ``Robot`` object unchanged.
+subtree lists) untouched.  ``grid_codegen.GRiDCodeGenerator`` (kept external in
+``external/GRiD``) consumes the resulting ``Robot`` object unchanged.
 
-Two impedance mismatches are handled here rather than by modifying GRiD:
+One impedance mismatch is handled here rather than by modifying GRiD: GRiD
+ignores the ``<inertial>`` origin rotation, so we rotate the inertia tensor into
+link axes before handing it over.
 
-* GRiD only supports joint axes that are *positive* unit coordinate axes.
-  Joints with negated axes (e.g. ``0 -1 0``) are mapped to the positive axis
-  with a per-joint sign flip recorded in ``axis_signs``; callers must negate
-  ``q/qd/qdd/u`` entering GRiD and results leaving it for those joints.
-* GRiD ignores the ``<inertial>`` origin rotation; we rotate the inertia
-  tensor into link axes before handing it over.
+Note on joint axes: the older robot-acceleration URDFParser only supported
+*positive* unit coordinate axes, so this adapter used to canonicalize the axis
+and carry a per-joint sign flip (``axis_signs``) that callers had to undo on
+``q/qd/qdd/u``.  The A2R-Lab parser handles signed cardinal axes natively
+(``Joint.set_type`` picks the ±1 ``axis_scale``, byte-identically to the old
+emit) *and* general skew axes via a Rodrigues frame rotation, so the axis is now
+passed through verbatim.  ``axis_signs`` is retained as an all-ones vector so the
+downstream permutation code keeps a uniform shape.
 """
 
 from __future__ import annotations
@@ -54,8 +58,14 @@ def _rpy_from_matrix(R: onp.ndarray) -> list[float]:
     return [float(v) for v in Rotation.from_matrix(R).as_euler("xyz")]
 
 
-def _canonical_axis(axis: onp.ndarray, joint_name: str) -> tuple[list[float], float]:
-    """Return (positive unit coordinate axis, sign) or raise."""
+def _unit_axis(axis: onp.ndarray, joint_name: str) -> list[float]:
+    """Normalize a URDF joint axis, snapping near-cardinal axes to exactly ±1.
+
+    The snap matters: the parser's cardinal/skew tier choice is an exact
+    comparison, and a URDF axis written as ``0 0 0.9999999`` would otherwise
+    drop the joint into the general (skew) Rodrigues path and change the
+    generated kernel for what is really a z-axis joint.
+    """
     axis = onp.asarray(axis, dtype=onp.float64)
     norm = onp.linalg.norm(axis)
     if norm == 0:
@@ -64,18 +74,11 @@ def _canonical_axis(axis: onp.ndarray, joint_name: str) -> tuple[list[float], fl
         )
     axis = axis / norm
     idx = int(onp.argmax(onp.abs(axis)))
-    unit = onp.zeros(3)
-    unit[idx] = onp.sign(axis[idx])
-    if not onp.allclose(axis, unit, atol=1e-8):
-        raise NotImplementedError(
-            f"GRiD dynamics: joint '{joint_name}' axis {axis.tolist()} is not "
-            "aligned with a coordinate axis, which GRiDCodeGenerator does not "
-            "support."
-        )
-    sign = float(onp.sign(axis[idx]))
-    positive_axis = [0.0, 0.0, 0.0]
-    positive_axis[idx] = 1.0
-    return positive_axis, sign
+    cardinal = onp.zeros(3)
+    cardinal[idx] = onp.sign(axis[idx])
+    if onp.allclose(axis, cardinal, atol=1e-8):
+        return [float(v) for v in cardinal]
+    return [float(v) for v in axis]
 
 
 def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
@@ -95,6 +98,10 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
             grid_link.set_origin_xyz([0.0, 0.0, 0.0])
             grid_link.set_origin_rpy([0.0, 0.0, 0.0])
             grid_link.set_inertia(0, 0, 0, 0, 0, 0, 0)
+            # Upstream's strict-inertial validation distinguishes a genuinely
+            # massless frame from a real body with a broken <inertial>; keep
+            # that signal rather than silently presenting a zeroed body.
+            grid_link.missing_inertial = True
         else:
             T = inertial.origin if inertial.origin is not None else onp.eye(4)
             R, com = T[:3, :3], T[:3, 3]
@@ -116,8 +123,7 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
             )
         robot.add_link(grid_link)
 
-    # --- Joints (axis normalization + sign bookkeeping). --------------------
-    sign_by_name: dict[str, float] = {}
+    # --- Joints. ------------------------------------------------------------
     for jid, joint in enumerate(urdf.joint_map.values()):
         grid_joint = GRiDJoint(joint.name, jid, joint.parent, joint.child)
         T = joint.origin if joint.origin is not None else onp.eye(4)
@@ -128,9 +134,7 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
         if jtype == "continuous":
             jtype = "revolute"
         if jtype in ("revolute", "prismatic"):
-            axis, sign = _canonical_axis(joint.axis, joint.name)
-            sign_by_name[joint.name] = sign
-            grid_joint.set_type(jtype, axis)
+            grid_joint.set_type(jtype, _unit_axis(joint.axis, joint.name))
         elif jtype == "fixed":
             grid_joint.set_type("fixed")
         else:
@@ -139,13 +143,21 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
                 f"(joint '{joint.name}')."
             )
 
-        damping = 0.0
-        if joint.dynamics is not None and joint.dynamics.damping is not None:
-            damping = float(joint.dynamics.damping)
+        damping = friction = 0.0
+        if joint.dynamics is not None:
+            if joint.dynamics.damping is not None:
+                damping = float(joint.dynamics.damping)
+            if joint.dynamics.friction is not None:
+                friction = float(joint.dynamics.friction)
         grid_joint.set_damping(damping)
+        grid_joint.set_friction(friction)
         robot.add_joint(grid_joint)
 
     # --- Reuse the vendored URDFParser post-processing pipeline. ------------
+    # urdf_order (not the upstream "pinocchio_order" default) preserves the
+    # joint numbering pyroffi's cached kernels were generated against; the
+    # actuated-order permutation below is computed by name either way, so this
+    # is about kernel-cache stability rather than correctness.
     renumber_links_joints(robot, alpha_tie_breaker=False)
 
     # --- Joint ordering map (GRiD DFS order -> pyroffi actuated order). -----
@@ -158,7 +170,9 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
             "are not supported."
         )
     joint_perm = onp.array([act_names.index(n) for n in grid_names], dtype=onp.int32)
-    axis_signs = onp.array([sign_by_name[n] for n in grid_names])
+    # Signed/skew axes are now modelled natively by the parser (see module
+    # docstring), so no sign correction is ever needed.
+    axis_signs = onp.ones(len(grid_names))
 
     n = robot.get_num_pos()
     assert n == len(act_names), (n, act_names)

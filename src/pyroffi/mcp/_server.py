@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from typing import Any
 
 from loguru import logger
@@ -32,17 +33,58 @@ class PyroffiServer:
     genuinely server-level (session lifecycle).
     """
 
-    def __init__(self, **session_kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        process_config: dict[str, Any] | None = None,
+        warmup: bool = False,
+        warmup_trajopt: bool = True,
+        **session_kwargs: Any,
+    ) -> None:
         self._session_kwargs = dict(session_kwargs)
-        self.session = None
-        self.toolbox = None
-        self._build()
+        self._process_config = dict(process_config or {})
+        self._warmup = warmup
+        self._warmup_trajopt = warmup_trajopt
+        self._ready = False
+        self._lock = threading.Lock()
+        self._session = None
+        self._toolbox = None
+
+    # Construction is deferred to the first tool call. Importing JAX, building
+    # the session and compiling take far longer than the MCP client's
+    # initialisation timeout, so the process must reach the stdio loop first and
+    # pay that cost inside a call, where the client is willing to wait.
+    def ensure_ready(self) -> None:
+        with self._lock:
+            if self._ready:
+                return
+            if self._process_config:
+                from pyroffi.toolbox import configure_process
+
+                applied = configure_process(**self._process_config)
+                logger.info(f"process configuration: {applied}")
+            self._build()
+            self._ready = True
+            if self._warmup:
+                logger.info("warming up (this is the compile cost, paid on purpose) ...")
+                result = self._toolbox.warmup(include_trajopt=self._warmup_trajopt)
+                logger.info(f"warmup finished in {result['total_seconds']}s")
+
+    @property
+    def session(self):
+        self.ensure_ready()
+        return self._session
+
+    @property
+    def toolbox(self):
+        self.ensure_ready()
+        return self._toolbox
 
     def _build(self) -> None:
         from pyroffi.toolbox import Session, Toolbox
 
-        self.session = Session(**self._session_kwargs)
-        self.toolbox = Toolbox(self.session)
+        self._session = Session(**self._session_kwargs)
+        self._toolbox = Toolbox(self._session)
 
     def recreate_session(
         self,
@@ -56,7 +98,8 @@ class PyroffiServer:
         Device and precision are process-level (they must be pinned before JAX
         initialises its backend) and are deliberately not settable here.
         """
-        old = self.session
+        self.ensure_ready()
+        old = self._session
         for key, value in (
             ("robot", robot),
             ("max_objects", max_objects),
@@ -68,7 +111,7 @@ class PyroffiServer:
         if old is not None:
             old.close()
         self._build()
-        result = self.toolbox.create_scene_info()
+        result = self._toolbox.create_scene_info()
         result["handles_invalidated"] = True
         result["note"] = (
             "all previous config/path handles are gone; gpu and x64 are fixed for "
@@ -78,7 +121,10 @@ class PyroffiServer:
 
     def __getattr__(self, name: str) -> Any:
         # Only reached for attributes this class does not define itself.
-        toolbox = self.__dict__.get("toolbox")
+        if name.startswith("_"):
+            raise AttributeError(name)
+        self.ensure_ready()
+        toolbox = self.__dict__.get("_toolbox")
         if toolbox is None:
             raise AttributeError(name)
         return getattr(toolbox, name)
@@ -91,6 +137,7 @@ class PyroffiServer:
         loses the session.
         """
         try:
+            self.ensure_ready()
             return dispatch(self, name, arguments or {})
         except Exception as exc:
             logger.exception(f"tool {name} failed")
@@ -113,17 +160,13 @@ def _default_session_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_server(args: argparse.Namespace) -> PyroffiServer:
-    """Pin the process, then build the warm session."""
-    from pyroffi.toolbox import configure_process
-
-    applied = configure_process(gpu=args.gpu, x64=not args.float32)
-    logger.info(f"process configuration: {applied}")
-    server = PyroffiServer(**_default_session_kwargs(args))
-    if args.warmup:
-        logger.info("warming up (this is the compile cost, paid on purpose) ...")
-        result = server.toolbox.warmup(include_trajopt=not args.no_trajopt_warmup)
-        logger.info(f"warmup finished in {result['total_seconds']}s")
-    return server
+    """Describe the session; nothing heavy happens until the first tool call."""
+    return PyroffiServer(
+        process_config={"gpu": args.gpu, "x64": not args.float32},
+        warmup=args.warmup,
+        warmup_trajopt=not args.no_trajopt_warmup,
+        **_default_session_kwargs(args),
+    )
 
 
 async def serve_stdio(server: PyroffiServer) -> None:
@@ -188,7 +231,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--warmup",
         action="store_true",
-        help="Compile everything before serving, so no client call pays it.",
+        help="Compile everything as part of the first tool call, so later calls "
+             "do not pay it piecemeal. Cannot happen before serving: the client's "
+             "initialisation timeout is far shorter than the compile.",
     )
     parser.add_argument("--no-trajopt-warmup", action="store_true")
     return parser.parse_args(argv)
@@ -204,8 +249,9 @@ def main(argv: list[str] | None = None) -> None:
 
     server = build_server(args)
     logger.info(
-        f"pyroffi-mcp ready: {len(list_tool_payloads())} tools, "
-        f"robot={args.robot}, device={server.session.device}"
+        f"pyroffi-mcp serving: {len(list_tool_payloads())} tools, robot={args.robot}; "
+        f"session builds on the first tool call"
+        + (" (with warmup)" if args.warmup else "")
     )
     asyncio.run(serve_stdio(server))
 

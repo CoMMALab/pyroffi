@@ -2,14 +2,25 @@
 //
 // This translation unit is compiled at runtime (per robot) by
 // pyroffi.dynamics._grid_codegen: a robot-specific "grid.cuh" emitted by
-// GRiDCodeGenerator is placed next to this file and nvcc builds the pair
-// into a shared library, which is then registered as a set of JAX FFI
-// targets (one .so per robot; symbol names below are constant, the Python
-// side namespaces the *target* names).
+// grid_codegen.GRiDCodeGenerator (A2R-Lab/GRiD) is placed next to this file
+// and nvcc builds the pair into a shared library, which is then registered as
+// a set of JAX FFI targets (one .so per robot; symbol names below are
+// constant, the Python side namespaces the *target* names).
 //
 // The generated __global__ kernels are launched directly on the XLA stream;
 // GRiD's __host__ wrappers are bypassed because they perform their own
 // host<->device transfers and synchronization, which XLA already manages.
+// What we do copy from those wrappers is the *launch contract*, which the
+// A2R-Lab fork changed in three ways:
+//
+//   * dynamic shared memory is now sized by the per-algo
+//     <ALGO>_DYNAMIC_SHARED_MEM_BYTES<T>() helper (a packed arena that also
+//     covers the linalg-helper scratch), not a bare float count;
+//   * every kernel except inverse_dynamics takes a global spill workspace
+//     (`unsigned char *d_workspace`), sized GRID_WORKSPACE_BYTES_PER_TIMESTEP
+//     * GRID_WORKSPACE_SLOTS per timestep;
+//   * the dynamics kernels take a `T *d_f_ext` external-wrench buffer, which
+//     pyroffi passes as nullptr (no external wrenches on the GRiD path yet).
 //
 // Batch mapping: the JAX batch dimension B is GRiD's NUM_TIMESTEPS. Inputs
 // arrive as separate (B, n) buffers and are interleaved into GRiD's
@@ -46,16 +57,18 @@ grid::robotModel<T>* GetRobotModel() {
   grid::robotModel<T>* model = grid::init_robotModel<T>();
   // Allow the gradient kernels to exceed the default dynamic shared memory
   // limit on large robots (replicates grid::init_grid's cudaFuncSetAttribute
-  // calls for the kernel instantiations used here).
-  void (*id_du_kern)(T*, const T*, int, const T*, const grid::robotModel<T>*,
-                     const T, const int) =
+  // calls for the kernel instantiations used here). The overload set is
+  // disambiguated by taking the address through an exactly-typed pointer.
+  void (*id_du_kern)(T*, unsigned char*, const T*, int, const T*, T*,
+                     const grid::robotModel<T>*, const T, const int) =
       &grid::inverse_dynamics_gradient_kernel<T>;
-  void (*fd_du_kern)(T*, const T*, int, const grid::robotModel<T>*, const T,
-                     const int) = &grid::forward_dynamics_gradient_kernel<T>;
+  void (*fd_du_kern)(T*, unsigned char*, const T*, int, T*,
+                     const grid::robotModel<T>*, const T, const int) =
+      &grid::forward_dynamics_gradient_kernel<T>;
   cudaFuncSetAttribute(id_du_kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       grid::ID_DU_MAX_SHARED_MEM_COUNT * sizeof(T));
+                       grid::INVERSE_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>());
   cudaFuncSetAttribute(fd_du_kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       grid::FD_DU_MAX_SHARED_MEM_COUNT * sizeof(T));
+                       grid::FORWARD_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>());
   models[device] = model;
   return model;
 }
@@ -88,7 +101,7 @@ inline dim3 GridDims(int batch) {
 }
 
 inline dim3 ThreadDims() {
-  return dim3(static_cast<unsigned>(grid::SUGGESTED_THREADS), 1, 1);
+  return dim3(static_cast<unsigned>(grid::MAX_PERF_LEVEL_THREADS), 1, 1);
 }
 
 inline int PackBlocks(int total) { return (total + 255) / 256; }
@@ -119,6 +132,26 @@ struct ScratchBuffer {
     stream = s;
     return cudaMallocAsync(reinterpret_cast<void**>(&ptr), count * sizeof(T),
                            s);
+  }
+};
+
+// The global spill workspace every non-inverse_dynamics kernel now takes.
+// Sized exactly as grid::init_gridData does. It is scratch: the kernels only
+// use it to spill what does not fit in the shared arena at the chosen resource
+// tier, so a stream-ordered per-call allocation is correct (and at TIER_SHARED
+// several kernels never touch it at all).
+struct WorkspaceBuffer {
+  unsigned char* ptr = nullptr;
+  cudaStream_t stream = nullptr;
+  ~WorkspaceBuffer() {
+    if (ptr != nullptr) cudaFreeAsync(ptr, stream);
+  }
+  cudaError_t Alloc(int64_t batch, cudaStream_t s) {
+    stream = s;
+    const size_t bytes = grid::GRID_WORKSPACE_BYTES_PER_TIMESTEP<T>() *
+                         GRID_WORKSPACE_SLOTS * static_cast<size_t>(batch);
+    if (bytes == 0) return cudaSuccess;
+    return cudaMallocAsync(reinterpret_cast<void**>(&ptr), bytes, s);
   }
 };
 
@@ -153,15 +186,17 @@ __device__ void LoadXImats(U* s_XImats, const U* s_q, int* /*s_top*/,
   grid::load_update_XImats_helpers<U>(s_XImats, s_q, m, s_temp);
 }
 
+// d_f_ext is passed as nullptr throughout: the CRBA assembly below is a pure
+// M(q) column sweep, which carries no external wrench by construction.
 template <typename U>
 __device__ auto IdInner(U* s_c, U* s_vaf, const U* s_q, const U* s_qd,
                         const U* s_qdd, U* s_XImats, int* s_top, U* s_temp,
                         const U gravity, int)
     -> decltype(grid::inverse_dynamics_inner<U>(s_c, s_vaf, s_q, s_qd, s_qdd,
                                                 s_XImats, s_top, s_temp,
-                                                gravity)) {
+                                                nullptr, gravity)) {
   grid::inverse_dynamics_inner<U>(s_c, s_vaf, s_q, s_qd, s_qdd, s_XImats,
-                                  s_top, s_temp, gravity);
+                                  s_top, s_temp, nullptr, gravity);
 }
 
 template <typename U>
@@ -169,7 +204,7 @@ __device__ void IdInner(U* s_c, U* s_vaf, const U* s_q, const U* s_qd,
                         const U* s_qdd, U* s_XImats, int* /*s_top*/, U* s_temp,
                         const U gravity, long) {
   grid::inverse_dynamics_inner<U>(s_c, s_vaf, s_q, s_qd, s_qdd, s_XImats,
-                                  s_temp, gravity);
+                                  s_temp, nullptr, gravity);
 }
 
 __global__ void CrbaKernel(T* d_M, const T* d_q,
@@ -236,9 +271,9 @@ ffi::Error GridIdImpl(cudaStream_t stream, float gravity,
       q_qd.ptr, q.typed_data(), qd.typed_data(), kNq, batch);
   grid::inverse_dynamics_kernel<T>
       <<<GridDims(batch), ThreadDims(),
-         grid::ID_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
-          c->typed_data(), q_qd.ptr, 2 * kNq, qdd.typed_data(), model, gravity,
-          batch);
+         grid::INVERSE_DYNAMICS_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
+          c->typed_data(), q_qd.ptr, 2 * kNq, qdd.typed_data(),
+          /*d_f_ext=*/nullptr, model, gravity, batch);
   return CudaCheck(cudaGetLastError(), "inverse_dynamics_kernel");
 }
 
@@ -259,10 +294,14 @@ ffi::Error GridFdImpl(cudaStream_t stream, float gravity,
     return CudaCheck(st, "cudaMallocAsync(q_qd_u)");
   Pack3Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd_u.ptr, q.typed_data(), qd.typed_data(), u.typed_data(), kNq, batch);
+  WorkspaceBuffer ws;
+  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
+    return CudaCheck(st, "cudaMallocAsync(workspace)");
   grid::forward_dynamics_kernel<T>
       <<<GridDims(batch), ThreadDims(),
-         grid::FD_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
-          qdd->typed_data(), q_qd_u.ptr, 3 * kNq, model, gravity, batch);
+         grid::FORWARD_DYNAMICS_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
+          qdd->typed_data(), ws.ptr, q_qd_u.ptr, 3 * kNq, /*d_f_ext=*/nullptr,
+          model, gravity, batch);
   return CudaCheck(cudaGetLastError(), "forward_dynamics_kernel");
 }
 
@@ -276,11 +315,14 @@ ffi::Error GridMinvImpl(cudaStream_t stream,
     return err;
   grid::robotModel<T>* model = GetRobotModel();
 
-  grid::direct_minv_kernel<T>
+  WorkspaceBuffer ws;
+  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
+    return CudaCheck(st, "cudaMallocAsync(workspace)");
+  grid::minv_kernel<T>
       <<<GridDims(batch), ThreadDims(),
-         grid::MINV_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
-          minv->typed_data(), q.typed_data(), kNq, model, batch);
-  return CudaCheck(cudaGetLastError(), "direct_minv_kernel");
+         grid::MINV_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
+          minv->typed_data(), ws.ptr, q.typed_data(), kNq, model, batch);
+  return CudaCheck(cudaGetLastError(), "minv_kernel");
 }
 
 // Mass matrix M(q): q -> (B, n, n), [t, col, row] fully populated.
@@ -294,7 +336,7 @@ ffi::Error GridCrbaImpl(cudaStream_t stream,
   grid::robotModel<T>* model = GetRobotModel();
 
   CrbaKernel<<<GridDims(batch), ThreadDims(),
-               grid::ID_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
+               grid::INVERSE_DYNAMICS_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
       m->typed_data(), q.typed_data(), model, batch);
   return CudaCheck(cudaGetLastError(), "CrbaKernel");
 }
@@ -317,11 +359,15 @@ ffi::Error GridIdGradImpl(cudaStream_t stream, float gravity,
     return CudaCheck(st, "cudaMallocAsync(q_qd)");
   Pack2Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd.ptr, q.typed_data(), qd.typed_data(), kNq, batch);
+  WorkspaceBuffer ws;
+  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
+    return CudaCheck(st, "cudaMallocAsync(workspace)");
   grid::inverse_dynamics_gradient_kernel<T>
       <<<GridDims(batch), ThreadDims(),
-         grid::ID_DU_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
-          dc_du->typed_data(), q_qd.ptr, 2 * kNq, qdd.typed_data(), model,
-          gravity, batch);
+         grid::INVERSE_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>(),
+         stream>>>(dc_du->typed_data(), ws.ptr, q_qd.ptr, 2 * kNq,
+                   qdd.typed_data(), /*d_f_ext=*/nullptr, model, gravity,
+                   batch);
   return CudaCheck(cudaGetLastError(), "inverse_dynamics_gradient_kernel");
 }
 
@@ -343,14 +389,35 @@ ffi::Error GridFdGradImpl(cudaStream_t stream, float gravity,
     return CudaCheck(st, "cudaMallocAsync(q_qd_u)");
   Pack3Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd_u.ptr, q.typed_data(), qd.typed_data(), u.typed_data(), kNq, batch);
+  WorkspaceBuffer ws;
+  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
+    return CudaCheck(st, "cudaMallocAsync(workspace)");
   grid::forward_dynamics_gradient_kernel<T>
       <<<GridDims(batch), ThreadDims(),
-         grid::FD_DU_DYNAMIC_SHARED_MEM_COUNT * sizeof(T), stream>>>(
-          df_du->typed_data(), q_qd_u.ptr, 3 * kNq, model, gravity, batch);
+         grid::FORWARD_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>(),
+         stream>>>(df_du->typed_data(), ws.ptr, q_qd_u.ptr, 3 * kNq,
+                   /*d_f_ext=*/nullptr, model, gravity, batch);
   return CudaCheck(cudaGetLastError(), "forward_dynamics_gradient_kernel");
 }
 
 }  // namespace
+
+#ifdef PYROFFI_GRID_RUNTIME_INERTIA
+// Runtime-mutable inertia table (grid_codegen runtime_inertia=True).
+//
+// These are NOT FFI handlers and are deliberately not stream-ordered: upstream's
+// set_inertia_params is a blocking host->device memcpy into device-resident
+// *model* state, which is not a traceable JAX value. It is safe only at
+// grasp-topology boundaries (pick / place / handoff), and the Python side
+// enforces that by refusing to run under a tracer. See GridModelState.
+extern "C" int GridInertiaParamsSize() { return 10 * grid::NUM_JOINTS; }
+
+extern "C" void GridSetInertiaParams(const float* h_params) {
+  grid::robotModel<T>* model = GetRobotModel();
+  cudaDeviceSynchronize();  // the table is read by any in-flight kernel launch
+  grid::set_inertia_params<T>(model, h_params);
+}
+#endif  // PYROFFI_GRID_RUNTIME_INERTIA
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridIdFfi, GridIdImpl,
                               ffi::Ffi::Bind()

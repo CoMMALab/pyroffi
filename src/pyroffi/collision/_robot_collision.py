@@ -9,7 +9,7 @@ import jax_dataclasses as jdc
 import jaxlie
 import trimesh
 import yourdfpy
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Bool, Float, Int
 from jax import lax
 from loguru import logger
 
@@ -36,6 +36,45 @@ class RobotCollision:
     """Row indices (first link) of active self-collision pairs to check."""
     active_idx_j: Int[Array, " P"]
     """Column indices (second link) of active self-collision pairs to check."""
+
+    # --- Attached bodies (tools, grasped objects). --------------------------
+    # Empty for an un-attached model, in which case every field below is inert
+    # and this class behaves exactly as before. Populated by
+    # ``pyroffi.attachments.compose_collision`` / ``with_attachments``: the
+    # attachment primitives live in the *tail* of ``coll`` (indices
+    # ``num_links - K ...`` ), so the pair table, the world-collision launch and
+    # every cost that reduces over the geometry axis pick them up for free.
+    attach_parent_link_indices: jdc.Static[tuple[int, ...]] = ()
+    """Parent link index per attachment primitive (static topology)."""
+    attach_T_parent_body: Optional[Float[Array, "K 7"]] = None
+    """``wxyz_xyz`` link<-body transform per attachment primitive.
+    A pytree leaf, so it is differentiable and ``vmap``-able."""
+    attach_active: Optional[Bool[Array, " K"]] = None
+    """Per-primitive activity mask. A leaf, so pick/place transitions inside a
+    fixed plan skeleton cost no recompilation."""
+
+    @property
+    def num_robot_links(self) -> int:
+        """Geometry entries that are actual robot links (excludes attachments)."""
+        return self.num_links - len(self.attach_parent_link_indices)
+
+    def with_attachments(self, aset) -> "RobotCollision":
+        """Return a copy extended with an :class:`~pyroffi.attachments.AttachmentSet`.
+
+        Sugar for :func:`pyroffi.attachments.compose_collision`; see there for
+        what happens to the geometry array and the pair table.
+        """
+        from ..attachments import compose_collision
+
+        return compose_collision(self, aset)
+
+    def entry_active(self) -> Bool[Array, " num_links"]:
+        """Per-geometry-entry activity mask (robot links are always active)."""
+        if self.attach_active is None:
+            return jnp.ones((self.num_links,), dtype=bool)
+        return jnp.concatenate(
+            [jnp.ones((self.num_robot_links,), dtype=bool), self.attach_active]
+        )
 
     @staticmethod
     def from_urdf(
@@ -256,11 +295,24 @@ class RobotCollision:
         """
         # Check if the link names match - this should be true if both Robot
         # and RobotCollision were created from the same URDF parser results.
-        assert self.link_names == robot.links.names, (
+        # Only the leading entries are links; any trailing entries are attached
+        # bodies, which have no counterpart in the kinematics link list.
+        n_link = self.num_robot_links
+        assert self.link_names[:n_link] == robot.links.names, (
             "Link name mismatch between RobotCollision and Robot kinematics."
         )
 
         Ts_link_world_wxyz_xyz = robot.forward_kinematics(cfg)
+        if self.attach_parent_link_indices:
+            # T_WB = T_WL(cfg) . T_LB: one gather off the FK already computed,
+            # then one SE(3) compose per attached primitive.
+            parents = jnp.asarray(self.attach_parent_link_indices, dtype=jnp.int32)
+            T_world_parent = jaxlie.SE3(Ts_link_world_wxyz_xyz[..., parents, :])
+            assert self.attach_T_parent_body is not None
+            T_world_body = T_world_parent @ jaxlie.SE3(self.attach_T_parent_body)
+            Ts_link_world_wxyz_xyz = jnp.concatenate(
+                [Ts_link_world_wxyz_xyz, T_world_body.wxyz_xyz], axis=-2
+            )
         Ts_link_world = jaxlie.SE3(Ts_link_world_wxyz_xyz)
         return self.coll.transform(Ts_link_world)
 
@@ -355,6 +407,15 @@ class RobotCollision:
         # Use advanced indexing with the stored indices
         active_distances = dist_matrix[..., self.active_idx_i, self.active_idx_j]
 
+        # 3b. Disabled attachment slots contribute +inf, so they drop out of the
+        # min-reductions downstream. Masking the *distance* is deliberate:
+        # shrinking the geometry to zero radius instead would leave a real
+        # point obstacle sitting at the parent link and poison those minima.
+        if self.attach_active is not None:
+            live = self.entry_active()
+            pair_live = live[self.active_idx_i] & live[self.active_idx_j]
+            active_distances = jnp.where(pair_live, active_distances, jnp.inf)
+
         # Expected shape check
         num_active_pairs = len(self.active_idx_i)
         assert active_distances.shape == (*batch_axes, num_active_pairs)
@@ -417,6 +478,12 @@ class RobotCollision:
         )
         dist_matrix = _collide_links_vs_world(coll_robot_world, _world_geom)
 
+        # 3b. Disabled attachment slots report +inf against every obstacle.
+        if self.attach_active is not None:
+            dist_matrix = jnp.where(
+                self.entry_active()[:, None], dist_matrix, jnp.inf
+            )
+
         # 4. Result shape check
         # Calculate expected shape based on broadcasting rules
         expected_batch_combined = jnp.broadcast_shapes(
@@ -449,6 +516,38 @@ class RobotCollisionSpherized:
     """Row indices (first link) of active self-collision pairs to check."""
     active_idx_j: Int[Array, " P"]
     """Column indices (second link) of active self-collision pairs to check."""
+
+    # --- Attached bodies (tools, grasped objects). --------------------------
+    # Same contract as RobotCollision, but here a *slot* (not a primitive) is
+    # one extra row of the (N, S) sphere array: an attachment contributes up to
+    # S spheres, padded with the same negative-radius sentinel the per-link rows
+    # already use. The sphere-based CUDA paths therefore inherit attachments for
+    # free -- they only ever see a larger N.
+    attach_parent_link_indices: jdc.Static[tuple[int, ...]] = ()
+    """Parent link index per attachment row (static topology)."""
+    attach_T_parent_body: Optional[Float[Array, "K 7"]] = None
+    """``wxyz_xyz`` link<-body transform per attachment row (a pytree leaf)."""
+    attach_active: Optional[Bool[Array, " K"]] = None
+    """Per-row activity mask (a pytree leaf; toggling it never recompiles)."""
+
+    @property
+    def num_robot_links(self) -> int:
+        """Rows that are actual robot links (excludes attachment rows)."""
+        return self.num_links - len(self.attach_parent_link_indices)
+
+    def with_attachments(self, aset) -> "RobotCollisionSpherized":
+        """Return a copy extended with an :class:`~pyroffi.attachments.AttachmentSet`."""
+        from ..attachments import compose_collision
+
+        return compose_collision(self, aset)
+
+    def entry_active(self) -> Bool[Array, " num_links"]:
+        """Per-row activity mask (robot links are always active)."""
+        if self.attach_active is None:
+            return jnp.ones((self.num_links,), dtype=bool)
+        return jnp.concatenate(
+            [jnp.ones((self.num_robot_links,), dtype=bool), self.attach_active]
+        )
 
     @staticmethod
     def from_urdf(
@@ -769,11 +868,22 @@ class RobotCollisionSpherized:
         """
         # Check if the link names match - this should be true if both Robot
         # and RobotCollision were created from the same URDF parser results.
-        assert self.link_names == robot.links.names, (
+        n_link = self.num_robot_links
+        assert self.link_names[:n_link] == robot.links.names, (
             "Link name mismatch between RobotCollision and Robot kinematics."
         )
         # TODO: Override with passed in result of fk so i don't have to recompute
         Ts_link_world_wxyz_xyz = robot.forward_kinematics(cfg)
+        if self.attach_parent_link_indices:
+            # Attachment rows are posed as T_WB = T_WL(cfg) . T_LB, appended
+            # along the link (N) axis so the vmap below covers them unchanged.
+            parents = jnp.asarray(self.attach_parent_link_indices, dtype=jnp.int32)
+            T_world_parent = jaxlie.SE3(Ts_link_world_wxyz_xyz[..., parents, :])
+            assert self.attach_T_parent_body is not None
+            T_world_body = T_world_parent @ jaxlie.SE3(self.attach_T_parent_body)
+            Ts_link_world_wxyz_xyz = jnp.concatenate(
+                [Ts_link_world_wxyz_xyz, T_world_body.wxyz_xyz], axis=-2
+            )
         Ts_link_world = jaxlie.SE3(Ts_link_world_wxyz_xyz)
         # self.coll has batch_axes (N, S).  Ts_link_world has batch_axes (*batch_cfg, N).
         #
@@ -852,6 +962,16 @@ class RobotCollisionSpherized:
 
         # 3. Min over both sphere axes → one signed distance per active link pair.
         active_distances = jnp.min(dist, axis=(-3, -2))  # [*batch, P]
+
+        # 4. Disabled attachment rows report +inf, so they drop out of the
+        #    min-reductions downstream without perturbing them. (Masking the
+        #    distance rather than shrinking the geometry is deliberate: a
+        #    zero-radius sphere is still a real point obstacle sitting at the
+        #    parent link, which would poison those minima.)
+        if self.attach_active is not None:
+            live = self.entry_active()
+            pair_live = live[li] & live[lj]
+            active_distances = jnp.where(pair_live, active_distances, jnp.inf)
         return active_distances
 
     @staticmethod
@@ -912,6 +1032,12 @@ class RobotCollisionSpherized:
         dist_matrix = _collide_links_vs_world(
             coll_robot_world, _world_geom
         )  # (*batch, N, M)
+
+        # 5b. Disabled attachment rows report +inf against every obstacle.
+        if self.attach_active is not None:
+            dist_matrix = jnp.where(
+                self.entry_active()[:, None], dist_matrix, jnp.inf
+            )
 
         # 6. Verify shape consistency
         expected_batch_combined = jnp.broadcast_shapes(

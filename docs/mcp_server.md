@@ -27,21 +27,38 @@ pip install -e '.[mcp]'
 
 # Pick a free GPU: a long-lived server pins its device memory for its lifetime.
 nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
-pyroffi-mcp --gpu 1 --robot panda_spherized --max-objects 16 --warmup
+CUDA_VISIBLE_DEVICES=1 pyroffi-mcp --robot panda_spherized --max-objects 16 --warmup
 ```
 
-`--warmup` pays the XLA compile up front (~40 s) so no client call does. Device
-and `jax_enable_x64` are pinned before JAX initialises its backend, which is why
-they are launch flags rather than tool arguments.
+`--warmup` pays the XLA compile (~40 s) as part of the *first tool call* rather
+than at startup. It cannot happen earlier: an MCP client gives a server 30 s to
+answer `initialize`, so a process that builds its session before serving is
+killed before it ever gets there. Session construction is therefore lazy — the
+stdio loop comes up immediately and the first call blocks on `ensure_ready()`.
+
+The device is chosen with `CUDA_VISIBLE_DEVICES` rather than the server's
+`--gpu`. Importing `pyroffi` initialises the JAX CUDA backend, so by the time
+`--gpu` is parsed the backend already exists and `configure_process` can only
+warn that the request came too late. `jax_enable_x64` is still settable from the
+CLI (`--float32`), because precision can be changed after import but not after
+the first traced call — which is why it is a launch flag and not a tool argument.
 
 As an MCP client entry:
 
 ```json
 {"mcpServers": {"pyroffi": {
   "command": "pyroffi-mcp",
-  "args": ["--gpu", "1", "--robot", "panda_spherized", "--warmup"]
+  "args": ["--robot", "panda_spherized", "--warmup"],
+  "env": {"CUDA_VISIBLE_DEVICES": "1", "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
 }}}
 ```
+
+Started this way the server is meant to be persistent and problem-agnostic: it
+holds a robot and a capacity, never a task. Per-problem state is the scene, and
+`reset_scene` is what clears it — obstacles, attachments, handles and robot
+state, keeping the compiled functions (`create_scene` rebuilds the session and
+throws them away). A problem bookends itself with it: reset on connect, in case
+the previous problem died before cleaning up, and reset on finish.
 
 ## Measured costs (Panda, 7 DOF, RTX A5000, float64)
 

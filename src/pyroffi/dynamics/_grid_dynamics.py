@@ -121,6 +121,7 @@ class GRiDDynamics:
         robot,
         gravity: float = _DEFAULT_GRAVITY,
         arch: str | None = None,
+        runtime_inertia: bool = False,
     ) -> "GRiDDynamics":
         """Build from a pyroffi :class:`~pyroffi.Robot` (uses ``robot.urdf``).
 
@@ -129,19 +130,36 @@ class GRiDDynamics:
         ``GRiDDynamics(robot.urdf, ...)``; the robot must have been created via
         :meth:`Robot.from_urdf` so its source URDF is available.
         """
-        return cls(robot.urdf, gravity=gravity, arch=arch)
+        return cls(
+            robot.urdf,
+            gravity=gravity,
+            arch=arch,
+            runtime_inertia=runtime_inertia,
+        )
 
     def __init__(
         self,
         urdf: yourdfpy.URDF,
         gravity: float = _DEFAULT_GRAVITY,
         arch: str | None = None,
+        runtime_inertia: bool = False,
     ):
         self._grid_model = build_grid_robot(urdf)
         self.num_dof = self._grid_model.num_pos
+        # Sign convention: pyroffi's ``gravity`` is the signed z-component
+        # (-9.81), and the A2R-Lab GRiD kernels seed the base acceleration as
+        # ``-X * gravity``, i.e. they take that same signed value. (The older
+        # robot-acceleration codegen omitted the negation, which is why this
+        # used to be passed negated; passing the old sign now silently flips
+        # every gravity torque while leaving M(q) correct.)
         self.gravity = float(gravity)
-        so_path = compile_grid_library(self._grid_model, arch=arch)
+        so_path = compile_grid_library(
+            self._grid_model, arch=arch, runtime_inertia=runtime_inertia
+        )
         self._targets = _register_library(so_path)
+        self.runtime_inertia = bool(runtime_inertia)
+        self._model_state = None
+        self._so_path = so_path
 
         # True single-launch vmap for every kernel: wrap the *raw* (non-diff)
         # kernel calls with :func:`_batchable`, which folds a vmapped axis in as
@@ -238,7 +256,7 @@ class GRiDDynamics:
             qf,
             qdf,
             qddf,
-            gravity=onp.float32(-self.gravity),
+            gravity=onp.float32(self.gravity),
         )
         c = self._from_grid(c).reshape(*batch_axes, self.num_dof)
         return c + self._damping * qd
@@ -252,7 +270,7 @@ class GRiDDynamics:
             qf,
             qdf,
             uf,
-            gravity=onp.float32(-self.gravity),
+            gravity=onp.float32(self.gravity),
         )
         return self._from_grid(qdd).reshape(*batch_axes, self.num_dof)
 
@@ -282,7 +300,7 @@ class GRiDDynamics:
             af,
             bf,
             cf,
-            gravity=onp.float32(-self.gravity),
+            gravity=onp.float32(self.gravity),
         )
         # buf[b, col, row] with col in [0, 2n): column-major n x 2n blocks.
         G = jnp.swapaxes(buf, -1, -2)  # (B, n, 2n): [row, col]
@@ -301,6 +319,80 @@ class GRiDDynamics:
     # ------------------------------------------------------------------
     # Public API.
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Runtime-mutable inertia (payload / tool use). See
+    # :mod:`._grid_runtime_inertia` for the parameter basis and the purity
+    # constraint this path carries.
+    # ------------------------------------------------------------------
+
+    @property
+    def model_state(self):
+        """Guarded handle on the device-resident inertia table.
+
+        Only available when the library was built with ``runtime_inertia=True``.
+        """
+        if not self.runtime_inertia:
+            raise AttributeError(
+                "This GRiDDynamics was built without runtime_inertia, so its "
+                "inertia is baked into the compiled kernels. Construct it with "
+                "GRiDDynamics(urdf, runtime_inertia=True) to get a mutable "
+                "inertia table."
+            )
+        if self._model_state is None:
+            from ._grid_runtime_inertia import GridModelState
+
+            self._model_state = GridModelState(
+                self._so_path,
+                num_bodies=self._grid_model.robot.get_num_joints(),
+                baseline=onp.asarray(
+                    self._grid_model.robot.get_inertia_params_ordered_by_id()[1:],
+                    dtype=onp.float64,
+                ),
+            )
+        return self._model_state
+
+    def set_attachments(self, robot, aset) -> None:
+        """Upload the payload implied by an ``AttachmentSet`` to the GPU.
+
+        Composes each attachment's spatial inertia into its DOF body (the same
+        ``Xᵀ I X`` congruence :func:`pyroffi.attachments.compose_dynamics` uses),
+        converts to the 10-parameter regressor basis and adds it to the URDF's
+        own parameters.  One blocking ``10·NB``-float memcpy; no recompile.
+
+        Call this only at grasp-topology boundaries — it writes device-resident
+        model state and will refuse to run under a tracer.  ``aset`` may not be
+        batched: there is one table per model, so payload sweeps belong on the
+        pure-JAX path (``robot.with_attachments(...)``).
+        """
+        from ..attachments import compose_dynamics
+        from ._grid_runtime_inertia import (
+            GridModelState,
+            inertia_params_from_spatial,
+        )
+
+        # Guard at the entry point, before any numpy conversion, so a traced
+        # payload reports the real constraint rather than an incidental
+        # TracerArrayConversionError from deep inside the composition.
+        GridModelState.reject_tracers(robot.dynamics, aset)
+        base_I = onp.asarray(robot.dynamics.I_body, dtype=onp.float64)
+        loaded_I = onp.asarray(
+            compose_dynamics(robot, aset).dynamics.I_body, dtype=onp.float64
+        )
+        dI = loaded_I - base_I
+        # pyroffi DOF order -> GRiD table rows: row k holds GRiD joint k, whose
+        # pyroffi actuated index is joint_perm[k].
+        perm = onp.asarray(self._grid_model.joint_perm)
+        deltas = {
+            k: inertia_params_from_spatial(dI[perm[k]])
+            for k in range(len(perm))
+            if onp.any(dI[perm[k]] != 0.0)
+        }
+        self.model_state.add_body_inertia(deltas)
+
+    def reset_inertia(self) -> None:
+        """Restore the URDF's own inertial parameters (drop any payload)."""
+        self.model_state.reset()
 
     def _require_dyn_info(self, what: str):
         if self._dyn_info is None:
@@ -386,7 +478,7 @@ class GRiDDynamics:
     ) -> tuple[Float[Array, "*batch n 6 n"], Float[Array, "*batch n 3"]]:
         """World-frame geometric Jacobians ``(J, r)`` for every body.
 
-        GRiDCodeGenerator emits no Jacobian kernel; this delegates to the
+        GRiD emits no Jacobian kernel; this delegates to the
         pure-JAX :func:`jacobian_jax` in float32 (same convention: angular
         first, linear part at each body frame origin, world axes).
         """
@@ -497,7 +589,10 @@ def _id_jvp(gd, primals, tangents):
         # d tau / d qdd = M(q).
         M = mass_matrix_jax(gd._dyn_info, q.astype(jnp.float32))
         tan = tan + jnp.einsum("...ij,...j->...i", M, t_qdd)
-    return out, tan
+    # The GRiD kernels are float32 end to end, but the pure-JAX pieces mixed in
+    # above (mass_matrix_jax) follow the ambient x64 setting; a custom_jvp must
+    # return a tangent whose dtype matches the primal, so pin it here.
+    return out, tan.astype(out.dtype)
 
 
 _id_differentiable.defjvp(_id_jvp, symbolic_zeros=True)
@@ -532,7 +627,7 @@ def _fd_jvp(gd, primals, tangents):
             rhs = rhs - gd._damping * t_qd
         Minv = gd._minv_call(q)
         tan = tan + jnp.einsum("...ij,...j->...i", Minv, rhs)
-    return out, tan
+    return out, tan.astype(out.dtype)
 
 
 _fd_differentiable.defjvp(_fd_jvp, symbolic_zeros=True)

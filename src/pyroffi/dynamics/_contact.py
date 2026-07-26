@@ -28,6 +28,37 @@ a pair of arms):
   gripper into the per-body external wrench array consumed by
   ``GRiDDynamics.inverse_dynamics``.
 
+Relationship to :mod:`pyroffi.attachments`
+------------------------------------------
+
+An :class:`~pyroffi.attachments.Attachment` is the same physical idea as a grasp
+here — a rigid body carried by a link — and it is now the single source of truth
+for that bookkeeping.  :meth:`ContactSystem.from_attachments` takes one
+attachment per manipulator (the object in *that* manipulator's grip-link frame)
+and **derives** ``grasp_offsets`` from them:
+
+    ``T_W_obj = T_W_L_i · A_i``  for every ``i``, so
+    ``T_ref^{-1} · T_i = A_ref · A_i^{-1}``
+
+which is exactly the relative-gripper transform the closure residual already
+uses — the residual maths is unchanged, it just stops being independently
+captured.  :func:`capture_attachments` is the "close the grippers here"
+constructor, and :func:`capture_grasp_offsets` is now a thin wrapper over it.
+
+The division of labour between the two modules is deliberate:
+
+* ``attachments`` supplies the *nominal rigid model* — one SE(3) compose for
+  kinematics and one ``I_body`` row update for dynamics, so
+  ``robot.with_attachments(system.attachment_set(i))`` gives a manipulator whose
+  ``inverse_dynamics`` already carries the payload
+  (:meth:`ContactSystem.loaded_manipulator_robot`).
+* this module supplies the *certificates* that the rigid model is valid —
+  :func:`grasp_closure_residual` (does the closed chain hold?),
+  :func:`grip_validity_penalty` / :func:`parallel_jaw_grip_penalty` (can the
+  fingers actually apply the required force?) and
+  :func:`object_dynamics_residual` (do the allocated forces move the object the
+  way the trajectory says?).  Slip is a residual, not a modelling change.
+
 Conventions
 -----------
 * Contact forces are 3-vectors in **world axes** (point contact; grip moments
@@ -126,6 +157,24 @@ class GraspedObject:
         """Principal rotational inertia about the object's centre (local axes)."""
         return jnp.asarray(self.geom.inertia_diag)
 
+    @staticmethod
+    def from_attachment(attachment) -> "GraspedObject":
+        """Build from an :class:`~pyroffi.attachments.Attachment`'s geometry.
+
+        The attachment already carries the physical parameters on its
+        ``CollGeom``, so this is a view, not a re-declaration: the same object
+        can be handed to the collision path (``compose_collision``), the
+        dynamics path (``compose_dynamics``) and the contact residuals here
+        without its mass being stated three times.
+        """
+        if attachment.geom is None:
+            raise ValueError(
+                f"attachment {attachment.name!r} carries no collision geometry, "
+                "so it cannot describe a grasped object; build it with "
+                "Attachment.from_geom(...)."
+            )
+        return GraspedObject(geom=attachment.geom[0])
+
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class ContactSystem:
@@ -142,6 +191,11 @@ class ContactSystem:
     body: GraspedObject
     grasp_offsets: tuple[jaxlie.SE3, ...]
     gravity: float = 9.81
+    attachments: tuple = ()
+    """Optional per-manipulator :class:`~pyroffi.attachments.Attachment`, the
+    object expressed in that manipulator's grip-link frame. Set by
+    :meth:`from_attachments`, from which ``grasp_offsets`` is then derived.
+    Empty for a system built the older way, which stays fully supported."""
 
     def __post_init__(self) -> None:
         if len(self.manipulators) < 1:
@@ -169,6 +223,75 @@ class ContactSystem:
             qs.append(q[..., idx : idx + m.num_dof])
             idx += m.num_dof
         return tuple(qs)
+
+    # ── attachment interop ────────────────────────────────────────────────
+
+    @staticmethod
+    def from_attachments(
+        manipulators: tuple[ManipulatorSpec, ...],
+        attachments: tuple,
+        gravity: float = 9.81,
+        body: "GraspedObject | None" = None,
+    ) -> "ContactSystem":
+        """Build a system from one :class:`~pyroffi.attachments.Attachment` per
+        manipulator, deriving the grasp offsets rather than capturing them.
+
+        ``attachments[i]`` is the grasped object in ``manipulators[i]``'s
+        grip-link frame.  Because every manipulator's attachment must predict
+        the *same* world object pose, the reference-relative gripper transform
+        the closure residual pins is exactly ``A_ref · A_i^{-1}`` — see the
+        module docstring.  ``body`` defaults to the reference attachment's
+        geometry.
+        """
+        if len(attachments) != len(manipulators):
+            raise ValueError(
+                "from_attachments needs exactly one attachment per manipulator "
+                f"(got {len(attachments)} for {len(manipulators)})."
+            )
+        A = [jaxlie.SE3(a.T_parent_body) for a in attachments]
+        for i, a in enumerate(attachments):
+            if a.parent_link_index != manipulators[i].grip_link_index:
+                raise ValueError(
+                    f"attachment {a.name!r} hangs off link index "
+                    f"{a.parent_link_index}, but manipulator {i} grips with "
+                    f"link {manipulators[i].grip_link!r} (index "
+                    f"{manipulators[i].grip_link_index}). The attachment must be "
+                    "expressed in the grip link's frame."
+                )
+        offsets = tuple(A[0] @ A_i.inverse() for A_i in A[1:])
+        return ContactSystem(
+            manipulators=tuple(manipulators),
+            body=body if body is not None else GraspedObject.from_attachment(
+                attachments[0]
+            ),
+            grasp_offsets=offsets,
+            gravity=gravity,
+            attachments=tuple(attachments),
+        )
+
+    def attachment_set(self, index: int):
+        """The ``AttachmentSet`` for one manipulator, ready for composition."""
+        from ..attachments import AttachmentSet
+
+        if not self.attachments:
+            raise ValueError(
+                "This ContactSystem was not built from attachments; use "
+                "ContactSystem.from_attachments (or capture_attachments) to get "
+                "one that can hand its payload to the dynamics/collision paths."
+            )
+        return AttachmentSet.empty().attach(self.attachments[index])
+
+    def loaded_manipulator_robot(self, index: int):
+        """``manipulators[index].robot`` with the grasped object's inertia
+        folded in, so its ``inverse_dynamics`` carries the payload.
+
+        This is the concrete payoff of the unification: the transport torques a
+        planner sees now include the thing being transported, without threading
+        a payload argument through the solver.
+        """
+        return self.manipulators[index].robot.with_attachments(
+            self.attachment_set(index)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -208,9 +331,36 @@ def contact_points_world(
 
 
 def object_center_world(system: ContactSystem, q: Float[Array, "n"]) -> Array:
-    """Grasped-object centre = centroid of the world-frame contact points."""
+    """Grasped-object centre = centroid of the world-frame contact points.
+
+    An approximation (no separate free-floating object state is tracked), kept
+    because the residuals and both trajopt solvers are calibrated against it.
+    When the system carries attachments, :func:`object_pose_world` gives the
+    exact pose instead.
+    """
     pts = contact_points_world(system, q)
     return sum(pts) / len(pts)
+
+
+def object_pose_world(
+    system: ContactSystem, q: Float[Array, "n"], index: int = 0
+) -> jaxlie.SE3:
+    """Exact world pose of the grasped object, ``T_W_L_i(q) · A_i``.
+
+    Requires attachments (see :meth:`ContactSystem.from_attachments`). Every
+    manipulator predicts the same pose *iff* the grasp closure residual is zero,
+    so the spread across ``index`` is itself a closure diagnostic — and unlike
+    :func:`object_center_world` this carries orientation, which is what a viewer
+    or a placement goal needs.
+    """
+    if not system.attachments:
+        raise ValueError(
+            "object_pose_world needs a ContactSystem built from attachments; "
+            "use ContactSystem.from_attachments or capture_attachments."
+        )
+    qs = system.split_q(q)
+    T_W_L = _gripper_world_pose(system.manipulators[index], qs[index])
+    return T_W_L @ jaxlie.SE3(system.attachments[index].T_parent_body)
 
 
 # ---------------------------------------------------------------------------
@@ -394,11 +544,76 @@ def manipulator_contact_fext(
     return fext.at[-1].set(wrench)
 
 
+def capture_attachments(
+    manipulators: tuple[ManipulatorSpec, ...],
+    qs: tuple[Array, ...],
+    T_world_object: jaxlie.SE3,
+    geom: "CollGeom | None" = None,
+    name: str = "object",
+):
+    """"Close the grippers *here*": one attachment per manipulator, capturing
+    the object's pose in each grip-link frame.
+
+    ``A_i = (T_base_i · T_link_i(q_i))^{-1} · T_W_obj``.  Note the base
+    transform: :class:`ManipulatorSpec` places each manipulator in the world
+    with ``base_xy_yaw``, while ``Robot.forward_kinematics`` (and hence
+    :meth:`Attachment.grasp_from_current_pose`) works in the manipulator's own
+    model frame — so the capture has to go through :func:`_gripper_world_pose`
+    rather than raw FK, or every non-origin manipulator gets a silently wrong
+    grasp transform.
+
+    ``geom`` is the object's collision primitive (with its mass / inertia /
+    friction); pass ``None`` for a kinematics-only capture.
+    """
+    from ..attachments import Attachment
+
+    out = []
+    for i, (m, q) in enumerate(zip(manipulators, qs)):
+        T_W_L = _gripper_world_pose(m, q)
+        T_LB = T_W_L.inverse() @ T_world_object
+        if geom is None:
+            out.append(
+                Attachment(
+                    parent_link_index=m.grip_link_index,
+                    name=f"{name}@{i}",
+                    ignored_link_indices=(),
+                    num_prims=0,
+                    T_parent_body=T_LB.wxyz_xyz,
+                    geom=None,
+                    spatial_inertia=None,
+                    active=jnp.asarray(True),
+                )
+            )
+        else:
+            g = geom if geom.get_batch_axes() else geom.broadcast_to((1,))
+            out.append(
+                Attachment.from_geom(
+                    g,
+                    m.grip_link_index,
+                    T_LB.wxyz_xyz,
+                    mass=jnp.asarray(geom.mass),
+                    inertia_com=jnp.diag(jnp.asarray(geom.inertia_diag)),
+                    name=f"{name}@{i}",
+                )
+            )
+    return tuple(out)
+
+
 def capture_grasp_offsets(
     manipulators: tuple[ManipulatorSpec, ...], qs: tuple[Array, ...]
 ) -> tuple[jaxlie.SE3, ...]:
     """Constant reference->manipulator[i] relative gripper transforms at a
     grasp config. ``manipulators[0]`` / ``qs[0]`` is the reference.
+
+    This is algebraically the same quantity :meth:`ContactSystem.from_attachments`
+    derives: capture the object at the reference gripper's own pose and ``A_0``
+    becomes identity, so ``A_0 · A_i^{-1}`` collapses to ``T_ref^{-1} · T_i``.
+    It is deliberately *not* routed through :func:`capture_attachments` even so.
+    Going via attachments would compose two extra float32 SE(3) products for an
+    identical result, and the ~1e-7 they perturb is enough to move the third
+    decimal of a solver calibrated against this path. The unification buys
+    nothing here; it buys the dynamics and collision composition, which is what
+    :func:`capture_attachments` is for.
     """
     poses = [_gripper_world_pose(m, q) for m, q in zip(manipulators, qs)]
     T_ref = poses[0]

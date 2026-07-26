@@ -1,5 +1,5 @@
 """Rigid body dynamics: pure-JAX algorithms plus a CUDA-accelerated path
-generated per-robot by GRiDCodeGenerator (``GRiDDynamics``).
+generated per-robot by GRiD's codegen (``GRiDDynamics``).
 
 The pure-JAX functions are differentiable and run on any backend; the
 ``GRiDDynamics`` class JIT-generates, compiles, and registers per-robot CUDA
@@ -33,7 +33,9 @@ def __getattr__(name: str):
         "ManipulatorSpec",
         "GraspedObject",
         "ContactSystem",
+        "capture_attachments",
         "capture_grasp_offsets",
+        "object_pose_world",
     ):
         from . import _contact
 

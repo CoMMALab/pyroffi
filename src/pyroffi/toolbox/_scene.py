@@ -173,6 +173,14 @@ class Scene:
     def __contains__(self, name: object) -> bool:
         return name in self._objects
 
+    def get_object(self, name: str) -> SceneObject:
+        try:
+            return self._objects[name]
+        except KeyError:
+            raise KeyError(
+                f"no object named {name!r} in the scene; have {sorted(self._objects)}"
+            ) from None
+
     def slot_names(self, shape: Shape) -> list[str | None]:
         """Pool-index → object name (``None`` for a parked slot).
 

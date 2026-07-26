@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "pyroffi": {
+      "command": "/home/sadmin/miniconda3/envs/pyroffi/bin/pyroffi-mcp",
+      "args": [
+        "--robot",
+        "panda_spherized",
+        "--max-objects",
+        "8",
+        "--n-timesteps",
+        "32",
+        "--warmup"
+      ],
+      "env": {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "CUDA_VISIBLE_DEVICES": "2"
+      }
+    },
+    "pyroffi-sandbox": {
+      "command": "/home/sadmin/miniconda3/envs/pyroffi/bin/pyroffi-sandbox",
+      "args": [
+        "--task",
+        "/home/sadmin/Work/pyroffi/examples/tasks/block_stacking_panda.json",
+        "--variant",
+        "wall",
+        "--viewer-port",
+        "8080"
+      ],
+      "env": {
+        "MUJOCO_GL": "egl"
+      }
+    }
+  }
+}

@@ -69,6 +69,19 @@ class Robot:
 
         return geom_from_mjcf_body(self.mjcf_model, body_name)
 
+    def with_attachments(self, aset) -> "Robot":
+        """Return a copy carrying an :class:`~pyroffi.attachments.AttachmentSet`.
+
+        The attachments' inertias are folded into ``dynamics.I_body``, so
+        :meth:`inverse_dynamics` / :meth:`forward_dynamics` / :meth:`mass_matrix`
+        / :meth:`step` account for the carried load with **no signature change**
+        — an attachment is a fixed joint, so ``num_dof`` and every kernel shape
+        are unchanged.  See :func:`pyroffi.attachments.compose_dynamics`.
+        """
+        from .attachments import compose_dynamics
+
+        return compose_dynamics(self, aset)
+
     @property
     def urdf(self):
         """The source ``yourdfpy.URDF`` this robot was parsed from.

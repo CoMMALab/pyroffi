@@ -1,4 +1,4 @@
-# `PyRoFFI`: A Python Library for Robot Kinematics Using Spherical Approximations
+# `PyRoFFI`: A Python Library for Accelerated Rigid Body Motion Planning using the Foreign Function Interface
 
 
 [![Format Check](https://github.com/CoMMALab/pyroffi/actions/workflows/formatting.yml/badge.svg)](https://github.com/CoMMALab/pyroffi/actions/workflows/formatting.yml)
@@ -8,7 +8,7 @@
 
 By Weihang Guo, Sai Coumar
 
-PyRoFFI is a toolkit optimized with Jax JIT tracing for accelerated kinematics research with NVIDIA GPUs. This repository is expands on [pyroki](https://github.com/chungmin99/pyroki) and is backward-compatible. PyRoFFI replaces core kinematics kernels in PyRoKi with custom CUDA implementations through the Jax FFI interface to retain the benefits of Jax's compiler optimizations while adding the flexibility of CUDA for low-level GPU optimization. Additionally, we add an extended suite of optimization solvers for inverse kinematics and trajectory optimization. We provide accelerated kernels for the following kinematics functions:
+PyRoFFI is a toolkit optimized with Jax JIT tracing for accelerated motion planning research with NVIDIA GPUs. This repository is expands on [pyroki](https://github.com/chungmin99/pyroki) and is backward-compatible. PyRoFFI replaces core kinematics/dynamics kernels in PyRoKi with raw CUDA implementations through the Jax FFI interface to retain the benefits of Jax's compiler optimizations while adding the flexibility of CUDA for low-level GPU optimization of primitive operations. Additionally, we add an extended suite of optimization solvers for inverse kinematics and trajectory optimization. We provide accelerated kernels for the following kinematics functions:
 
 - Forward Kinematics
 - Inverse Kinematics: HJCD-IK, LS, SQP, MPPI, IKFlow

@@ -39,8 +39,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # GRiD-based CUDA dynamics codegen (pyroffi.dynamics.GRiDDynamics); also
-# requires nvcc and the external/GRiDCodeGenerator + external/URDFParser
-# modules on disk. sympy powers the URDF->GRiD symbolic codegen. (scipy is a
+# requires nvcc and the external/GRiD checkout (A2R-Lab/GRiD, which supplies
+# the `grid_codegen` package) on disk.  Its URDFParser object model is vendored
+# into pyroffi.dynamics._grid_urdf, so that submodule is not needed. sympy powers the URDF->GRiD symbolic codegen. (scipy is a
 # core dependency, used by the URDF->GRiD adapter and collision geometry.)
 dynamics = [
     "sympy>=1.7.1",

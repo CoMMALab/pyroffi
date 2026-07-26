@@ -128,9 +128,12 @@ def se3_from_payload(pose: Mapping[str, Any]) -> jaxlie.SE3:
     if norm < 1e-8:
         raise ValueError("quaternion has ~zero norm")
     wxyz = wxyz / norm
+    # No explicit dtype: JAX canonicalises float64 -> float32 itself when x64 is
+    # off, and keeps the full precision when it is on. Hard-coding float32 here
+    # threw away ~1e-7 m of the target under x64, which is the same order as the
+    # IK tolerances the caller is being measured against.
     return jaxlie.SE3.from_rotation_and_translation(
-        jaxlie.SO3(jnp.asarray(wxyz, dtype=jnp.float32)),
-        jnp.asarray(position, dtype=jnp.float32),
+        jaxlie.SO3(jnp.asarray(wxyz)), jnp.asarray(position)
     )
 
 

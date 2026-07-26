@@ -9,7 +9,7 @@ Backend       Representation         Translation
 ============  =====================  =====================================
 GRiD (CUDA    ``URDFParser.Robot``   yourdfpy URDF -> vendored GRiD object
  dynamics)     (sympy Xmats)          model (:mod:`._grid_urdf`), fed to
-                                      the external ``GRiDCodeGenerator``.
+                                      the external ``grid_codegen``.
 QuIK (CPU     standard-DH table      pyroffi POE ``Robot`` -> DH via FK
  IK)                                  probing (:func:`.kinematics.extract_dh`).
 VAMP (CPU     ``vamp::robots::*``    URDF/SRDF *files* -> cricket codegen.
@@ -59,7 +59,7 @@ class RobotBinding(Protocol):
 
 def __getattr__(name: str):
     # GRiDDynamics pulls in the codegen/vendor machinery; import lazily so the
-    # bindings surface is usable without the external GRiDCodeGenerator present.
+    # bindings surface is usable without the external grid_codegen package present.
     if name == "GRiDDynamics":
         from .dynamics import GRiDDynamics
 

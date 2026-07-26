@@ -434,8 +434,11 @@ def test_server_error_payloads_are_structured_not_exceptions():
         def check_collision(self, **kwargs):
             raise RuntimeError("boom")
 
-    server = PyroffiServer.__new__(PyroffiServer)  # no session needed for this path
-    server.__dict__["toolbox"] = Spy()
+    # No session needed for this path, so stand one in and mark the server ready
+    # rather than letting the first call build a real one.
+    server = PyroffiServer()
+    server.__dict__["_toolbox"] = Spy()
+    server.__dict__["_ready"] = True
 
     # A bad argument is caught before the primitive runs.
     bad_args = server.call("check_collision", {})
