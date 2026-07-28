@@ -419,11 +419,35 @@ def object_dynamics_residual(
 # Grip validity (friction cone + pushing normal)
 # ---------------------------------------------------------------------------
 
+def _safe_unit(v: Array) -> Array:
+    """``v`` normalized, or exactly zero when ``v`` is (numerically) zero.
+
+    ``v / (norm(v) + eps)`` is *not* a safe normalization: it returns a finite
+    value at ``v = 0`` but ``norm`` is non-differentiable there and hands back a
+    NaN gradient, which then contaminates everything downstream. The
+    ``where``-guard keeps the zero branch out of the differentiated path.
+    """
+    n2 = jnp.sum(v * v)
+    ok = n2 > 1e-18
+    return jnp.where(ok, v / jnp.sqrt(jnp.where(ok, n2, 1.0)), 0.0)
+
+
+def _safe_norm(v: Array) -> Array:
+    """``norm(v)`` with a zero (rather than NaN) gradient at the origin."""
+    n2 = jnp.sum(v * v)
+    ok = n2 > 1e-18
+    return jnp.where(ok, jnp.sqrt(jnp.where(ok, n2, 1.0)), 0.0)
+
+
 def _grip_inward_normal(m: ManipulatorSpec, q: Float[Array, "n"], toward: Array) -> Array:
-    """Unit world vector from the contact point toward the object centre."""
+    """Unit world vector from the contact point toward the object centre.
+
+    Zero when the contact point *is* the object centre, which is the
+    single-manipulator case: there is no inward direction to point in. See
+    :func:`_safe_unit` for why the guard matters to the gradient.
+    """
     p = _contact_point_world(m, q)
-    v = toward - p
-    return v / (jnp.linalg.norm(v) + 1e-9)
+    return _safe_unit(toward - p)
 
 
 def grip_validity_penalty(
@@ -449,7 +473,7 @@ def grip_validity_penalty(
         f_n = jnp.dot(f, n)
         f_t = f - f_n * n
         push = jnp.maximum(0.0, f_min - f_n) ** 2
-        cone = jnp.maximum(0.0, jnp.linalg.norm(f_t) - mu * f_n) ** 2
+        cone = jnp.maximum(0.0, _safe_norm(f_t) - mu * f_n) ** 2
         return push + cone
 
     total = jnp.array(0.0, forces.dtype)
@@ -498,7 +522,11 @@ def parallel_jaw_grip_penalty(
         f_shear = f - f_ax * a
         fg = m.f_grip_max
         squeeze = jnp.maximum(0.0, jnp.abs(f_ax) - fg) ** 2
-        shear = jnp.maximum(0.0, jnp.linalg.norm(f_shear) - 2.0 * mu * fg) ** 2
+        # _safe_norm, not jnp.linalg.norm: f_shear is exactly zero whenever the
+        # force lies purely along the closing axis, which is a perfectly ordinary
+        # state for a decision variable to pass through (and is where a naive
+        # initialization puts it).
+        shear = jnp.maximum(0.0, _safe_norm(f_shear) - 2.0 * mu * fg) ** 2
         return squeeze + shear
 
     total = jnp.array(0.0, forces.dtype)

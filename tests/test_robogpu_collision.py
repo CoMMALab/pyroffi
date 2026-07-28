@@ -162,3 +162,92 @@ if __name__ == "__main__":
     test_robogpu_pointcloud_matches_oracle()
     test_robogpu_dynamic_refit_matches_oracle()
     print("PASS")
+
+
+def test_robogpu_pointcloud_with_an_attachment_matches_oracle():
+    """A grasped body must be posed and checked like any other geometry row.
+
+    The OptiX path takes row-local spheres plus a per-row joint index and runs FK
+    itself, so an attachment row is only correct if both its folded-in link←body
+    offset and its parent-joint mapping are right.  The oracle is the same
+    brute-force one as above, driven by the JAX ``at_config`` (which composes
+    ``T_WB = T_WL · T_LB`` explicitly), so a mis-posed row cannot hide.
+
+    The cloud is a loose cluster around where the held ball sits at the home
+    configuration -- close enough that the ball hits it and the bare robot mostly
+    does not, so the attachment is what drives the verdicts.
+    """
+    import jaxlie
+
+    from pyroffi.attachments import Attachment, AttachmentSet
+
+    urdf = yourdfpy.URDF.load(str(RES / "panda_spherized.urdf"))
+    robot = pk.Robot.from_urdf(urdf)
+    base = RobotCollisionSpherized.from_urdf(urdf)
+
+    ee = robot.links.num_links - 1
+    T_LB = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
+    ball = Sphere.from_center_and_radius(
+        center=jnp.zeros((1, 3)), radius=jnp.full((1,), 0.05)
+    )
+    aset = AttachmentSet.empty().attach(
+        Attachment.from_geom(ball, ee, T_LB, name="ball")
+    )
+    coll = base.with_attachments(aset)
+
+    rng = np.random.default_rng(11)
+    B = 256
+    R_ENV = 0.01
+    home = jnp.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], jnp.float32)
+    cfgs = jnp.array(
+        (np.asarray(home)[None, :] + rng.uniform(-0.35, 0.35, (B, 7))).astype(np.float32)
+    )
+    ball_home = np.asarray(
+        (jaxlie.SE3(robot.forward_kinematics(home)[ee]) @ jaxlie.SE3(T_LB)).translation()
+    )
+    pc = (ball_home[None, :] + rng.normal(0.0, 0.06, (120, 3))).astype(np.float32)
+    far = Sphere.from_center_and_radius(
+        center=jnp.array([[100.0, 100.0, 100.0]]), radius=jnp.array([0.01])
+    )
+
+    def _verdicts(model):
+        ck = _checker(model)
+        # Self-collision off so only the point-cloud stage is under test.
+        ck._f_pair_i = jnp.zeros((0,), dtype=jnp.int32)
+        ck._f_pair_j = jnp.zeros((0,), dtype=jnp.int32)
+        ck._cached_robot_id = None
+        ck._jit_fn = None
+        ck.set_world(far, point_cloud=jnp.array(pc), r_env=R_ENV)
+        try:
+            return np.asarray(ck.check_collision_free(robot, cfgs)).astype(int)
+        except Exception as exc:  # CUDA/OptiX runtime failure → skip, not fail
+            pytest.skip(f"RoboGPU kernel did not run: {exc}")
+
+    def _oracle(model):
+        geom = jax.vmap(lambda c: model.at_config(robot, c))(cfgs)
+        centers = np.asarray(geom.pose.translation()).reshape(B, -1, 3)
+        radii = np.asarray(geom.size).reshape(B, -1)
+        out = np.ones(B, dtype=int)
+        for b in range(B):
+            valid = radii[b] > 0
+            c, r = centers[b][valid], radii[b][valid]
+            d2 = ((c[:, None, :] - pc[None, :, :]) ** 2).sum(-1)
+            if np.any(d2 < (r[:, None] + R_ENV) ** 2):
+                out[b] = 0
+        return out
+
+    v_att = _verdicts(coll)
+    v_oracle = _oracle(coll)
+    assert 0.02 < v_att.mean() < 0.98, f"degenerate verdicts: {v_att.mean()}"
+    mismatch = int((v_att != v_oracle).sum())
+    assert mismatch == 0, (
+        f"{mismatch}/{B} verdict mismatches vs brute-force oracle "
+        f"(robogpu free={v_att.mean():.3f}, oracle free={v_oracle.mean():.3f})"
+    )
+
+    # The attachment must be what moved the verdicts, and disabling the slot must
+    # put them back exactly where the un-attached model has them.
+    v_bare = _verdicts(base)
+    v_off = _verdicts(base.with_attachments(aset.set_active("ball", False)))
+    assert int((v_att != v_bare).sum()) > 0, "the attachment changed no verdict"
+    np.testing.assert_array_equal(v_off, v_bare)

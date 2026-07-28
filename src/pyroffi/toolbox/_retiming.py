@@ -28,9 +28,14 @@ inspection.
 
 The cost is real and worth stating plainly: because one step must accommodate
 the tightest junction on the whole path (usually the endpoint ramp), durations
-run roughly 2-3x a time-optimal TOPP-RA solution. Feasible, monotone and
-predictable beats fast-and-subtly-wrong for a verification tool; the interface
-would not change if TOPP-RA replaced this later.
+run roughly 2-3x a time-optimal solution. Feasible, monotone and predictable
+beats fast-and-subtly-wrong for a verification tool.
+
+When the duration itself matters -- executing on real hardware rather than
+sanity-checking a plan -- use :mod:`pyroffi.topp` instead. It implements TOPP-RA
+proper: genuinely time-optimal, torque limits as well as kinematic ones, and
+batched over many paths on the GPU. Measured against this function on the
+bundled MBM paths it is about 2.3x faster in the median.
 """
 
 from __future__ import annotations

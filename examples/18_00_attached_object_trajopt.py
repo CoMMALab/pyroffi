@@ -1,9 +1,10 @@
 """Collision-free pick and place, with the grasped block carried as an
-*attachment*, played back in an mjviser window.
+*attachment*, then re-timed against the block's own dynamics, played back in an
+mjviser window.
 
 The point of this example is that a grasped object is not a special case in the
 planner. Attaching a body to a link adds a fixed joint, and a fixed joint is
-something both halves of pyroffi already absorb:
+something all three halves of pyroffi already absorb:
 
 * **Kinematics** — ``T_WB(q) = T_WL(q) · T_LB``. One SE(3) compose on the FK the
   robot already runs. No new configuration variable, so ``MAX_JOINTS`` /
@@ -12,9 +13,14 @@ something both halves of pyroffi already absorb:
   collision array and its pairs onto the pair table, so ``ls_trajopt`` sweeps
   the *carried* block against the world with no change to its signature: it is
   handed ``robot_coll.with_attachments(aset)`` instead of ``robot_coll``.
+* **Dynamics** — the same ``Attachment`` carries mass and a 6x6 spatial inertia,
+  so ``robot.with_attachments(aset).inverse_dynamics`` charges the arm for the
+  payload, and ``ContactSystem.from_attachments`` hands that same object to the
+  contact-aware trajectory optimizer.
 
-So the pick-and-place below is four calls to the same solver with two collision
-models, not a planner that knows what a "payload" is:
+So the pick-and-place below is four calls to the same geometric solver with two
+collision models, plus one dynamic re-solve, not a planner that knows what a
+"payload" is:
 
 1. **reach** — home → pre-grasp, planned with the block still a *world*
    obstacle (the arm must not knock it over on the way in).
@@ -33,7 +39,36 @@ models, not a planner that knows what a "payload" is:
    clearance is reported per obstacle, because the Panda's base spheres sit a
    few centimetres inside the ground half-space at every configuration and a
    lumped minimum would report that constant forever.
-4. **place / retreat** — lower, ``detach`` (the exact inverse of the grasp: the
+4. **dynamic refinement** — the transport path is a *geometric* path: a sequence
+   of configurations with no times on it, found by a solver that never asked
+   what the block weighs. ``flat_contact_trajopt`` takes that path as its seed
+   and solves for the minimum-time schedule that respects the grasp, the
+   object's Newton-Euler dynamics, the joint limits and the torque limits —
+   with the wall still in the cost. That last part is not decoration: the
+   min-time objective will happily spend clearance to go faster, and
+   ``collision_margin`` is the knob that says how much of it is for sale. On
+   this scene the seed clears the wall by 0.18 m; re-solved at a 0.02 m margin
+   the carried block comes back at about 0.04 m, and at the 0.06 m margin used
+   below it keeps essentially all of the seed's clearance. The term does not
+   preserve what the geometric pass bought — it bounds what can be given up.
+   Two more things are worth being precise about:
+
+   * The two solvers do **not** stack: this is a re-solve seeded by the first,
+     not a post-process. ``flat_contact_trajopt`` is a penalty method from a
+     single seed, so it will tighten and time-optimize the homotopy class it is
+     given but will never discover a different one — going *over* the wall
+     rather than through it is ``ls_trajopt``'s job, which is exactly why the
+     two are chained in this order.
+   * The block's mass enters **once**, as a contact wrench. The solver allocates
+     the object's required wrench through the grasp map and feeds it to
+     ``inverse_dynamics`` as ``f_ext``, so the ``ContactSystem`` holds the
+     *bare* robot. Handing it ``robot.with_attachments(aset)`` as well would
+     charge for the block twice. The attached model belongs to the collision
+     argument, where the block is a swept body; the bare model belongs to the
+     dynamics, where the block is an external load. That split is the one thing
+     in this file that is easy to get wrong and silent when you do.
+
+5. **place / retreat** — lower, ``detach`` (the exact inverse of the grasp: the
    block returns to the world at the pose FK says it is at), retreat.
 
 The playback is a MuJoCo scene driven kinematically in an mjviser window: the
@@ -41,8 +76,11 @@ arm's ``qpos`` is the planned path, and the block is posed by ``T_WL(q) · T_LB`
 exactly while it is attached — i.e. the viewer shows the same composition the
 collision checker used, not a re-derived one.
 
-CPU or GPU; ``--cuda`` puts the trajopt on the CUDA kernels. ``--no-view``
-prints the plan and its clearances without opening a window.
+CPU or GPU; ``--cuda`` puts the geometric trajopt on the CUDA kernels.
+``--no-view`` prints the plan and its clearances without opening a window. The
+dynamic refinement needs GRiD, hence a CUDA device: without one it is skipped
+and the geometric transport is played back as-is (``--no-dynamics`` skips it
+deliberately).
 """
 
 from __future__ import annotations
@@ -59,7 +97,14 @@ import yourdfpy
 import pyroffi as pk
 from pyroffi.attachments import Attachment, AttachmentSet
 from pyroffi.collision import HalfSpace, Sphere
-from pyroffi.optimization_engines import LsTrajOptConfig, ls_trajopt
+from pyroffi.dynamics import GRiDDynamics
+from pyroffi.dynamics._contact import ContactSystem, ManipulatorSpec
+from pyroffi.optimization_engines import (
+    FlatContactTrajOptConfig,
+    LsTrajOptConfig,
+    flat_contact_trajopt,
+    ls_trajopt,
+)
 
 URDF_PATH = "resources/panda/panda_spherized.urdf"
 MESH_DIR = "resources/panda/meshes"
@@ -72,6 +117,7 @@ PLACE_XY = np.array([0.45, 0.30])
 BLOCK_START = np.array([PICK_XY[0], PICK_XY[1], BLOCK_HALF[2]])
 BLOCK_GOAL = np.array([PLACE_XY[0], PLACE_XY[1], BLOCK_HALF[2]])
 BLOCK_MASS = 0.25
+BLOCK_FRICTION = 1.0  # pad-vs-block Coulomb coefficient, for the grip penalty
 
 # A wall between pick and place. Tall enough that a block dangling below the
 # fingers has to be *lifted over* it, not just swung past.
@@ -86,9 +132,25 @@ GRASP_Z = 0.10
 PREGRASP_LIFT = 0.22  # hand height above the block for the pre-grasp pose
 DOWN_WXYZ = np.array([0.0, 0.0, 1.0, 0.0])  # gripper +z pointing at the table
 
+# The URDF welds the fingers open at y = ±0.065, so the render adds a slide
+# joint per finger purely to show the grasp happening. These are displacements
+# along that weld: 0 is the URDF's open pose, and closed puts each pad on the
+# block's face. Nothing here reaches the planner -- the fingers are still fixed
+# links to FK and to the collision model.
+FINGER_OPEN = 0.0
+FINGER_CLOSED = -(0.065 - float(BLOCK_HALF[1]))
+
 N_WAYPOINTS = 48
 N_SEEDS = 16
 LERP_STEPS = 8  # waypoints in the straight approach/lift/lower/retreat moves
+
+# The dynamic re-solve carries a 6-DOF object pose, a squeeze scalar and a
+# timestep per waypoint on top of the joint configs, and every waypoint costs an
+# inverse-dynamics call under `value_and_grad`. Subsampling the geometric path to
+# a coarser horizon keeps the solve in seconds; the shape it must not lose (the
+# arc over the wall) is carried by well under 48 knots.
+N_DYN_WAYPOINTS = 24
+TAU_MAX = 87.0  # Panda joint-1..4 torque limit (N*m); the wrists are lower
 
 
 def _fmt(v) -> str:
@@ -140,6 +202,14 @@ def grasp_the_block(robot, cfg):
     spherized model carries exactly one primitive type, and over-approximating
     is the right direction — it can refuse a plan that was feasible, but it
     never lets the robot drive the carried block through the wall.
+
+    The mass, inertia and friction are stated once, on the geometry and on the
+    attachment, and are then read by everything downstream: ``compose_dynamics``
+    folds the 6x6 spatial inertia into the hand for ``inverse_dynamics``, and
+    ``GraspedObject.from_attachment`` reads ``mass``/``inertia_diag``/
+    ``friction`` off the same ``CollGeom`` for the contact solver. Restating
+    them at each call site is how the two ends of the pipeline end up quietly
+    modelling different blocks.
     """
     hand = robot.links.names.index(EE_LINK)
     fingers = tuple(
@@ -149,25 +219,33 @@ def grasp_the_block(robot, cfg):
     )
     r = float(np.linalg.norm(BLOCK_HALF))
     m = BLOCK_MASS
+    # Solid cuboid about its centre. The collision primitive is the bounding
+    # sphere, but the *inertia* is the block's real one -- the over-approximation
+    # is deliberate for clearance and would be a lie for dynamics, so the sphere
+    # is told the cuboid's principal inertia rather than defaulting to 2/5 m r^2.
+    inertia_diag = jnp.asarray(
+        m
+        / 12.0
+        * np.array(
+            [
+                (2 * BLOCK_HALF[1]) ** 2 + (2 * BLOCK_HALF[2]) ** 2,
+                (2 * BLOCK_HALF[0]) ** 2 + (2 * BLOCK_HALF[2]) ** 2,
+                (2 * BLOCK_HALF[0]) ** 2 + (2 * BLOCK_HALF[1]) ** 2,
+            ]
+        )
+    )
     block = Attachment.from_geom(
-        Sphere.from_center_and_radius(jnp.zeros((1, 3)), jnp.full((1,), r)),
+        Sphere.from_center_and_radius(
+            jnp.zeros((1, 3)),
+            jnp.full((1,), r),
+            mass=jnp.full((1,), m),
+            inertia_diag=jnp.broadcast_to(inertia_diag, (1, 3)),
+            friction=jnp.full((1,), BLOCK_FRICTION),
+        ),
         hand,
         jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         mass=jnp.asarray(m),
-        # Solid cuboid about its centre.
-        inertia_com=jnp.diag(
-            jnp.asarray(
-                m
-                / 12.0
-                * np.array(
-                    [
-                        (2 * BLOCK_HALF[1]) ** 2 + (2 * BLOCK_HALF[2]) ** 2,
-                        (2 * BLOCK_HALF[0]) ** 2 + (2 * BLOCK_HALF[2]) ** 2,
-                        (2 * BLOCK_HALF[0]) ** 2 + (2 * BLOCK_HALF[1]) ** 2,
-                    ]
-                )
-            )
-        ),
+        inertia_com=jnp.diag(inertia_diag),
         name="block",
         ignored_links=fingers,  # the block is *supposed* to touch the gripper
     )
@@ -234,6 +312,117 @@ def plan(robot, coll, world, q_start, q_goal, *, key, use_cuda: bool, label: str
     return traj
 
 
+def refine_transport(robot, aset, held_coll, world, seed, *, label: str):
+    """Re-solve the transport segment against the *block's* dynamics.
+
+    ``seed`` is the geometric path from :func:`plan`: configurations, no times.
+    This returns the same shape of thing plus a schedule — the timestep at which
+    the min-time objective balances against the effort and torque terms, with
+    the grasp held, the object's Newton-Euler balance met, and no joint past its
+    position or torque limit.
+
+    Note which model goes where, because both are in scope here and swapping
+    them is silent:
+
+    * ``ContactSystem.from_attachments`` gets the **bare** ``robot``. The block
+      is accounted for as an external contact wrench (allocated through the
+      grasp map and passed to ``inverse_dynamics`` as ``f_ext``), so composing
+      its inertia into the chain as well would charge for it twice.
+    * ``colls=(held_coll,)`` gets the **attached** collision model, so the term
+      that keeps the plan clear of the wall sweeps the carried block too. The
+      bare ``robot`` is still the right first argument there — the attachment
+      rows live on the collision model, not on the kinematic one.
+
+    ``w_self_collision`` stays at 0 on purpose: this is the spherized Panda,
+    whose base spheres overlap at every configuration (see :func:`clearances`),
+    so a self term would be a constant force on ``q`` unrelated to the scene.
+    """
+    grid = GRiDDynamics(yourdfpy.URDF.load(URDF_PATH, load_meshes=False))
+    arm = ManipulatorSpec(
+        robot,
+        grid,
+        EE_LINK,
+        base_xy_yaw=(0.0, 0.0, 0.0),
+        # The contact point is the block's centre in the hand frame, which is
+        # exactly the transform the grasp capture already produced.
+        p_local=tuple(float(x) for x in jaxlie.SE3(aset.attachments[0].T_parent_body).translation()),
+    )
+    system = ContactSystem.from_attachments((arm,), (aset.attachments[0],))
+
+    # Subsample the geometric path onto the dynamic solver's horizon; its
+    # endpoints are held, so the interior is what is being re-timed.
+    idx = np.linspace(0, len(seed) - 1, N_DYN_WAYPOINTS).round().astype(int)
+    init = jnp.asarray(seed[idx])
+
+    cfg = FlatContactTrajOptConfig(
+        n_stages=5,
+        n_inner_iters=50,
+        dt=0.1,
+        w_track=200.0,
+        track_scale=3.0,
+        w_effort=1e-4,  # a light effort term alongside the min-time objective
+        tau_max=TAU_MAX,
+        f_min=1.0,
+        mu_friction=BLOCK_FRICTION,
+        # Opt-in collision: without it the min-time objective is free to sell
+        # the clearance the geometric pass bought. The margin is the knob for
+        # how much is for sale -- drop it to 0.02 and the carried block comes
+        # back at ~0.04 m from the wall instead of the seed's ~0.18 m.
+        w_collision=50.0,
+        collision_margin=0.06,
+    )
+
+    args = (init, init[0], init[-1], system, cfg)
+    kwargs = dict(colls=(held_coll,), world_geoms=tuple(g for _, g in world))
+    t0 = time.perf_counter()
+    jax.block_until_ready(flat_contact_trajopt(*args, **kwargs))
+    print(f"  {label}: warmup (compile) {time.perf_counter() - t0:5.2f}s")
+
+    t0 = time.perf_counter()
+    traj, forces, resid, centers, dt = flat_contact_trajopt(*args, **kwargs)
+    jax.block_until_ready(traj)
+    print(f"  {label}: {time.perf_counter() - t0:5.2f}s")
+    # The residual is the honest check on "was the grasp actually held": it is
+    # tracked by a penalty, not enforced, so it is a number and not a promise.
+    print(f"    grasp-closure residual [rms, max] = {_fmt(resid)}")
+    # `dt` is a decision variable, initialised at `cfg.dt`. It usually settles
+    # *above* that: the min-time term pulls it down, the effort and torque terms
+    # push it back up (accelerations go as 1/dt**2), and this is where they
+    # balance. A horizon longer than the nominal is the solve saying the seed's
+    # timing was optimistic for this payload, not the objective misfiring.
+    print(
+        f"    dt {float(dt):.4f}s (nominal {cfg.dt:.4f})  ->  horizon "
+        f"{float(dt) * (len(traj) - 1):.2f}s over {len(traj)} waypoints"
+    )
+    print(
+        f"    contact force: mean |f| {float(jnp.mean(jnp.linalg.norm(forces, axis=-1))):.2f} N, "
+        f"peak {float(jnp.max(jnp.linalg.norm(forces, axis=-1))):.2f} N "
+        f"(block at rest weighs {BLOCK_MASS * 9.81:.2f} N)"
+    )
+    print(f"    block carried from {_fmt(centers[0])} to {_fmt(centers[-1])}")
+    return traj, dt
+
+
+def report_torques(robot, held_robot, traj, dt: float) -> None:
+    """Peak joint torque along ``traj`` at the solved schedule, with and without
+    the payload in the chain.
+
+    This is the one place the *composed* dynamics model is the right one: here
+    there is no contact-force allocation to double-count against, just "what
+    does the arm pay to move this thing on this schedule". Velocities and
+    accelerations are central differences of the path at the solved ``dt``,
+    which is what makes the comparison meaningful — a geometric path has no
+    schedule, so it has no torques to report at all.
+    """
+    qd = jnp.gradient(traj, dt, axis=0)
+    qdd = jnp.gradient(qd, dt, axis=0)
+    bare = jnp.max(jnp.abs(robot.inverse_dynamics(traj, qd, qdd)), axis=0)
+    held = jnp.max(jnp.abs(held_robot.inverse_dynamics(traj, qd, qdd)), axis=0)
+    print(f"    peak |tau| empty arm  {_fmt(bare)}")
+    print(f"    peak |tau| with block {_fmt(held)}")
+    print(f"    limit {TAU_MAX:.0f} N*m; worst utilisation {float(jnp.max(held)) / TAU_MAX * 100:.1f}%")
+
+
 def lerp(q0, q1, n: int = LERP_STEPS):
     """A short straight joint-space move (approach / lift / lower / retreat)."""
     t = jnp.linspace(0.0, 1.0, n)[:, None]
@@ -278,6 +467,11 @@ def main() -> int:
     parser.add_argument("--cuda", action="store_true", help="Trajopt on CUDA kernels.")
     parser.add_argument(
         "--no-view", action="store_true", help="Print the plan; skip the viewer."
+    )
+    parser.add_argument(
+        "--no-dynamics",
+        action="store_true",
+        help="Skip the contact-aware re-solve; play back the geometric path.",
     )
     args = parser.parse_args()
 
@@ -373,6 +567,24 @@ def main() -> int:
     _report("carried block", clearances(robot, held_coll, static, bare, row=-1))
     print("      ^ measured after the fact; the bare model never checked it")
 
+    print("\n5. dynamic refinement of the transport segment")
+    has_gpu = any(d.platform == "gpu" for d in jax.devices())
+    if args.no_dynamics or not has_gpu:
+        why = "--no-dynamics" if args.no_dynamics else "no CUDA device (GRiD needs one)"
+        print(f"  skipped: {why}; playing back the geometric transport as-is")
+    else:
+        transport, dt = refine_transport(
+            robot, aset, held_coll, static, transport,
+            label="pregrasp -> preplace (contact-aware, min-time)",
+        )
+        # Compare these against stage 4's: the re-solve is re-timing the path,
+        # not re-routing it, so at this margin the clearances come back
+        # essentially unchanged. Lower `collision_margin` and they will not --
+        # which is the point of the term being in the cost at all.
+        _report("arm", clearances(robot, robot_coll, static, transport))
+        _report("carried block", clearances(robot, held_coll, static, transport, row=-1))
+        report_torques(robot, held_robot, transport, float(dt))
+
     lower = lerp(q["preplace"], q["place"])
     retreat = lerp(q["place"], q["preplace"])
 
@@ -383,7 +595,7 @@ def main() -> int:
         robot.forward_kinematics(lower[-1])[robot.links.names.index(EE_LINK)]
     )
     landed = (T_hand_end @ jaxlie.SE3(a.T_parent_body)).translation()
-    print(f"\n5. place: block released at {_fmt(landed)} (goal {_fmt(BLOCK_GOAL)})")
+    print(f"\n6. place: block released at {_fmt(landed)} (goal {_fmt(BLOCK_GOAL)})")
 
     path = jnp.concatenate([reach, approach, lift, transport, lower, retreat])
     # True exactly while the block is part of the robot: from the grasp at the
@@ -394,18 +606,34 @@ def main() -> int:
     held_mask[held_from:held_to] = True
     print(f"  full path: {len(path)} waypoints, block carried for {held_mask.sum()}")
 
+    # Gripper opening for the render only: 1 = open, 0 = pinched on the block.
+    # Closed exactly while the block is attached, with the transition ramped
+    # across the second half of the approach and the first half of the retreat
+    # so the grasp and the release read as events instead of a single-frame pop.
+    grip = np.ones(len(path))
+    grip[held_from:held_to] = 0.0
+    closing = np.linspace(1.0, 0.0, len(approach) // 2 + 1)
+    grip[held_from - len(closing) + 1 : held_from + 1] = closing
+    opening = np.linspace(0.0, 1.0, len(retreat) // 2 + 1)
+    grip[held_to : held_to + len(opening)] = opening
+
     if args.no_view:
         return 0
-    view(urdf, robot, aset, np.asarray(path), held_mask)
+    view(urdf, robot, aset, np.asarray(path), held_mask, grip)
     return 0
 
 
-def view(urdf, robot, aset, path: np.ndarray, held_mask: np.ndarray):
+def view(urdf, robot, aset, path: np.ndarray, held_mask: np.ndarray, grip: np.ndarray):
     """Kinematic playback of the plan in an mjviser window.
 
     The arm's ``qpos`` is the planned path and the block is posed by
     ``T_WL(q) · T_LB`` while it is held — the same composition the collision
     checker used, so the render cannot disagree with what was planned.
+
+    ``grip`` (1 open, 0 closed) drives two slide joints the spec adds to the
+    finger bodies, which the URDF welds shut. It is a render-side annotation of
+    ``held_mask``: the planner never saw a finger degree of freedom, and the
+    grasp it planned is the attachment, not a contact these fingers make.
     """
     try:
         import mujoco
@@ -464,6 +692,19 @@ def view(urdf, robot, aset, path: np.ndarray, held_mask: np.ndarray):
     arm_frame = spec.worldbody.add_frame()
     spec.attach(mujoco.MjSpec.from_file(URDF_PATH), prefix="arm_", frame=arm_frame)
 
+    # The fingers arrive as welded bodies, so give each one a slide joint along
+    # the axis its URDF joint declares. Appending them here keeps the arm's
+    # seven joints at the head of ``qpos``, but the addresses are looked up by
+    # name below rather than assumed.
+    for body, axis in (("arm_panda_leftfinger", [0.0, 1.0, 0.0]),
+                       ("arm_panda_rightfinger", [0.0, -1.0, 0.0])):
+        spec.body(body).add_joint(
+            name=body + "_slide",
+            type=mujoco.mjtJoint.mjJNT_SLIDE,
+            axis=axis,
+            range=[FINGER_CLOSED - 0.005, FINGER_OPEN],
+        )
+
     # Playback is kinematic, so the block is a mocap body: its pose is written
     # every frame rather than integrated.
     box = spec.worldbody.add_body(name="block", pos=BLOCK_START, mocap=True)
@@ -479,6 +720,15 @@ def view(urdf, robot, aset, path: np.ndarray, held_mask: np.ndarray):
     mj_data = mujoco.MjData(mj_model)
     ndof = int(robot.joints.num_actuated_joints)
     mocap_id = mj_model.body("block").mocapid[0]
+    arm_adr = np.array(
+        [mj_model.joint(f"arm_panda_joint{i + 1}").qposadr[0] for i in range(ndof)]
+    )
+    finger_adr = np.array(
+        [
+            mj_model.joint("arm_panda_leftfinger_slide").qposadr[0],
+            mj_model.joint("arm_panda_rightfinger_slide").qposadr[0],
+        ]
+    )
 
     fps = 30.0
     dwell = 0.06  # seconds per waypoint
@@ -491,7 +741,9 @@ def view(urdf, robot, aset, path: np.ndarray, held_mask: np.ndarray):
         k = float(np.clip(t, 0.0, span)) / dwell
         i, f = int(k), k - int(k)
         j = min(i + 1, len(path) - 1)
-        d.qpos[:ndof] = (1 - f) * path[i, :ndof] + f * path[j, :ndof]
+        d.qpos[arm_adr] = (1 - f) * path[i, :ndof] + f * path[j, :ndof]
+        g = (1 - f) * grip[i] + f * grip[j]
+        d.qpos[finger_adr] = FINGER_OPEN * g + FINGER_CLOSED * (1 - g)
         pose = block_pose[i] if f < 0.5 else block_pose[j]
         d.mocap_pos[mocap_id] = pose[4:]
         d.mocap_quat[mocap_id] = pose[:4]

@@ -4,6 +4,7 @@ from . import collision as collision
 from . import costs as costs
 from . import kinematics as kinematics
 from . import motion_generators as motion_generators
+from . import topp as topp
 from . import viewer as viewer
 from ._robot import Robot as Robot
 from ._splines import linear_interpolate as linear_interpolate

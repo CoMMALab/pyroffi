@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, cast
 
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import jaxlie
 from jaxtyping import Array, Float
 
@@ -23,6 +24,36 @@ from ._attachment import Attachment, AttachmentSet, link_dof_bodies, motion_tran
 if TYPE_CHECKING:
     from .._robot import Robot
     from ..collision._robot_collision import RobotCollision
+
+
+# Extent sentinel for a primitive that must not participate in any distance.
+# Shared by inactive-slot gating and by padding, which need the same property:
+# the entry stays in the array but can neither create nor hide a contact.
+_INERT_RADIUS = -1e9
+
+
+def _gate_geom(geom: CollGeom, active) -> CollGeom:
+    """Drive ``geom``'s radius negative wherever ``active`` is false.
+
+    ``Sphere`` and ``Capsule`` both derive ``radius`` from ``size[..., 0]``, and
+    that is the only slot touched — a capsule keeps its height, so the gate
+    cannot be confused with a shape change.  ``active`` is a leaf, so this is a
+    ``where`` rather than a branch and toggling a slot never recompiles.
+    """
+    from ..collision._geometry import Capsule, Sphere
+
+    if not isinstance(geom, (Sphere, Capsule)):
+        raise TypeError(
+            "Gating an inactive attachment is only defined for Sphere and "
+            f"Capsule geometry; got {type(geom).__name__}."
+        )
+    radius = geom.size[..., 0]
+    gated = jnp.where(
+        jnp.asarray(active), radius, jnp.full_like(radius, _INERT_RADIUS)
+    )
+    with jdc.copy_and_mutate(geom, validate=False) as out:
+        out.size = geom.size.at[..., 0].set(gated)
+    return out
 
 
 def _T_world_parents(
@@ -46,6 +77,11 @@ def pose_attachments(
     Result batch axes are ``(*batch, total_prims)``, concatenated in slot order.
     Costs one gather off the existing FK plus one SE(3) compose per primitive.
     Returns ``None`` when no slot carries geometry.
+
+    Inactive slots stay in the array — dropping them would make the shape depend
+    on a traced value — but are neutralised the same way the collision path
+    neutralises them: the primitive is kept in place and its extent is driven
+    negative, so it can neither create nor hide a contact.
     """
     geoms = [a for a in aset if a.geom is not None and a.num_prims > 0]
     if not geoms:
@@ -63,7 +99,7 @@ def pose_attachments(
         # cfg batch before transforming so every leaf agrees on the batch axes.
         geom = cast(CollGeom, a.geom).broadcast_to(batch + (a.num_prims,))
         T = jaxlie.SE3(T_world_body.wxyz_xyz[..., None, :])
-        posed.append(geom.transform(T))
+        posed.append(_gate_geom(geom.transform(T), a.active))
     if len(posed) == 1:
         return posed[0]
     if len({type(p) for p in posed}) != 1:
@@ -107,22 +143,19 @@ def ik_target_for_tool(
     be servoed — put the pen nib here, not the flange — on both the CUDA and the
     pure-JAX solvers with **no kernel change**.
 
-    That matters, because the CUDA kernels genuinely cannot do it any other way:
-    ``_ik_cuda_helpers.cuh`` compares ``T_world[target_jnt]`` against
-    ``target_T`` directly and carries no per-target constant offset. It does not
-    need one. The tool offset is constant, so
+    The CUDA kernels cannot do it any other way: ``_ik_cuda_helpers.cuh``
+    compares ``T_world[target_jnt]`` against ``target_T`` directly and carries no
+    per-target offset.  It does not need one — the tool offset is constant, so
 
         ``T_W_tip = T_W_L · A``   ⟺   ``T_W_L = T_W_tip · A^{-1}``
 
-    and solving the second problem solves the first exactly. Folding the offset
-    into the goal on the host is a handful of flops once per solve, versus a new
-    buffer through every IK kernel.
+    and solving the second solves the first exactly, for a few host-side flops
+    instead of a new buffer through every IK kernel.
 
-    One caveat worth stating: the *residual* being minimized becomes the link's
-    pose error rather than the tip's. The zero sets are identical, so an
-    exact solve is unaffected; but for a weighted least-squares that does not
-    reach zero, position and orientation error trade off about the link frame,
-    not about the tip. If tip-frame error weighting matters, minimize
+    Caveat: the minimized *residual* becomes the link's pose error, not the
+    tip's.  The zero sets are identical, so an exact solve is unaffected; but a
+    weighted least-squares that does not reach zero trades position against
+    orientation about the link frame.  If tip-frame weighting matters, minimize
     :func:`tool_frame` directly on the JAX path.
     """
     a = aset.attachments[aset.index_of(name)]
@@ -153,14 +186,25 @@ def compose_dynamics(robot: "Robot", aset: AttachmentSet) -> "Robot":
     Differentiable in both mass and ``T_parent_body``: ``∂τ/∂mass`` makes
     payload identification from measured torques a one-liner, and
     ``∂τ/∂T_parent_body`` makes "grasp where the transport torque stays inside
-    the limits" an optimization rather than a search.
-    """
-    import jax_dataclasses as jdc
+    the limits" an optimization rather than a search.  Batched grasp search goes
+    through ``vmap``, not an explicit leading batch axis on ``T_parent_body``:
+    the update writes one row of ``I_body`` with ``.at[dof_index].add``, which
+    has no batch axis of its own.
 
+    Composing is not idempotent — the congruence is additive and leaves no other
+    trace — so a model that already carries attachments is rejected rather than
+    silently double-loaded. Compose from the un-attached robot instead.
+    """
     if robot.dynamics is None:
         raise ValueError(
             "compose_dynamics requires a Robot with dynamics information; this "
             "URDF has none (see RobotURDFParser.parse_dynamics)."
+        )
+    if robot.attached_names:
+        raise ValueError(
+            f"This Robot already carries attachments {list(robot.attached_names)}; "
+            "composing again would add their inertia a second time. Compose from "
+            "the un-attached robot rather than stacking compositions."
         )
     bodies = [a for a in aset if a.spatial_inertia is not None]
     if not bodies:
@@ -194,6 +238,7 @@ def compose_dynamics(robot: "Robot", aset: AttachmentSet) -> "Robot":
         dyn.I_body = I_body
     with jdc.copy_and_mutate(robot, validate=False) as out:
         out.dynamics = dyn
+        out.attached_names = tuple(a.name for a in bodies)
     return out
 
 
@@ -207,15 +252,12 @@ def attachment_wrench_to_body(
     """Map a wrench applied at an attachment (or tool-tip) frame to its DOF body.
 
     Spatial forces are the dual of spatial motions, so where motion transforms
-    by ``m_B = X_{B<-D} m_D``, force transforms *back* by the transpose:
-
-        ``f_D = X_{B<-D}ᵀ · f_B``
-
-    (power ``fᵀm`` is frame-invariant, which forces exactly this pairing).  For
-    a pure translation ``p`` that reduces to ``moment += p × force``, the
-    familiar lever arm.  This is the entry point for pen-on-paper,
-    push-with-stick and peg-in-hole reaction forces; the representation matches
-    what ``dynamics._contact.manipulator_contact_fext`` already uses.
+    by ``m_B = X_{B<-D} m_D``, force transforms *back* by the transpose,
+    ``f_D = X_{B<-D}ᵀ · f_B`` (power ``fᵀm`` is frame-invariant, which forces
+    exactly this pairing).  For a pure translation that is the familiar lever
+    arm ``moment += p × force``.  Entry point for pen-on-paper, push-with-stick
+    and peg-in-hole reaction forces, in the representation
+    ``dynamics._contact.manipulator_contact_fext`` already uses.
 
     Returns ``(dof_index, wrench_in_body_frame)``; ``dof_index == -1`` means the
     attachment is grounded and the wrench loads no DOF.
@@ -240,9 +282,8 @@ def attachment_wrench_to_body(
 def _pad_to_slots(geom: CollGeom, num_slots: int) -> CollGeom:
     """Pad a ``(num_prims,)`` geometry out to ``(num_slots,)``.
 
-    Reuses the spherized model's own convention: padding entries carry a
-    negative-radius sentinel, which its distance reduction already masks out of
-    the min (so a pad neither creates nor hides a contact).
+    Reuses the spherized model's own convention: padding entries carry the
+    negative-radius sentinel its distance reduction already masks out of the min.
     """
     from ..collision._geometry import Sphere
 
@@ -262,7 +303,7 @@ def _pad_to_slots(geom: CollGeom, num_slots: int) -> CollGeom:
         )
     pad = Sphere.from_center_and_radius(
         center=jnp.zeros((num_slots - n, 3)),
-        radius=jnp.full((num_slots - n,), -1e9),
+        radius=jnp.full((num_slots - n,), _INERT_RADIUS),
     )
     return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), geom, pad)
 
@@ -274,27 +315,27 @@ def compose_collision(rcoll, aset: AttachmentSet):
     entry per primitive) or ``RobotCollisionSpherized`` (spheres, one row of S
     per link); the two layouts are distinguished by the geometry's rank.
 
-    Geometry is concatenated onto the per-link array along the primitive axis,
-    giving ``K' = num_links + Σ num_prims``; poses come from one gather of the
-    parent link pose plus one SE(3) compose, so per-state cost is a handful of
-    flops.  The world-collision kernels are shape-generic in ``K`` and
-    self-collision takes the pair table as a runtime buffer, so a longer array
-    is just a larger launch — no kernel or FFI change.
+    Geometry is concatenated onto the per-link array, giving ``K' = num_links +
+    Σ num_prims``.  The pure-JAX paths are shape-generic in ``K`` and take the
+    pair table as a runtime buffer, so a longer array costs nothing structural.
+    The CUDA checkers pose geometry by row index, so they carry the extra rows
+    too: the SDF checker appends ``T_WB = T_WL · T_LB`` to the FK it already ran,
+    and the binary checker folds ``T_LB`` into its link-local sphere centers and
+    points the new rows at the parent link's joint.  Neither needs a kernel
+    change; see :mod:`pyroffi.collision._cuda_collision`.
 
-    The pair table gains, for each attachment primitive: pairs against every
-    robot link except its own parent and its ``ignored_link_indices``; plus
+    The pair table gains, per attachment primitive: pairs against every robot
+    link except its own parent and its ``ignored_link_indices``; plus
     attachment-vs-attachment pairs across *different* slots, which is what makes
     two-arm handoff and tool-vs-workpiece checkable.
 
     The allowed-collision set is the attachment's own, deliberately: a grasped
     object is *supposed* to touch the fingers, and only the caller knows which
-    links those are.  Inheriting the parent link's existing allowed set was
-    tried and rejected — gripper links frequently carry no collision geometry
-    and so appear in no pair at all, which would silently give the attachment an
-    empty pair set (i.e. no collision checking) rather than a permissive one.
+    links those are.  Inheriting the parent link's allowed set was tried and
+    rejected — gripper links frequently carry no collision geometry and so
+    appear in no pair at all, which would silently leave the attachment
+    unchecked rather than permissively checked.
     """
-    import jax_dataclasses as jdc
-
     slots = [a for a in aset if a.geom is not None and a.num_prims > 0]
     if not slots:
         return rcoll

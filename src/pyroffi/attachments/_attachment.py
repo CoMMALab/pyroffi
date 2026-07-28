@@ -27,10 +27,9 @@ def motion_transform(T_ab: jaxlie.SE3) -> Float[Array, "*batch 6 6"]:
 
     ``T_ab`` is the pose of frame ``b`` relative to frame ``a``; the returned
     6x6 maps a motion vector expressed in ``a`` to its coordinates in ``b``.
-    Angular-first convention, matching
-    :func:`pyroffi._robot_urdf_parser._motion_transform_from_T` (this is its
-    differentiable twin — the numpy one runs at URDF-parse time on constants,
-    this one runs on a traced, ``vmap``-able grasp transform).
+    Angular-first, matching :func:`pyroffi._robot_urdf_parser
+    ._motion_transform_from_T` — this is its differentiable twin, for traced
+    grasp transforms rather than parse-time constants.
     """
     R = T_ab.rotation().as_matrix()  # (*batch, 3, 3)
     p = T_ab.translation()  # (*batch, 3)
@@ -94,9 +93,9 @@ class Attachment:
       grasp-*topology* change and recompiles.
     * **leaves** — where it is attached (``T_parent_body``), its mass/inertia,
       its primitive dimensions, and whether the slot is live.  These are
-      differentiable and ``vmap``-able, so a batch of 1024 candidate grasp
-      transforms goes through one compiled call and ``∂cost/∂T_parent_body``
-      falls out.
+      differentiable and ``vmap``-able, so a batch of candidate grasp transforms
+      goes through one compiled call and ``∂cost/∂T_parent_body`` falls out.
+      (Batched grasp search means ``vmap`` — see :func:`.compose_dynamics`.)
     """
 
     parent_link_index: jdc.Static[int]
@@ -123,7 +122,9 @@ class Attachment:
     collision-only attachment."""
     active: Bool[Array, "*batch"]
     """Whether this slot is live.  Toggling it is jit-safe (no recompile): an
-    inactive slot contributes ``+inf`` distance and zero spatial inertia."""
+    inactive slot contributes zero spatial inertia and no contact — its geometry
+    stays in the array (shapes cannot depend on a traced value) with its radius
+    driven negative, so it can neither create nor hide one."""
 
     @staticmethod
     def from_geom(

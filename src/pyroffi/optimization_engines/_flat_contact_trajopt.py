@@ -36,7 +36,7 @@ weight) — no nested dual-ascent outer loop. The decision vector is
 
 where ``delta_obj_t`` is the object-pose twist relative to the grasp pose
 (``xi_t = exp(delta_t) @ T_obj0``), ``q`` are the stacked joint configs (kept
-so torque / joint-limit / (future) collision costs can see them), and
+so torque / joint-limit / (opt-in) collision costs can see them), and
 ``squeeze_t`` is a scalar internal grip force added *in the null space of the
 grasp map* so it tightens the grip without disturbing the object dynamics, and
 ``time_scale`` sets a shared timestep ``dt`` (so the trajectory *duration* is a
@@ -67,10 +67,50 @@ from ..dynamics._contact import ContactSystem
 from ._contact_trajopt import _fd_vel_acc
 from ._sco_optimization import (
     _LS_ALPHAS,
+    _collision_dists_reduced,
     _lbfgs_two_loop,
     _limits_cost,
     _smoothness_cost,
 )
+
+
+def _collision_cost(
+    q: Float[Array, "T n"],
+    system: ContactSystem,
+    colls: tuple,
+    world_geoms: tuple,
+    cfg: "FlatContactTrajOptConfig",
+) -> Array:
+    """Hinge on the softmin clearance of every waypoint, per manipulator.
+
+    ``colls[i]`` is the collision model for ``system.manipulators[i]``, or
+    ``None`` to skip that arm. To sweep the *carried object* as well, pass
+    ``model.with_attachments(aset)``: the attachment hangs off the grip link in
+    that link's frame, so it rides the same FK the grasp-tracking cost uses and
+    there is no second place for the object's pose to come from.
+
+    ``_collision_dists_reduced`` returns one softmin scalar per group, self
+    first and then one per world geometry; the two groups are weighted
+    separately (see ``w_self_collision``).
+    """
+    total = jnp.zeros((), q.dtype)
+    idx = 0
+    for m, coll in zip(system.manipulators, colls):
+        o, idx = idx, idx + m.num_dof
+        if coll is None:
+            continue
+        q_i = q[:, o : o + m.num_dof]
+
+        def groups(c, coll=coll, m=m):
+            return _collision_dists_reduced(
+                c, m.robot, coll, world_geoms, cfg.collision_temperature
+            )
+
+        d = jax.vmap(groups)(q_i)  # (T, 1 + n_world)
+        hinge = jnp.maximum(0.0, cfg.collision_margin - d) ** 2
+        total += cfg.w_self_collision * jnp.sum(hinge[:, 0])
+        total += cfg.w_collision * jnp.sum(hinge[:, 1:])
+    return total
 
 
 @dataclass(frozen=True)
@@ -124,6 +164,27 @@ class FlatContactTrajOptConfig:
     # --- Dynamics / effort (forces are ALLOCATED, not optimized) ---
     w_torque_limit: float = 1.0
     tau_max: float = 87.0
+
+    # --- Collision (OPT-IN: both weights default to 0, which traces the term
+    #     out entirely, so a caller that does not ask for collision gets the
+    #     same graph and the same numbers as before this term existed) --------
+    w_collision: float = 0.0
+    """Weight on the world-collision hinge. 0 disables the term (the default);
+    a nonzero value requires ``colls``/``world_geoms`` at the call site."""
+    w_self_collision: float = 0.0
+    """Weight on the self-collision hinge, kept separate from ``w_collision``
+    and off by default *on purpose*. A spherized model's base spheres can sit
+    permanently inside each other (the Panda's baseline is about -0.03 m at
+    every configuration), so folding self-collision in with the world would put
+    a constant, irreducible force on ``q`` that has nothing to do with the
+    obstacles. Turn this on only for a model whose baseline is actually
+    positive."""
+    collision_margin: float = 0.02
+    """Clearance the hinge asks for, in metres."""
+    collision_temperature: float = 0.05
+    """Softmin temperature reducing each group's pair distances to one scalar.
+    A hard ``min`` would be non-smooth, and this solver is L-BFGS: the kinks
+    corrupt the inverse-Hessian estimate rather than merely slowing a step."""
 
     # --- Grip validity + squeeze ---
     w_grip: float = 1.0
@@ -230,8 +291,17 @@ def allocate_forces(
 
     # Internal squeeze: push each contact toward the object centre, then remove
     # any component that would disturb w_req (project onto null(G)).
-    normals = jnp.stack([(c - P[i]) / (jnp.linalg.norm(c - P[i]) + 1e-9)
-                         for i in range(k)])  # (k, 3)
+    #
+    # The direction has to be built with a *where-guarded* norm, not
+    # ``norm(d) + eps``. With one manipulator the object centre is the sole
+    # contact point, so ``d`` is exactly zero: ``norm(d) + eps`` still returns a
+    # finite 0/eps value, but ``norm`` is non-differentiable at the origin and
+    # its gradient is NaN, which propagates into every ``q`` entry of the
+    # objective's gradient and silently turns the whole solve into a no-op
+    # (``best_cost`` can never be beaten by a NaN). A zero normal is also the
+    # physically right answer there: a single contact at the object centre has
+    # no internal squeeze direction to speak of.
+    normals = jnp.stack([C._safe_unit(c - P[i]) for i in range(k)])  # (k, 3)
     raw = (squeeze * normals).reshape(-1)  # (3k,)
     proj = raw - Gpinv @ (G @ raw)  # null-space component
     lam = (lam_part + proj).reshape(k, 3)
@@ -258,6 +328,8 @@ def _flat_cost(
     w_track: Array,
     T: int,
     cfg: FlatContactTrajOptConfig,
+    colls: tuple = (),
+    world_geoms: tuple = (),
 ) -> Array:
     ndof = system.num_dof
     k = system.num_manipulators
@@ -304,6 +376,12 @@ def _flat_cost(
         q, 0.0, cfg.w_q_acc, cfg.w_q_jerk
     )
     cost += cfg.w_limits * _limits_cost(q, lower, upper)
+
+    # --- Collision (opt-in) ----------------------------------------------
+    # Guarded on the *static* config, so with the default weights the term is
+    # not traced at all and the graph is byte-for-byte what it was before.
+    if cfg.w_collision or cfg.w_self_collision:
+        cost += _collision_cost(q, system, colls, world_geoms, cfg)
 
     # --- Allocate forces (exact object dynamics) -------------------------
     # Balance about the *actual* object centre (contact-point centroid), so the
@@ -413,6 +491,8 @@ def _flat_contact_jax(
     goal: Float[Array, "n"],
     system: ContactSystem,
     opt_cfg: FlatContactTrajOptConfig,
+    colls: tuple = (),
+    world_geoms: tuple = (),
 ) -> tuple[Array, Array, Array, Array]:
     T = init_q.shape[0]
     ndof = system.num_dof
@@ -447,7 +527,8 @@ def _flat_contact_jax(
     def stage(carry, _):
         z, w_track = carry
         cost_fn = lambda zz: _flat_cost(
-            zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg
+            zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg,
+            colls, world_geoms,
         )
         z = _inner_solve(z, mask, cost_fn, opt_cfg)
         w_track = jnp.minimum(w_track * opt_cfg.track_scale, opt_cfg.w_track_max)
@@ -491,6 +572,9 @@ def flat_contact_trajopt(
     goal: Float[Array, "n"],
     system: ContactSystem,
     opt_cfg: FlatContactTrajOptConfig = FlatContactTrajOptConfig(),
+    *,
+    colls: tuple | None = None,
+    world_geoms: tuple = (),
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Differential-flatness **contact-aware** (fixed-grasp) trajectory optimization.
 
@@ -518,7 +602,42 @@ def flat_contact_trajopt(
     ``start`` / ``goal`` are stacked joint configs (as in
     :func:`contact_sco_trajopt`); the goal object pose is derived from ``goal``'s
     reference gripper so a caller can reuse an IK'd goal directly.
+
+    **Collision is opt-in and off by default.** Set ``opt_cfg.w_collision`` and
+    pass ``colls`` (one collision model per manipulator, ``None`` to skip an
+    arm) plus ``world_geoms``. Pass ``model.with_attachments(aset)`` to sweep
+    the carried object too. With the default weights the term is not traced, so
+    an existing caller's graph and results are unchanged.
+
+    Two things this does *not* do, both worth knowing before relying on it:
+
+    * It is a **penalty from a single seed**, not a search. This solver is one
+      L-BFGS pass with penalty continuation, so the term pushes locally out of
+      violation — it will not discover a different homotopy class (going *over*
+      an obstacle rather than through it). Seed ``init_traj`` with a path from a
+      multi-seed geometric planner such as
+      :func:`~pyroffi.optimization_engines.ls_trajopt`; what this term then buys
+      is that the min-time/effort solve cannot quietly undo that clearance.
+    * A CUDA SDF checker buys **nothing** here. The kernel is opaque to autodiff
+      and its ``custom_jvp`` takes both primal and tangent from the pure-JAX
+      inner model, so under the ``value_and_grad`` this solver runs every
+      iteration the kernel is bypassed entirely. Pass the JAX model; keep the
+      CUDA one for forward-only verification of the result.
     """
+    if colls is None:
+        colls = (None,) * system.num_manipulators
+    if len(colls) != system.num_manipulators:
+        raise ValueError(
+            f"colls must have one entry per manipulator (got {len(colls)} for "
+            f"{system.num_manipulators}); use None to skip an arm."
+        )
+    if (opt_cfg.w_collision or opt_cfg.w_self_collision) and all(
+        c is None for c in colls
+    ):
+        raise ValueError(
+            "a nonzero collision weight needs at least one entry in `colls`; "
+            "otherwise the term is silently zero."
+        )
     T = init_traj.shape[0]
     ref = system.manipulators[0]
     # Goal object-pose twist relative to the start object pose.
@@ -532,5 +651,6 @@ def flat_contact_trajopt(
     init_squeeze = jnp.full((T,), float(share))
 
     return _flat_contact_jax(
-        init_traj, delta_goal, init_squeeze, start, goal, system, opt_cfg
+        init_traj, delta_goal, init_squeeze, start, goal, system, opt_cfg,
+        tuple(colls), tuple(world_geoms),
     )

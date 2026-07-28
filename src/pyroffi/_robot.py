@@ -45,6 +45,13 @@ class Robot:
     given an ``mjcf_path``. Static pytree aux-data, identity-hashed. ``None``
     unless an MJCF file was supplied at construction."""
 
+    attached_names: jdc.Static[tuple[str, ...]] = ()
+    """Names of the attachments already folded into ``dynamics.I_body``.
+
+    Static aux data. Composition is additive and leaves no other trace, so
+    without this a second :meth:`with_attachments` would silently double the
+    carried load. See :func:`pyroffi.attachments.compose_dynamics`."""
+
     @property
     def mjcf_model(self):
         """The compiled ``mujoco.MjModel`` this robot was loaded with.

@@ -53,7 +53,7 @@ from jaxtyping import Float
 from ..dynamics import _contact as C
 from ..dynamics._contact import ContactSystem
 from ._contact_trajopt import _fd_vel_acc
-from ._flat_contact_trajopt import _dt_from_scale, _scale_from_dt
+from ._flat_contact_trajopt import _collision_cost, _dt_from_scale, _scale_from_dt
 from ._sco_optimization import (
     _LS_ALPHAS,
     _lbfgs_two_loop,
@@ -95,6 +95,23 @@ class ContactRichTrajOptConfig:
     w_torque_limit: float = 1.0
     tau_max: float = 87.0
 
+    # --- Collision (OPT-IN, exactly as in FlatContactTrajOptConfig: both
+    #     weights default to 0, which traces the term out entirely) ----------
+    w_collision: float = 0.0
+    """Weight on the world-collision hinge. 0 disables the term (the default);
+    a nonzero value requires ``colls``/``world_geoms`` at the call site."""
+    w_self_collision: float = 0.0
+    """Weight on the self-collision hinge, off by default for the same reason as
+    in the flat solver: a spherized model can have a permanently negative
+    self-distance baseline, which would apply a constant force unrelated to the
+    obstacles."""
+    collision_margin: float = 0.02
+    """Clearance the hinge asks for, in metres."""
+    collision_temperature: float = 0.05
+    """Softmin temperature reducing each group's pair distances to one scalar
+    (the inner solve is L-BFGS, so a hard ``min``'s kinks corrupt the
+    inverse-Hessian estimate)."""
+
     # --- Contact / grip ---
     w_grip: float = 1.0
     mu_friction: float | None = None
@@ -128,6 +145,8 @@ def _contact_rich_cost(
     rho_o: Array,
     T: int,
     cfg: ContactRichTrajOptConfig,
+    colls: tuple = (),
+    world_geoms: tuple = (),
 ) -> Array:
     ndof = system.num_dof
     k = system.num_manipulators
@@ -144,6 +163,14 @@ def _contact_rich_cost(
     # --- Smoothness + joint limits ---------------------------------------
     cost += cfg.w_smoothness * _smoothness_cost(q, 0.0, cfg.w_acc, cfg.w_jerk)
     cost += cfg.w_limits * _limits_cost(q, lower, upper)
+
+    # --- Collision (opt-in) ----------------------------------------------
+    # Shares the flat solver's helper: the term depends only on q, which is the
+    # leading block of z in both solvers, so there is one implementation to keep
+    # honest. Guarded on the *static* config, so the default weights leave the
+    # graph untouched.
+    if cfg.w_collision or cfg.w_self_collision:
+        cost += _collision_cost(q, system, colls, world_geoms, cfg)
 
     # --- Manipulator dynamics: torques via GRiD ID with contact reaction --
     dof_offsets = []
@@ -258,6 +285,8 @@ def _contact_rich_jax(
     goal: Float[Array, "n"],
     system: ContactSystem,
     opt_cfg: ContactRichTrajOptConfig,
+    colls: tuple = (),
+    world_geoms: tuple = (),
 ) -> tuple[Array, Array, Array, Array, Array]:
     T = init_traj.shape[0]
     ndof = system.num_dof
@@ -282,7 +311,8 @@ def _contact_rich_jax(
     def outer(carry, _):
         z, mu, nu, rho_g, rho_o = carry
         cost_fn = lambda zz: _contact_rich_cost(
-            zz, system, lower, upper, mu, nu, rho_g, rho_o, T, opt_cfg
+            zz, system, lower, upper, mu, nu, rho_g, rho_o, T, opt_cfg,
+            colls, world_geoms,
         )
         z = _inner_solve(z, mask, cost_fn, opt_cfg)
 
@@ -345,6 +375,9 @@ def contact_rich_trajopt(
     system: ContactSystem,
     opt_cfg: ContactRichTrajOptConfig = ContactRichTrajOptConfig(),
     init_forces: Float[Array, "T k 3"] | None = None,
+    *,
+    colls: tuple | None = None,
+    world_geoms: tuple = (),
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Contact-rich trajectory optimization with contact forces as decision vars.
 
@@ -363,6 +396,23 @@ def contact_rich_trajopt(
         opt_cfg:     Hyper-parameters (static — changes trigger recompilation).
         init_forces: Optional initial contact forces ``[T, k, 3]``. Defaults to an
                      even static split of the object's weight.
+        colls:       Optional per-manipulator collision models (``None`` to skip
+                     an arm), required when a collision weight is nonzero. Pass
+                     ``model.with_attachments(aset)`` to sweep the carried object
+                     too.
+        world_geoms: Obstacles the collision hinge is measured against.
+
+    **Collision is opt-in and off by default** (``opt_cfg.w_collision``); with the
+    default weights the term is not traced, so existing callers are unaffected.
+    The same two caveats as in
+    :func:`~pyroffi.optimization_engines.flat_contact_trajopt` apply, and the
+    first one applies *more* strongly here: this is a penalty inside an
+    augmented-Lagrangian loop seeded from one trajectory, so it pushes locally out
+    of violation and will not find a different homotopy class — seed
+    ``init_traj`` from a multi-seed geometric planner such as
+    :func:`~pyroffi.optimization_engines.ls_trajopt`. And a CUDA SDF checker buys
+    nothing, since its ``custom_jvp`` takes primal *and* tangent from the pure-JAX
+    inner model and this solver differentiates every iteration.
 
     Returns:
         ``(traj, forces, residuals, obj_centers, dt)`` — matching the flat
@@ -374,6 +424,21 @@ def contact_rich_trajopt(
         share = system.body.mass * system.gravity / k
         f0 = jnp.array([0.0, 0.0, share])
         init_forces = jnp.tile(f0, (init_traj.shape[0], k, 1))
+    if colls is None:
+        colls = (None,) * k
+    if len(colls) != k:
+        raise ValueError(
+            f"colls must have one entry per manipulator (got {len(colls)} for "
+            f"{k}); use None to skip an arm."
+        )
+    if (opt_cfg.w_collision or opt_cfg.w_self_collision) and all(
+        c is None for c in colls
+    ):
+        raise ValueError(
+            "a nonzero collision weight needs at least one entry in `colls`; "
+            "otherwise the term is silently zero."
+        )
     return _contact_rich_jax(
-        init_traj, init_forces, start, goal, system, opt_cfg
+        init_traj, init_forces, start, goal, system, opt_cfg,
+        tuple(colls), tuple(world_geoms),
     )

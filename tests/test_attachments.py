@@ -744,3 +744,335 @@ def test_ik_solve_on_a_retargeted_goal_lands_the_tool_tip(robot, ee_link):
     onp.testing.assert_allclose(
         onp.asarray(got.translation()), onp.asarray(goal.translation()), atol=2e-3
     )
+
+
+# ---------------------------------------------------------------------------
+# Guards: the ways attachments used to fail silently
+# ---------------------------------------------------------------------------
+
+
+def test_composing_dynamics_twice_is_rejected(robot, ee_link):
+    """Composition is additive and leaves no other trace, so a second compose
+    would double the carried load with nothing to show for it."""
+    s = AttachmentSet.empty().attach(
+        Attachment.from_mass(
+            2.0, ee_link, jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]), name="p"
+        )
+    )
+    once = robot.with_attachments(s)
+    assert once.attached_names == ("p",)
+    with pytest.raises(ValueError, match="already carries attachments"):
+        once.with_attachments(s)
+
+
+def test_compose_dynamics_is_additive_exactly_once(robot, ee_link):
+    """The guard exists because the doubling is otherwise invisible: check the
+    single compose really does add the payload once."""
+    m = 2.0
+    s = AttachmentSet.empty().attach(
+        Attachment.from_mass(
+            m, ee_link, jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]), name="p"
+        )
+    )
+    base = onp.asarray(robot.dynamics.I_body)
+    once = onp.asarray(robot.with_attachments(s).dynamics.I_body)
+    # Mass enters I_body's translational block as m * I3; one compose adds m.
+    onp.testing.assert_allclose(onp.abs(once - base).max(), m, rtol=1e-6)
+
+
+def test_pose_attachments_neutralises_an_inactive_slot(robot, ee_link):
+    """``pose_attachments`` used to return live geometry for a disabled slot,
+    while every other consumer masked it out."""
+    s = AttachmentSet.empty().attach(
+        Attachment.from_geom(
+            _sphere(), ee_link, jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]), name="g"
+        )
+    )
+    cfg = robot.default_cfg
+    on = pose_attachments(robot, cfg, s)
+    off = pose_attachments(robot, cfg, s.set_active("g", False))
+    assert float(onp.asarray(on.radius).min()) > 0.0
+    assert float(onp.asarray(off.radius).max()) < 0.0
+    # The pose is untouched -- only the extent is gated.
+    onp.testing.assert_allclose(
+        onp.asarray(on.pose.translation()), onp.asarray(off.pose.translation())
+    )
+
+
+def test_pose_attachments_gating_does_not_recompile(robot, ee_link):
+    """``active`` is a leaf, so toggling it must stay inside one trace."""
+    traces = []
+
+    @jax.jit
+    def f(T, active):
+        traces.append(1)
+        a = Attachment.from_geom(_sphere(), ee_link, T, name="g").with_active(active)
+        return pose_attachments(
+            robot, robot.default_cfg, AttachmentSet.empty().attach(a)
+        ).radius.sum()
+
+    T = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+    f(T, jnp.asarray(True))
+    n = len(traces)
+    f(T, jnp.asarray(False))
+    assert len(traces) == n, "toggling `active` retraced"
+
+
+# ---------------------------------------------------------------------------
+# CUDA backends
+#
+# The CUDA checkers pose geometry by row index; attachments add rows with no
+# kinematics link of their own.  These tests pin the two things that can go
+# quietly wrong: an attachment row posed with the *wrong* transform (which looks
+# like a plausible distance, not a crash), and an attachment row the kernel never
+# looks at (which looks like a collision-free config).
+# ---------------------------------------------------------------------------
+
+
+def _cuda_or_skip():
+    cuda = pytest.importorskip("pyroffi.collision._cuda_collision")
+    if not [d for d in jax.local_devices() if d.platform in ("gpu", "cuda")]:
+        pytest.skip("no local GPU")
+    return cuda
+
+
+def _no_contact_capped(d, cap=1e6):
+    """Collapse both "no contact" sentinels onto one value.
+
+    The JAX reduction masks padding spheres to ``+inf``; the CUDA kernels use
+    ``1e9``.  That divergence predates attachments and applies to every all-padding
+    link pair, so comparing the two backends means capping both first.
+    """
+    return onp.minimum(onp.asarray(d, dtype=onp.float64), cap)
+
+
+@pytest.fixture(scope="module")
+def scoll_srdf():
+    """Spherized model with the SRDF's allowed-collision set applied.
+
+    The binary checker returns a single world-OR-self verdict, so without the
+    SRDF the panda's adjacent hand/finger spheres report a permanent self
+    collision and every verdict is ``False`` — a vacuously passing test.
+    """
+    from pyroffi.collision._robot_collision import RobotCollisionSpherized
+
+    return RobotCollisionSpherized.from_urdf(
+        yourdfpy.URDF.load(PANDA_URDF, load_meshes=False),
+        srdf_path="resources/panda/panda.srdf",
+    )
+
+
+@pytest.fixture(scope="module")
+def _tool_attachment(ee_link):
+    """One sphere held 0.2 m out along the parent link's +Z."""
+    T_LB = jaxlie.SE3.from_rotation_and_translation(
+        jaxlie.SO3.identity(), jnp.array([0.0, 0.0, 0.2])
+    )
+    aset = AttachmentSet.empty().attach(
+        Attachment.from_geom(
+            _sphere(radius=0.05, n=1), ee_link, T_LB.wxyz_xyz, name="ball"
+        )
+    )
+    return aset, T_LB
+
+
+def test_cuda_sdf_checker_matches_jax_on_an_attached_model(
+    robot, scoll, ee_link, _tool_attachment
+):
+    """Same distances as the pure-JAX path, including the attachment rows.
+
+    This is the test that catches a mis-posed attachment: the JAX path composes
+    ``T_WB = T_WL · T_LB`` explicitly, so any disagreement means the CUDA path
+    put the grasped object somewhere else.
+    """
+    cuda = _cuda_or_skip()
+    aset, T_LB = _tool_attachment
+    ext = scoll.with_attachments(aset)
+    checker = cuda.CUDADifferentiableSDFCollisionChecker(ext)
+
+    cfgs = [robot.default_cfg, robot.default_cfg * 0.5]
+    T_WB = jaxlie.SE3(robot.forward_kinematics(robot.default_cfg)[ee_link]) @ T_LB
+    obstacle = Sphere.from_center_and_radius(
+        (T_WB.translation() + jnp.array([0.0, 0.0, 0.3]))[None], jnp.full((1,), 0.02)
+    )
+
+    # Per-config, not a stacked batch: RobotCollisionSpherized.at_config cannot
+    # take a batched cfg (it vmaps the N axis and then broadcasts B against S) --
+    # a pre-existing limitation of the JAX reference, not of the CUDA path.
+    for cfg in cfgs:
+        onp.testing.assert_allclose(
+            _no_contact_capped(
+                checker.compute_world_collision_distance(robot, cfg, obstacle)
+            ),
+            _no_contact_capped(
+                ext.compute_world_collision_distance(robot, cfg, obstacle)
+            ),
+            atol=2e-4,
+        )
+        onp.testing.assert_allclose(
+            _no_contact_capped(checker.compute_self_collision_distance(robot, cfg)),
+            _no_contact_capped(ext.compute_self_collision_distance(robot, cfg)),
+            atol=2e-4,
+        )
+
+    # The attachment row must actually be the one that moved: its distance to the
+    # obstacle is the analytic gap, not the un-attached model's distance.
+    d_att = checker.compute_world_collision_distance(robot, cfgs[0], obstacle)
+    onp.testing.assert_allclose(
+        float(d_att[ext.num_robot_links, 0]), 0.3 - 0.05 - 0.02, atol=2e-4
+    )
+
+    # The batched launch must agree row-for-row with the single-config launches.
+    batched = checker.compute_world_collision_distance(
+        robot, jnp.stack(cfgs), obstacle
+    )
+    for k, cfg in enumerate(cfgs):
+        onp.testing.assert_allclose(
+            _no_contact_capped(batched[k]),
+            _no_contact_capped(
+                checker.compute_world_collision_distance(robot, cfg, obstacle)
+            ),
+            atol=2e-4,
+        )
+
+
+def test_cuda_sdf_checker_poses_a_rotated_capsule_attachment(robot, rcoll, ee_link):
+    """The capsule layout carries orientation, so a wrong ``T_LB`` shows up here.
+
+    Scoped to the attachment's own rows: the capsule self-collision kernel and the
+    JAX reduction already disagree by ~9e-3 on one *base* pair of this model,
+    which predates attachments and would otherwise set a useless tolerance.
+    """
+    cuda = _cuda_or_skip()
+    T_LB = jaxlie.SE3.from_rotation_and_translation(
+        jaxlie.SO3.from_x_radians(jnp.array(0.7)), jnp.array([0.0, 0.0, 0.2])
+    ).wxyz_xyz
+    ext = rcoll.with_attachments(
+        AttachmentSet.empty().attach(
+            Attachment.from_geom(_capsule(1), ee_link, T_LB, name="pen")
+        )
+    )
+    checker = cuda.CUDADifferentiableSDFCollisionChecker(ext)
+    cfg = robot.default_cfg
+    obstacle = Sphere.from_center_and_radius(
+        jnp.array([[0.4, 0.0, 0.5]]), jnp.full((1,), 0.05)
+    )
+    n_base = len(rcoll.active_idx_i)
+
+    onp.testing.assert_allclose(
+        _no_contact_capped(
+            checker.compute_world_collision_distance(robot, cfg, obstacle)
+        )[-1],
+        _no_contact_capped(
+            ext.compute_world_collision_distance(robot, cfg, obstacle)
+        )[-1],
+        atol=1e-5,
+    )
+    onp.testing.assert_allclose(
+        _no_contact_capped(checker.compute_self_collision_distance(robot, cfg))[n_base:],
+        _no_contact_capped(ext.compute_self_collision_distance(robot, cfg))[n_base:],
+        atol=1e-5,
+    )
+
+
+def test_cuda_sdf_checker_reports_inf_for_an_inactive_slot(
+    robot, scoll, ee_link, _tool_attachment
+):
+    cuda = _cuda_or_skip()
+    aset, _ = _tool_attachment
+    off = scoll.with_attachments(aset.set_active("ball", False))
+    checker = cuda.CUDADifferentiableSDFCollisionChecker(off)
+    cfg = robot.default_cfg
+    n_base = len(scoll.active_idx_i)
+
+    d_self = checker.compute_self_collision_distance(robot, cfg)
+    assert jnp.all(jnp.isinf(d_self[n_base:]))
+    # The un-attached minimum is untouched by the disabled slot.
+    onp.testing.assert_allclose(
+        float(d_self.min()),
+        float(scoll.compute_self_collision_distance(robot, cfg).min()),
+        atol=2e-4,
+    )
+
+    obstacle = Sphere.from_center_and_radius(
+        jnp.zeros((1, 3)), jnp.full((1,), 0.02)
+    )
+    d_world = checker.compute_world_collision_distance(robot, cfg, obstacle)
+    assert jnp.all(jnp.isinf(d_world[off.num_robot_links :]))
+
+
+def test_cuda_binary_checker_sees_a_collision_only_the_attachment_has(
+    robot, scoll_srdf, ee_link, _tool_attachment
+):
+    """The fused-FK kernel must pose the attachment row, not skip it.
+
+    The obstacle is placed on the grasped ball and nowhere near the robot, so the
+    un-attached model is free and the attached model is not.  A dropped or
+    mis-posed attachment row shows up here as "still free".
+    """
+    cuda = _cuda_or_skip()
+    aset, T_LB = _tool_attachment
+    cfg = robot.default_cfg
+    T_WB = jaxlie.SE3(robot.forward_kinematics(cfg)[ee_link]) @ T_LB
+    obstacle = Sphere.from_center_and_radius(
+        T_WB.translation()[None], jnp.full((1,), 0.02)
+    )
+
+    bare = cuda.CUDABinaryCollisionChecker(scoll_srdf)
+    assert bool(bare.check_collision_free(robot, cfg, obstacle)), (
+        "precondition: the obstacle must clear the un-attached robot"
+    )
+
+    attached = cuda.CUDABinaryCollisionChecker(scoll_srdf.with_attachments(aset))
+    assert not bool(attached.check_collision_free(robot, cfg, obstacle))
+
+    # And an inactive slot is gated back out again.
+    off = cuda.CUDABinaryCollisionChecker(
+        scoll_srdf.with_attachments(aset.set_active("ball", False))
+    )
+    assert bool(off.check_collision_free(robot, cfg, obstacle))
+
+
+def test_cuda_binary_checker_agrees_with_the_sdf_sign_over_a_batch(
+    robot, scoll_srdf, ee_link, _tool_attachment
+):
+    """Batched verdicts must match the sign of the differentiable path."""
+    cuda = _cuda_or_skip()
+    aset, T_LB = _tool_attachment
+    ext = scoll_srdf.with_attachments(aset)
+    cfgs = [robot.default_cfg * s for s in (0.25, 0.5, 0.75, 1.0)]
+    T_WB = jaxlie.SE3(robot.forward_kinematics(robot.default_cfg)[ee_link]) @ T_LB
+    obstacle = Sphere.from_center_and_radius(
+        T_WB.translation()[None], jnp.full((1,), 0.05)
+    )
+
+    binary = cuda.CUDABinaryCollisionChecker(ext)
+    free = binary.check_collision_free(robot, jnp.stack(cfgs), obstacle)
+
+    # Reference evaluated one config at a time (see the note above on batched
+    # cfg in RobotCollisionSpherized.at_config).
+    expected = [
+        bool(
+            ext.compute_world_collision_distance(robot, c, obstacle).min() > 0
+            and ext.compute_self_collision_distance(robot, c).min() > 0
+        )
+        for c in cfgs
+    ]
+    onp.testing.assert_array_equal(onp.asarray(free), onp.asarray(expected))
+    assert not all(expected), "test is vacuous unless some config collides"
+
+
+def test_cuda_checkers_require_the_coarse_model_to_carry_the_attachment(
+    robot, scoll, ee_link, _tool_attachment
+):
+    """A coarse guard flags fine geometry by row: an unmatched attachment row
+    would never be flagged, so the collision would be missed silently."""
+    cuda = pytest.importorskip("pyroffi.collision._cuda_collision")
+    aset, _ = _tool_attachment
+    ext = scoll.with_attachments(aset)
+    for cls in (
+        cuda.CUDADifferentiableSDFCollisionChecker,
+        cuda.CUDABinaryCollisionChecker,
+    ):
+        with pytest.raises(ValueError, match="same attachment entries"):
+            cls(ext, scoll)
