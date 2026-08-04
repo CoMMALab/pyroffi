@@ -310,6 +310,96 @@ def _contact_point_world(m: ManipulatorSpec, q: Float[Array, "n"]) -> Array:
     return _gripper_world_pose(m, q).apply(jnp.asarray(m.p_local, jnp.float32))
 
 
+def _point_from_pose(m: ManipulatorSpec, T_w: jaxlie.SE3) -> Array:
+    """World contact point from an already-computed world gripper pose."""
+    return T_w.apply(jnp.asarray(m.p_local, jnp.float32))
+
+
+def _axis_from_pose(m: ManipulatorSpec, T_w: jaxlie.SE3) -> Array:
+    """Unit world finger-closing axis from an already-computed gripper pose."""
+    a = T_w.rotation().apply(jnp.asarray(m.close_axis_local, jnp.float32))
+    return a / (jnp.linalg.norm(a) + 1e-9)
+
+
+def _closure_from_poses(
+    system: ContactSystem, poses: tuple[jaxlie.SE3, ...]
+) -> Float[Array, "6*(k-1)"]:
+    """Grasp-closure residual from already-computed world gripper poses."""
+    T_ref = poses[0]
+    errs = []
+    for T_i, offset_i in zip(poses[1:], system.grasp_offsets):
+        rel = T_ref.inverse() @ T_i
+        errs.append((rel @ offset_i.inverse()).log())  # (6,) — twist [v; omega]
+    if not errs:
+        return jnp.zeros((0,))
+    return jnp.concatenate(errs)
+
+
+def grasp_kinematics_with_poses(
+    system: ContactSystem, q: Float[Array, "n"]
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Every per-configuration grasp quantity, from **one** FK pass per manipulator.
+
+    All the residuals in this module are projections of the same gripper poses,
+    so calling them individually made a trajopt cost function re-run forward
+    kinematics five or six times per timestep — twice inside
+    :func:`object_dynamics_residual` alone, which recomputes both the centre and
+    the contact points its caller usually already holds. This computes the poses
+    once and hands back the four bundles the residuals actually consume.
+
+    Returns ``(pose_params, points, center, axes, closure)``:
+
+    * ``pose_params`` ``(k, 7)``    — world gripper pose per manipulator, as
+      ``jaxlie.SE3`` parameters; rebuild one with ``jaxlie.SE3(pose_params[i])``.
+    * ``points``  ``(k, 3)``        — world contact point per manipulator.
+    * ``center``  ``(3,)``          — object centre (centroid of ``points``).
+    * ``axes``    ``(k, 3)``        — world finger-closing axis per manipulator.
+    * ``closure`` ``(6*(k-1),)``    — grasp-closure residual.
+
+    Plain arrays rather than a dataclass, so the bundle survives a ``jax.vmap``
+    over a trajectory without needing a pytree registration.
+    """
+    qs = system.split_q(q)
+    poses = tuple(
+        _gripper_world_pose(m, qm) for m, qm in zip(system.manipulators, qs)
+    )
+    points = jnp.stack(
+        [_point_from_pose(m, T_w) for m, T_w in zip(system.manipulators, poses)]
+    )
+    axes = jnp.stack(
+        [_axis_from_pose(m, T_w) for m, T_w in zip(system.manipulators, poses)]
+    )
+    center = jnp.mean(points, axis=0)
+    pose_params = jnp.stack([T_w.wxyz_xyz for T_w in poses])
+    return pose_params, points, center, axes, _closure_from_poses(system, poses)
+
+
+def grasp_kinematics(
+    system: ContactSystem, q: Float[Array, "n"]
+) -> tuple[Array, Array, Array, Array]:
+    """:func:`grasp_kinematics_with_poses` without the gripper poses.
+
+    Callers that do not need the poses themselves (the contact-rich solver only
+    wants points/centre/axes/closure) should use this, so the traced graph never
+    contains the pose bundle at all.
+
+    Returns ``(points, center, axes, closure)`` — see
+    :func:`grasp_kinematics_with_poses` for the meaning of each.
+    """
+    qs = system.split_q(q)
+    poses = tuple(
+        _gripper_world_pose(m, qm) for m, qm in zip(system.manipulators, qs)
+    )
+    points = jnp.stack(
+        [_point_from_pose(m, T_w) for m, T_w in zip(system.manipulators, poses)]
+    )
+    axes = jnp.stack(
+        [_axis_from_pose(m, T_w) for m, T_w in zip(system.manipulators, poses)]
+    )
+    center = jnp.mean(points, axis=0)
+    return points, center, axes, _closure_from_poses(system, poses)
+
+
 def gripper_poses(
     system: ContactSystem, q: Float[Array, "n"]
 ) -> tuple[jaxlie.SE3, ...]:
@@ -374,16 +464,12 @@ def grasp_closure_residual(
     pose (relative to the reference gripper) against its captured grasp
     offset. Zero iff the object is held rigidly. ``k`` is the manipulator
     count; the residual is empty for a single-manipulator system.
+
+    Callers that also need the contact points, object centre or closing axes
+    should use :func:`grasp_kinematics` instead, which produces all four from a
+    single FK pass.
     """
-    poses = gripper_poses(system, q)
-    T_ref = poses[0]
-    errs = []
-    for T_i, offset_i in zip(poses[1:], system.grasp_offsets):
-        rel = T_ref.inverse() @ T_i
-        errs.append((rel @ offset_i.inverse()).log())  # (6,) — twist [v; omega]
-    if not errs:
-        return jnp.zeros((0,))
-    return jnp.concatenate(errs)
+    return _closure_from_poses(system, gripper_poses(system, q))
 
 
 # ---------------------------------------------------------------------------
@@ -403,15 +489,31 @@ def object_dynamics_residual(
     ``i``. Gravity acts at the centre (no moment). The angular term is a
     quasi-static balance of the contact-force moments (object angular inertia
     is small for typical lift/carry motions).
-    """
-    g_vec = jnp.array([0.0, 0.0, -system.gravity], jnp.float32)
-    c = object_center_world(system, q)
-    pts = contact_points_world(system, q)
 
+    Recomputes the object centre and contact points from ``q``; if you already
+    hold them (via :func:`grasp_kinematics`) call
+    :func:`object_dynamics_residual_at` instead and skip two FK passes.
+    """
+    return object_dynamics_residual_at(
+        system,
+        object_center_world(system, q),
+        jnp.stack(contact_points_world(system, q)),
+        a_obj,
+        forces,
+    )
+
+
+def object_dynamics_residual_at(
+    system: ContactSystem,
+    center: Float[Array, "3"],
+    points: Float[Array, "k 3"],
+    a_obj: Float[Array, "3"],
+    forces: Float[Array, "k 3"],
+) -> Float[Array, "6"]:
+    """:func:`object_dynamics_residual` from a precomputed centre/contact points."""
+    g_vec = jnp.array([0.0, 0.0, -system.gravity], jnp.float32)
     force_res = system.body.mass * (a_obj - g_vec) - jnp.sum(forces, axis=0)
-    torque_res = jnp.zeros((3,), forces.dtype)
-    for p, f in zip(pts, forces):
-        torque_res = torque_res + jnp.cross(p - c, f)
+    torque_res = jnp.sum(jnp.cross(points - center, forces), axis=0)
     return jnp.concatenate([force_res, torque_res])
 
 
@@ -463,13 +565,33 @@ def grip_validity_penalty(
     ``>= f_min``) and lie within the Coulomb friction cone
     ``||f_t|| <= mu * f_n``. If ``mu_friction`` is ``None``, the grasped
     object's own ``geom.friction`` is used.
-    """
-    mu = system.body.friction if mu_friction is None else mu_friction
-    c = object_center_world(system, q)
-    qs = system.split_q(q)
 
-    def per_contact(m, qm, f):
-        n = _grip_inward_normal(m, qm, c)
+    Recomputes the centre and contact points from ``q``; callers holding them
+    (via :func:`grasp_kinematics`) should use :func:`grip_validity_penalty_at`.
+    """
+    return grip_validity_penalty_at(
+        system,
+        object_center_world(system, q),
+        jnp.stack(contact_points_world(system, q)),
+        forces,
+        mu_friction,
+        f_min,
+    )
+
+
+def grip_validity_penalty_at(
+    system: ContactSystem,
+    center: Float[Array, "3"],
+    points: Float[Array, "k 3"],
+    forces: Float[Array, "k 3"],
+    mu_friction: float | None,
+    f_min: float,
+) -> Array:
+    """:func:`grip_validity_penalty` from a precomputed centre/contact points."""
+    mu = system.body.friction if mu_friction is None else mu_friction
+
+    def per_contact(p, f):
+        n = _safe_unit(center - p)
         f_n = jnp.dot(f, n)
         f_t = f - f_n * n
         push = jnp.maximum(0.0, f_min - f_n) ** 2
@@ -477,16 +599,14 @@ def grip_validity_penalty(
         return push + cone
 
     total = jnp.array(0.0, forces.dtype)
-    for m, qm, f in zip(system.manipulators, qs, forces):
-        total = total + per_contact(m, qm, f)
+    for p, f in zip(points, forces):
+        total = total + per_contact(p, f)
     return total
 
 
 def _closing_axis_world(m: ManipulatorSpec, q: Float[Array, "n"]) -> Array:
     """Unit world direction of the gripper's finger-closing axis at ``q``."""
-    R = _gripper_world_pose(m, q).rotation()
-    a = R.apply(jnp.asarray(m.close_axis_local, jnp.float32))
-    return a / (jnp.linalg.norm(a) + 1e-9)
+    return _axis_from_pose(m, _gripper_world_pose(m, q))
 
 
 def parallel_jaw_grip_penalty(
@@ -512,12 +632,28 @@ def parallel_jaw_grip_penalty(
     ``geom.friction``. Physically correct behaviour: a top-down pinch (closing
     axis horizontal) bears the object weight as *shear*, so it slips when
     ``mass * g > 2 * mu * f_grip_max`` -- monotone in both ``mu`` and mass.
-    """
-    mu = system.body.friction if mu_friction is None else mu_friction
-    qs = system.split_q(q)
 
-    def per_contact(m, qm, f):
-        a = _closing_axis_world(m, qm)
+    Recomputes each closing axis from ``q``; callers holding the axes already
+    (via :func:`grasp_kinematics`) should use
+    :func:`parallel_jaw_grip_penalty_at`.
+    """
+    qs = system.split_q(q)
+    axes = jnp.stack(
+        [_closing_axis_world(m, qm) for m, qm in zip(system.manipulators, qs)]
+    )
+    return parallel_jaw_grip_penalty_at(system, axes, forces, mu_friction)
+
+
+def parallel_jaw_grip_penalty_at(
+    system: ContactSystem,
+    axes: Float[Array, "k 3"],
+    forces: Float[Array, "k 3"],
+    mu_friction: float | None,
+) -> Array:
+    """:func:`parallel_jaw_grip_penalty` from precomputed world closing axes."""
+    mu = system.body.friction if mu_friction is None else mu_friction
+
+    def per_contact(m, a, f):
         f_ax = jnp.dot(f, a)
         f_shear = f - f_ax * a
         fg = m.f_grip_max
@@ -530,8 +666,8 @@ def parallel_jaw_grip_penalty(
         return squeeze + shear
 
     total = jnp.array(0.0, forces.dtype)
-    for m, qm, f in zip(system.manipulators, qs, forces):
-        total = total + per_contact(m, qm, f)
+    for m, a, f in zip(system.manipulators, axes, forces):
+        total = total + per_contact(m, a, f)
     return total
 
 
@@ -551,19 +687,38 @@ def manipulator_contact_fext(
     origin and expressed in the manipulator's base-frame axes (the frame
     GRiD's dynamics live in), then placed on the last body row (all others
     zero).
+
+    Runs its own FK for the contact point; callers holding the world contact
+    point already (via :func:`grasp_kinematics`) should use
+    :func:`manipulator_contact_fext_at`.
+    """
+    return manipulator_contact_fext_at(
+        m, q, _contact_point_world(m, q), f_world
+    )
+
+
+def manipulator_contact_fext_at(
+    m: ManipulatorSpec,
+    q: Float[Array, "n"],
+    p_contact_world: Float[Array, "3"],
+    f_world: Float[Array, "3"],
+) -> Float[Array, "n 6"]:
+    """:func:`manipulator_contact_fext` from a precomputed world contact point.
+
+    ``p_contact_base = base^-1 · p_contact_world`` is exactly the quantity the
+    FK inside :func:`manipulator_contact_fext` reconstructs, so this is the same
+    wrench for one fewer forward-kinematics pass.
     """
     n = m.num_dof
     base = m.base_se3()
-    R_base_inv = base.rotation().inverse()  # world -> base rotation
 
     # Reaction force on the manipulator, in base axes.
-    f_base = R_base_inv.apply(-f_world)
+    f_base = base.rotation().inverse().apply(-f_world)
 
     # Contact point and last-body origin, both in base axes.
     _, r_world = m.grid.jacobian(q)  # r_world: (n_body, 3) in base frame
     r_last = r_world[..., -1, :]  # already base frame (grid uses manipulator base)
-    grip_base = jaxlie.SE3(m.robot.forward_kinematics(q)[m.grip_link_index])
-    p_contact_base = grip_base.apply(jnp.asarray(m.p_local, f_base.dtype))
+    p_contact_base = base.inverse().apply(p_contact_world.astype(f_base.dtype))
 
     tau_base = jnp.cross(p_contact_base - r_last, f_base)
     wrench = jnp.concatenate([tau_base, f_base])  # [torque; force]

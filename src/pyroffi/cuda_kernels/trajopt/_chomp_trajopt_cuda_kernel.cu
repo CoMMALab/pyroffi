@@ -550,6 +550,8 @@ __global__ void chomp_trajopt_kernel(
     float* __restrict__ out_costs,
     float* __restrict__ workspace,
     int workspace_stride,
+    int start_stride,
+    int goal_stride,
     int B,
     int T,
     int n_joints,
@@ -580,6 +582,11 @@ __global__ void chomp_trajopt_kernel(
     float fd_eps)
 {
     const int b = blockIdx.x;
+    // Per-batch endpoints: stride 0 broadcasts one (start, goal) pair to every
+    // block; stride n_act gives this block its own pair from a [B, n_act] buffer,
+    // so ONE launch can optimize a whole graph of distinct start/goal problems.
+    const float* const my_start = start + (size_t)b * start_stride;
+    const float* const my_goal  = goal  + (size_t)b * goal_stride;
     if (b >= B) return;
 
     // Cache robot FK arrays in shared memory once per trajectory block.
@@ -610,8 +617,8 @@ __global__ void chomp_trajopt_kernel(
     if (threadIdx.x == 0) {
         for (int i = 0; i < n; i++) traj[i] = init_trajs[b * n + i];
         for (int d = 0; d < n_act; d++) {
-            traj[d] = start[d];
-            traj[(T - 1) * n_act + d] = goal[d];
+            traj[d] = my_start[d];
+            traj[(T - 1) * n_act + d] = my_goal[d];
         }
     }
     __syncthreads();
@@ -937,8 +944,8 @@ __global__ void chomp_trajopt_kernel(
             s_w_coll = fminf(s_w_coll * collision_penalty_scale, w_collision_max);
 
             for (int d = 0; d < n_act; d++) {
-                traj[d] = start[d];
-                traj[(T - 1) * n_act + d] = goal[d];
+                traj[d] = my_start[d];
+                traj[(T - 1) * n_act + d] = my_goal[d];
             }
 
             s_stop = (s_stall_steps >= early_stop_patience) ? 1 : 0;
@@ -1077,6 +1084,12 @@ static ffi::Error ChompTrajoptCudaImpl(
     // single-trajectory collision evaluations and synchronization.
     constexpr int THREADS = 32;
 
+    // [B, n_act] endpoint buffers mean per-trajectory endpoints; the classic
+    // [n_act] buffer is broadcast to every trajectory (stride 0).
+    const size_t endpoint_elems = static_cast<size_t>(B) * static_cast<size_t>(n_act);
+    const int start_stride = (start.element_count() >= endpoint_elems) ? n_act : 0;
+    const int goal_stride  = (goal.element_count()  >= endpoint_elems) ? n_act : 0;
+
     chomp_trajopt_kernel<<<B, THREADS, dyn_shared_bytes, stream>>>(
         init_trajs.typed_data(),
         twists.typed_data(),
@@ -1103,6 +1116,8 @@ static ffi::Error ChompTrajoptCudaImpl(
         out_costs->typed_data(),
         out_workspace->typed_data(),
         workspace_stride,
+        start_stride,
+        goal_stride,
         B,
         T,
         n_joints,

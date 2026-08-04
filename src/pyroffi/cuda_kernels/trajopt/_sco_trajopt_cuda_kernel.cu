@@ -615,6 +615,11 @@ void sco_trajopt_kernel(
     float*       __restrict__ out_costs,
     float*       __restrict__ workspace,
     int workspace_stride,
+    // Per-batch endpoint strides (elements): 0 = every trajectory shares the one
+    // (start, goal) pair; n_act = each batch entry has its OWN pair, laid out as
+    // [B, n_act]. The latter lets a whole graph of DISTINCT transits be optimized
+    // in ONE launch instead of one launch per (start, goal).
+    int start_stride, int goal_stride,
     int B, int T, int n_joints, int n_act,
     int N, int S, int P,
     int Ms, int Mc, int Mb, int Mh,
@@ -660,9 +665,13 @@ void sco_trajopt_kernel(
         s_pair_i[i] = pair_i[i];
         s_pair_j[i] = pair_j[i];
     }
+    // Endpoints: strides of 0 broadcast one pair to every block; strides of n_act
+    // give this block its own pair (blockIdx.x indexes the batch).
+    const float* my_start = start + (size_t)blockIdx.x * start_stride;
+    const float* my_goal  = goal  + (size_t)blockIdx.x * goal_stride;
     for (int i = threadIdx.x; i < n_act; i += blockDim.x) {
         s_lower[i] = lower[i]; s_upper[i] = upper[i];
-        s_start[i] = start[i]; s_goal[i]  = goal[i];
+        s_start[i] = my_start[i]; s_goal[i] = my_goal[i];
     }
     __syncthreads();
 
@@ -1182,6 +1191,11 @@ static ffi::Error ScoTrajoptCudaImpl(
     float*       p_out_costs       = out_costs->typed_data();
     float*       p_out_workspace   = out_workspace->typed_data();
     int          k_workspace_stride= workspace_stride;
+    // A [B, n_act] endpoint buffer means per-trajectory endpoints; anything
+    // smaller (the classic [n_act]) is broadcast to every trajectory.
+    const size_t endpoint_elems = static_cast<size_t>(B) * static_cast<size_t>(n_act);
+    int          k_start_stride = (start.element_count() >= endpoint_elems) ? n_act : 0;
+    int          k_goal_stride  = (goal.element_count()  >= endpoint_elems) ? n_act : 0;
     int          k_B = B, k_T = T, k_n_joints = n_joints, k_n_act = n_act;
     int          k_N = N, k_S = static_cast<int>(S), k_P = P;
     int          k_Ms = Ms, k_Mc = Mc, k_Mb = Mb, k_Mh = Mh;
@@ -1198,6 +1212,7 @@ static ffi::Error ScoTrajoptCudaImpl(
         &p_lower, &p_upper, &p_start, &p_goal,
         &p_out_trajs, &p_out_costs, &p_out_workspace,
         &k_workspace_stride,
+        &k_start_stride, &k_goal_stride,
         &k_B, &k_T, &k_n_joints, &k_n_act,
         &k_N, &k_S, &k_P, &k_Ms, &k_Mc, &k_Mb, &k_Mh,
         &k_n_outer, &k_n_inner, &k_m_lbfgs,
@@ -1230,6 +1245,7 @@ static ffi::Error ScoTrajoptCudaImpl(
             p_lower, p_upper, p_start, p_goal,
             p_out_trajs, p_out_costs, p_out_workspace,
             k_workspace_stride,
+            k_start_stride, k_goal_stride,
             k_B, k_T, k_n_joints, k_n_act,
             k_N, k_S, k_P, k_Ms, k_Mc, k_Mb, k_Mh,
             k_n_outer, k_n_inner, k_m_lbfgs,

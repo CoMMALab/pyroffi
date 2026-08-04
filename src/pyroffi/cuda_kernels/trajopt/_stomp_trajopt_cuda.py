@@ -181,7 +181,7 @@ def stomp_trajopt_cuda(
     # no bounds checking, so exceeding MAX_ACT/MAX_JOINTS silently corrupts
     # per-thread state rather than crashing. Shapes are static under jit, so
     # this costs nothing at runtime and fails at trace time.
-    check_capacity(__file__, _LIB_NAME, n_joints=twists.shape[0],
+    check_capacity(__file__, _LIB_NAME, n_joints=robot.joints.twists.shape[0],
                    n_act=init_trajs.shape[-1], kernel="stomp_trajopt_cuda")
 
     B, T, n_act = init_trajs.shape

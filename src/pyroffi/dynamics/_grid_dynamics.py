@@ -32,7 +32,7 @@ from jax import numpy as jnp
 from jaxtyping import Float
 
 from .._robot_urdf_parser import RobotURDFParser
-from ._dynamics_jax import _DEFAULT_GRAVITY, jacobian_jax, mass_matrix_jax
+from ._dynamics_jax import _DEFAULT_GRAVITY, jacobian_jax
 from ._grid_codegen import compile_grid_library
 from ._grid_robot_adapter import build_grid_robot
 from ._integrators import StepMethod, step_with_fd
@@ -581,17 +581,17 @@ def _id_jvp(gd, primals, tangents):
                 + gd._damping * t_qd
             )
     if _nz(t_qdd):
-        if gd._dyn_info is None:
-            raise NotImplementedError(
-                "Differentiating inverse_dynamics w.r.t. qdd requires the "
-                "pure-JAX mass matrix, which is unavailable for this URDF."
-            )
-        # d tau / d qdd = M(q).
-        M = mass_matrix_jax(gd._dyn_info, q.astype(jnp.float32))
+        # d tau / d qdd = M(q), via the GPU CRBA kernel rather than the pure-JAX
+        # one. This tangent is live on *every* gradient evaluation in the contact
+        # solvers (qdd is finite-differenced from the decision variables), so it
+        # is squarely on the hot path. Using the kernel also drops the old
+        # dependency on ``_dyn_info``, so URDFs that carry no pure-JAX dynamics
+        # tables are now differentiable w.r.t. qdd as well.
+        M = gd._crba_call(q.astype(jnp.float32))
         tan = tan + jnp.einsum("...ij,...j->...i", M, t_qdd)
-    # The GRiD kernels are float32 end to end, but the pure-JAX pieces mixed in
-    # above (mass_matrix_jax) follow the ambient x64 setting; a custom_jvp must
-    # return a tangent whose dtype matches the primal, so pin it here.
+    # The GRiD kernels are float32 end to end, but the incoming tangents follow
+    # the ambient x64 setting; a custom_jvp must return a tangent whose dtype
+    # matches the primal, so pin it here.
     return out, tan.astype(out.dtype)
 
 

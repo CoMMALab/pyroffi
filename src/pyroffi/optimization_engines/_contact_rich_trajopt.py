@@ -53,7 +53,12 @@ from jaxtyping import Float
 from ..dynamics import _contact as C
 from ..dynamics._contact import ContactSystem
 from ._contact_trajopt import _fd_vel_acc
-from ._flat_contact_trajopt import _collision_cost, _dt_from_scale, _scale_from_dt
+from ._flat_contact_trajopt import (
+    _collision_cost,
+    _dt_from_scale,
+    _scale_from_dt,
+    _torque_cost,
+)
 from ._sco_optimization import (
     _LS_ALPHAS,
     _lbfgs_two_loop,
@@ -129,6 +134,20 @@ class ContactRichTrajOptConfig:
     dual_scale: float = 1.0
     """Scaling on the dual-ascent step (mu += dual_scale * rho * residual)."""
 
+    # --- Early termination -------------------------------------------------
+    #   Both loops are fixed-length `lax.scan`s, so with these enabled a solve
+    #   that converges early stops instead of burning the remaining iterations.
+    #   OFF by default: on the AL subproblems this solver actually sees, the
+    #   penalty terms keep the gradient norm far above any sensible tolerance,
+    #   so the check never fires and the per-iteration branch measured ~11%
+    #   *slower* on the bimanual box-lift benchmark. Turn them on for problems
+    #   that do reach a stationary point before the iteration budget runs out.
+    grad_tol: float = 0.0
+    """Inner L-BFGS stops once ``max|grad|`` drops below this. 0 disables."""
+    constraint_tol: float = 0.0
+    """Outer AL loop stops once ``max|g|`` and ``max|b|`` are both below this
+    (and the duals have therefore stopped moving). 0 disables."""
+
 
 # ---------------------------------------------------------------------------
 # Augmented-Lagrangian objective (forces are DECISION VARIABLES here)
@@ -172,28 +191,20 @@ def _contact_rich_cost(
     if cfg.w_collision or cfg.w_self_collision:
         cost += _collision_cost(q, system, colls, world_geoms, cfg)
 
-    # --- Manipulator dynamics: torques via GRiD ID with contact reaction --
-    dof_offsets = []
-    idx = 0
-    for m in system.manipulators:
-        dof_offsets.append(idx)
-        idx += m.num_dof
+    # --- Grasp kinematics: ONE forward-kinematics pass per manipulator -----
+    #   Every contact term below (closure residual, object centre + Newton-Euler
+    #   balance, grip penalty, and the reaction wrench handed to inverse
+    #   dynamics) is a projection of the same gripper poses. Computing them
+    #   together instead of letting each residual re-derive them from q removes
+    #   five of the six FK sweeps this cost used to run per timestep.
+    points, centers, axes, g = jax.vmap(C.grasp_kinematics, in_axes=(None, 0))(
+        system, q
+    )  # (T,k,3), (T,3), (T,k,3), (T,6(k-1))
 
-    for i, m in enumerate(system.manipulators):
-        o = dof_offsets[i]
-        q_i = q[:, o : o + m.num_dof]
-        f_i = lam[:, i, :]
-        qd_i, qdd_i = _fd_vel_acc(q_i, dt)
-        fext_i = jax.vmap(C.manipulator_contact_fext, in_axes=(None, 0, 0))(
-            m, q_i, f_i
-        )
-        tau_i = m.grid.inverse_dynamics(q_i, qd_i, qdd_i, f_ext=fext_i)
-        cost += cfg.w_effort * jnp.sum(tau_i**2)
-        over_i = jnp.maximum(0.0, jnp.abs(tau_i) - cfg.tau_max) ** 2
-        cost += cfg.w_torque_limit * jnp.sum(over_i)
+    # --- Manipulator dynamics: torques via GRiD ID with contact reaction --
+    cost += _torque_cost(system, q, lam, points, dt, cfg)
 
     # --- Fixed-contact (grasp closure), augmented Lagrangian --------------
-    g = jax.vmap(C.grasp_closure_residual, in_axes=(None, 0))(system, q)  # (T,6(k-1))
     if g.shape[-1] > 0:
         cost += jnp.sum(mu * g) + 0.5 * rho_g * jnp.sum(g**2)
 
@@ -201,21 +212,42 @@ def _contact_rich_cost(
     #   THIS is the contact-rich core: the forces are free variables and this
     #   equality is what ties them to the object motion (vs. the flat solver's
     #   analytic G+ allocation that made the residual identically zero).
-    centers = jax.vmap(C.object_center_world, in_axes=(None, 0))(system, q)  # (T,3)
     _, a_obj = _fd_vel_acc(centers, dt)  # (T,3)
-    b = jax.vmap(C.object_dynamics_residual, in_axes=(None, 0, 0, 0))(
-        system, q, a_obj, lam
+    b = jax.vmap(C.object_dynamics_residual_at, in_axes=(None, 0, 0, 0, 0))(
+        system, centers, points, a_obj, lam
     )  # (T,6)
     cost += jnp.sum(nu * b) + 0.5 * rho_o * jnp.sum(b**2)
 
     # --- Grip validity (parallel-jaw pinch) + force regularization -------
     grip = jax.vmap(
-        C.parallel_jaw_grip_penalty, in_axes=(None, 0, 0, None)
-    )(system, q, lam, cfg.mu_friction)
+        C.parallel_jaw_grip_penalty_at, in_axes=(None, 0, 0, None)
+    )(system, axes, lam, cfg.mu_friction)
     cost += cfg.w_grip * jnp.sum(grip)
     cost += cfg.w_force_reg * jnp.sum(lam**2)
 
     return cost
+
+
+def _constraint_residuals(
+    system: ContactSystem,
+    q: Float[Array, "T n"],
+    lam: Float[Array, "T k 3"],
+    dt: Array,
+) -> tuple[Array, Array, Array]:
+    """``(grasp_closure, object_dynamics, object_centers)`` over a trajectory.
+
+    Both the dual-ascent step and the final diagnostics need exactly this
+    triple; sharing one FK pass keeps each of them to a single pass instead of
+    the three they used to run apiece.
+    """
+    points, centers, _, g = jax.vmap(C.grasp_kinematics, in_axes=(None, 0))(
+        system, q
+    )
+    _, a_obj = _fd_vel_acc(centers, dt)
+    b = jax.vmap(C.object_dynamics_residual_at, in_axes=(None, 0, 0, 0, 0))(
+        system, centers, points, a_obj, lam
+    )
+    return g, b, centers
 
 
 # ---------------------------------------------------------------------------
@@ -232,11 +264,12 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: ContactRichTrajOptConfig):
         z0, z0, cost0, z0, g0,
         jnp.zeros((m, nz)), jnp.zeros((m, nz)), jnp.zeros(m),
         jnp.int32(0), jnp.int32(0), jnp.int32(0),
+        jnp.bool_(False),  # converged
     )
 
-    def step(carry, _):
+    def body(carry):
         (x, best_x, best_cost, x_prev, g_prev,
-         s_buf, y_buf, rho_buf, m_used, newest, it) = carry
+         s_buf, y_buf, rho_buf, m_used, newest, it, _) = carry
         cost_val, g = jax.value_and_grad(cost_fn)(x)
         g = g * endpoint_mask
         s_k = x - x_prev
@@ -246,8 +279,11 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: ContactRichTrajOptConfig):
         valid = (sy > 1e-10 * yy + 1e-30) & (it > 0)
         new_newest = (newest + 1) % m
         actual_newest = jnp.where(valid, new_newest, newest)
-        s_buf = jnp.where(valid, s_buf.at[new_newest].set(s_k), s_buf)
-        y_buf = jnp.where(valid, y_buf.at[new_newest].set(y_k), y_buf)
+        # Update only the newest slot. Selecting on the *row* is O(nz); the
+        # earlier `where` over the whole updated buffer was O(m * nz) for the
+        # same result.
+        s_buf = s_buf.at[new_newest].set(jnp.where(valid, s_k, s_buf[new_newest]))
+        y_buf = y_buf.at[new_newest].set(jnp.where(valid, y_k, y_buf[new_newest]))
         rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / (sy + 1e-30)), rho_buf)
         m_used = jnp.where(valid & (m_used < m), m_used + 1, m_used)
         newest = actual_newest
@@ -264,10 +300,32 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: ContactRichTrajOptConfig):
         improved = new_cost < best_cost
         best_x = jnp.where(improved, x_new, best_x)
         best_cost = jnp.where(improved, new_cost, best_cost)
+        # Stationary point of the (currently fixed) AL subproblem: further
+        # L-BFGS steps cannot move `best_x`, so the remaining iterations are
+        # pure waste. Static-gated so the disabled default emits no reduction.
+        converged = (
+            jnp.max(jnp.abs(g)) < cfg.grad_tol
+            if cfg.grad_tol > 0.0
+            else jnp.bool_(False)
+        )
         return (
             x_new, best_x, best_cost, x, g,
             s_buf, y_buf, rho_buf, m_used, newest, it + 1,
-        ), None
+            converged,
+        )
+
+    # Gated on the *static* config so the default (disabled) emits exactly the
+    # graph it always did. `lax.cond` does genuinely skip the branch on GPU here
+    # -- these solvers optimize a single z, so it is not vmapped down into a
+    # `select` -- but on the AL subproblems this solver actually sees, the
+    # gradient norm never approaches grad_tol, so the check only ever costs a
+    # per-iteration branch. Enable it for problems that do converge early.
+    if cfg.grad_tol > 0.0:
+        def step(carry, _):
+            return jax.lax.cond(carry[-1], lambda c: c, body, carry), None
+    else:
+        def step(carry, _):
+            return body(carry), None
 
     (_, best_x, *_), _ = jax.lax.scan(step, init, None, length=cfg.n_inner_iters)
     return best_x
@@ -308,8 +366,8 @@ def _contact_rich_jax(
 
     n_grasp = 6 * (k - 1)
 
-    def outer(carry, _):
-        z, mu, nu, rho_g, rho_o = carry
+    def outer_body(carry):
+        z, mu, nu, rho_g, rho_o, _ = carry
         cost_fn = lambda zz: _contact_rich_cost(
             zz, system, lower, upper, mu, nu, rho_g, rho_o, T, opt_cfg,
             colls, world_geoms,
@@ -323,20 +381,31 @@ def _contact_rich_jax(
         dt = _dt_from_scale(z[-1], opt_cfg)
 
         # Dual ascent on the equality-constraint multipliers.
-        g = jax.vmap(C.grasp_closure_residual, in_axes=(None, 0))(system, q)
-        centers = jax.vmap(C.object_center_world, in_axes=(None, 0))(system, q)
-        _, a_obj = _fd_vel_acc(centers, dt)
-        b = jax.vmap(C.object_dynamics_residual, in_axes=(None, 0, 0, 0))(
-            system, q, a_obj, lam
-        )
+        g, b, _ = _constraint_residuals(system, q, lam, dt)
         if n_grasp > 0:
             mu = mu + opt_cfg.dual_scale * rho_g * g
         nu = nu + opt_cfg.dual_scale * rho_o * b
         rho_g = jnp.minimum(rho_g * opt_cfg.penalty_scale, opt_cfg.rho_grasp_max)
         rho_o = jnp.minimum(rho_o * opt_cfg.penalty_scale, opt_cfg.rho_obj_max)
-        return (z, mu, nu, rho_g, rho_o), None
+        # Both equality constraints satisfied: the dual updates above are then
+        # no-ops and every later outer iteration reproduces this same z.
+        if opt_cfg.constraint_tol > 0.0:
+            gmax = jnp.max(jnp.abs(g)) if n_grasp > 0 else jnp.array(0.0)
+            converged = (
+                jnp.maximum(gmax, jnp.max(jnp.abs(b))) < opt_cfg.constraint_tol
+            )
+        else:
+            converged = jnp.bool_(False)
+        return (z, mu, nu, rho_g, rho_o, converged)
 
-    (z, mu, nu, rho_g, rho_o), _ = jax.lax.scan(
+    if opt_cfg.constraint_tol > 0.0:
+        def outer(carry, _):
+            return jax.lax.cond(carry[-1], lambda c: c, outer_body, carry), None
+    else:
+        def outer(carry, _):
+            return outer_body(carry), None
+
+    (z, mu, nu, rho_g, rho_o, _), _ = jax.lax.scan(
         outer,
         (
             z,
@@ -344,6 +413,7 @@ def _contact_rich_jax(
             jnp.zeros((T, 6)),
             jnp.array(opt_cfg.rho_grasp, jnp.float32),
             jnp.array(opt_cfg.rho_obj, jnp.float32),
+            jnp.bool_(False),
         ),
         None,
         length=opt_cfg.n_outer_iters,
@@ -352,15 +422,10 @@ def _contact_rich_jax(
     q = z[:n_q].reshape(T, ndof)
     forces = z[n_q : n_q + n_lam].reshape(T, k, 3)
     dt = _dt_from_scale(z[-1], opt_cfg)
-    centers = jax.vmap(C.object_center_world, in_axes=(None, 0))(system, q)
 
     # Diagnostics: object-dynamics residual (this is the constraint the forces
-    # are optimized to satisfy) and grasp-closure residual.
-    _, a_obj = _fd_vel_acc(centers, dt)
-    b = jax.vmap(C.object_dynamics_residual, in_axes=(None, 0, 0, 0))(
-        system, q, a_obj, forces
-    )
-    g = jax.vmap(C.grasp_closure_residual, in_axes=(None, 0))(system, q)
+    # are optimized to satisfy) and grasp-closure residual. One shared FK pass.
+    g, b, centers = _constraint_residuals(system, q, forces, dt)
     grasp_rms = jnp.sqrt(jnp.mean(g**2)) if g.shape[-1] > 0 else jnp.array(0.0)
     residuals = jnp.array(
         [jnp.sqrt(jnp.mean(b**2)), jnp.max(jnp.abs(b)), grasp_rms]

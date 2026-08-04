@@ -227,8 +227,9 @@ def _lbfgs_ik_single(
 
         new_newest     = (newest + 1) % m_lbfgs
         actual_newest  = jnp.where(valid, new_newest, newest)
-        s_buf   = jnp.where(valid, s_buf.at[new_newest].set(s_k),       s_buf)
-        y_buf   = jnp.where(valid, y_buf.at[new_newest].set(y_k),       y_buf)
+        # Update only the newest slot: O(n) rather than O(m_lbfgs * n).
+        s_buf   = s_buf.at[new_newest].set(jnp.where(valid, s_k, s_buf[new_newest]))
+        y_buf   = y_buf.at[new_newest].set(jnp.where(valid, y_k, y_buf[new_newest]))
         rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / sy), rho_buf)
         m_used  = jnp.where(valid & (m_used < m_lbfgs), m_used + 1,     m_used)
         newest  = actual_newest

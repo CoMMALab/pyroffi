@@ -382,6 +382,8 @@ __global__ void ls_trajopt_kernel(
     float* __restrict__ out_costs,
     float* __restrict__ workspace,
     int workspace_stride,
+    int start_stride,
+    int goal_stride,
     int B,
     int T,
     int n_joints,
@@ -413,6 +415,11 @@ __global__ void ls_trajopt_kernel(
     if (threadIdx.x != 0) return;
 
     int b = blockIdx.x;
+    // Per-batch endpoints: stride 0 broadcasts one (start, goal) pair to every
+    // block; stride n_act gives this block its own pair from a [B, n_act] buffer,
+    // so ONE launch can optimize a whole graph of distinct start/goal problems.
+    const float* const my_start = start + (size_t)b * start_stride;
+    const float* const my_goal  = goal  + (size_t)b * goal_stride;
     if (b >= B) return;
 
     int n = T * n_act;
@@ -432,8 +439,8 @@ __global__ void ls_trajopt_kernel(
 
     for (int i = 0; i < n; i++) traj[i] = init_trajs[(size_t)b * n + i];
     for (int d = 0; d < n_act; d++) {
-        traj[d] = start[d];
-        traj[(T - 1) * n_act + d] = goal[d];
+        traj[d] = my_start[d];
+        traj[(T - 1) * n_act + d] = my_goal[d];
     }
 
     float w_coll = w_collision;
@@ -538,8 +545,8 @@ __global__ void ls_trajopt_kernel(
                 Jk,
                 lower,
                 upper,
-                start,
-                goal,
+                my_start,
+                my_goal,
                 T,
                 n_act,
                 sqrt_w_acc,
@@ -569,8 +576,8 @@ __global__ void ls_trajopt_kernel(
                     Jk,
                     lower,
                     upper,
-                    start,
-                    goal,
+                    my_start,
+                    my_goal,
                     T,
                     n_act,
                     sqrt_w_acc,
@@ -614,8 +621,8 @@ __global__ void ls_trajopt_kernel(
                     traj[i] = fmaxf(lower[d], fminf(upper[d], traj[i]));
                 }
                 for (int d = 0; d < n_act; d++) {
-                    traj[d] = start[d];
-                    traj[(T - 1) * n_act + d] = goal[d];
+                    traj[d] = my_start[d];
+                    traj[(T - 1) * n_act + d] = my_goal[d];
                 }
 
                 lst_build_residual(
@@ -625,8 +632,8 @@ __global__ void ls_trajopt_kernel(
                     Jk,
                     lower,
                     upper,
-                    start,
-                    goal,
+                    my_start,
+                    my_goal,
                     T,
                     n_act,
                     sqrt_w_acc,
@@ -652,8 +659,8 @@ __global__ void ls_trajopt_kernel(
                     traj[i] = fmaxf(lower[d], fminf(upper[d], traj[i]));
                 }
                 for (int d = 0; d < n_act; d++) {
-                    traj[d] = start[d];
-                    traj[(T - 1) * n_act + d] = goal[d];
+                    traj[d] = my_start[d];
+                    traj[(T - 1) * n_act + d] = my_goal[d];
                 }
                 lam = fmaxf(1e-8f, lam * 0.5f);
             } else {
@@ -814,6 +821,12 @@ static ffi::Error LsTrajoptCudaImpl(
     int m = (5 * T - 3) * n_act + T * LST_G;
     int workspace_stride = n + T * LST_G + T * LST_G * n_act + m + m + n + n + T * n_joints * 7;
 
+    // [B, n_act] endpoint buffers mean per-trajectory endpoints; the classic
+    // [n_act] buffer is broadcast to every trajectory (stride 0).
+    const size_t endpoint_elems = static_cast<size_t>(B) * static_cast<size_t>(n_act);
+    const int start_stride = (start.element_count() >= endpoint_elems) ? n_act : 0;
+    const int goal_stride  = (goal.element_count()  >= endpoint_elems) ? n_act : 0;
+
     ls_trajopt_kernel<<<B, 1, 0, stream>>>(
         init_trajs.typed_data(),
         twists.typed_data(),
@@ -840,6 +853,8 @@ static ffi::Error LsTrajoptCudaImpl(
         out_costs->typed_data(),
         out_workspace->typed_data(),
         workspace_stride,
+        start_stride,
+        goal_stride,
         B,
         T,
         n_joints,

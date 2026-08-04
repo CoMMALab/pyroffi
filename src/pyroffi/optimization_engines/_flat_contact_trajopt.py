@@ -155,6 +155,15 @@ class FlatContactTrajOptConfig:
     """Per-stage multiplier on w_track (cheap penalty continuation)."""
     w_track_max: float = 1e4
 
+    # --- Early termination -------------------------------------------------
+    #   The inner solve is a fixed-length `lax.scan`; enabling this stops a
+    #   converged solve instead of burning the remaining iterations. OFF by
+    #   default -- see the matching note in :mod:`_contact_rich_trajopt`: on
+    #   these objectives the gradient norm never approaches the tolerance, so
+    #   the check only costs a per-iteration branch.
+    grad_tol: float = 0.0
+    """Inner L-BFGS stops once ``max|grad|`` drops below this. 0 disables."""
+
     # --- Joint-space regularity ---
     w_q_smooth: float = 0.2
     w_q_acc: float = 0.5
@@ -266,11 +275,36 @@ def allocate_forces(
     ``null(G)`` so the grip can be tightened without changing ``w_req``. The
     result therefore *always* satisfies object dynamics — there is no residual
     left to constrain.
+
+    Runs its own FK for the contact points; callers holding them (via
+    :func:`~pyroffi.dynamics._contact.grasp_kinematics`) should call
+    :func:`allocate_forces_at`.
     """
+    return allocate_forces_at(
+        system,
+        jnp.stack(C.contact_points_world(system, q)),
+        c,
+        R_obj,
+        a_lin,
+        alpha,
+        omega,
+        squeeze,
+    )
+
+
+def allocate_forces_at(
+    system: ContactSystem,
+    P: Float[Array, "k 3"],
+    c: Float[Array, "3"],
+    R_obj: Array,
+    a_lin: Float[Array, "3"],
+    alpha: Float[Array, "3"],
+    omega: Float[Array, "3"],
+    squeeze: Array,
+) -> Float[Array, "k 3"]:
+    """:func:`allocate_forces` from precomputed world contact points."""
     k = system.num_manipulators
-    dtype = q.dtype
-    pts = C.contact_points_world(system, q)  # tuple of (3,)
-    P = jnp.stack(pts)  # (k, 3)
+    dtype = P.dtype
 
     # Required net wrench about the object centre c.
     g_vec = jnp.array([0.0, 0.0, -system.gravity], dtype)
@@ -306,6 +340,78 @@ def allocate_forces(
     proj = raw - Gpinv @ (G @ raw)  # null-space component
     lam = (lam_part + proj).reshape(k, 3)
     return lam
+
+
+def _dof_offsets(system: ContactSystem) -> list[int]:
+    offs, idx = [], 0
+    for m in system.manipulators:
+        offs.append(idx)
+        idx += m.num_dof
+    return offs
+
+
+def _shares_one_grid(system: ContactSystem) -> bool:
+    """True iff every manipulator is driven by the same GRiD model.
+
+    The common bimanual case is two identical arms, where the per-arm inverse
+    dynamics can be stacked into one batched kernel launch instead of ``k``.
+    """
+    g0 = system.manipulators[0].grid
+    return all(m.grid is g0 for m in system.manipulators)
+
+
+def _torque_cost(
+    system: ContactSystem,
+    q: Float[Array, "T n"],
+    lam: Float[Array, "T k 3"],
+    points: Float[Array, "T k 3"],
+    dt: Array,
+    cfg,
+) -> Array:
+    """Effort + torque-limit cost from GRiD inverse dynamics.
+
+    ``cfg`` is any config exposing ``w_effort``, ``w_torque_limit`` and
+    ``tau_max`` — shared verbatim by the flat and contact-rich solvers.
+
+    When every manipulator shares one GRiD model the ``k`` inverse-dynamics
+    calls are stacked into a single launch over a ``(k, T)`` leading batch —
+    which also fuses the analytic-gradient and CRBA kernels behind the custom
+    JVP. Heterogeneous systems fall back to the per-manipulator loop.
+    """
+    offs = _dof_offsets(system)
+    manips = system.manipulators
+
+    # Per-arm reaction wrenches (each arm has its own base transform and contact
+    # point, so this part stays per-manipulator either way).
+    fexts = [
+        jax.vmap(C.manipulator_contact_fext_at, in_axes=(None, 0, 0, 0))(
+            m, q[:, o : o + m.num_dof], points[:, i, :], lam[:, i, :]
+        )
+        for i, (m, o) in enumerate(zip(manips, offs))
+    ]
+
+    def _cost_from_tau(tau: Array) -> Array:
+        over = jnp.maximum(0.0, jnp.abs(tau) - cfg.tau_max) ** 2
+        return cfg.w_effort * jnp.sum(tau**2) + cfg.w_torque_limit * jnp.sum(over)
+
+    if _shares_one_grid(system) and len({m.num_dof for m in manips}) == 1:
+        q_all = jnp.stack(
+            [q[:, o : o + m.num_dof] for m, o in zip(manips, offs)]
+        )  # (k, T, ndof_arm)
+        qd_all, qdd_all = jax.vmap(_fd_vel_acc, in_axes=(0, None))(q_all, dt)
+        tau_all = manips[0].grid.inverse_dynamics(
+            q_all, qd_all, qdd_all, f_ext=jnp.stack(fexts)
+        )
+        return _cost_from_tau(tau_all)
+
+    cost = jnp.array(0.0, q.dtype)
+    for i, (m, o) in enumerate(zip(manips, offs)):
+        q_i = q[:, o : o + m.num_dof]
+        qd_i, qdd_i = _fd_vel_acc(q_i, dt)
+        cost += _cost_from_tau(
+            m.grid.inverse_dynamics(q_i, qd_i, qdd_i, f_ext=fexts[i])
+        )
+    return cost
 
 
 # ---------------------------------------------------------------------------
@@ -357,18 +463,26 @@ def _flat_cost(
         phis, 0.0, cfg.w_obj_acc, cfg.w_obj_jerk
     )
 
+    # --- Grasp kinematics: ONE forward-kinematics pass per manipulator -----
+    #   The tracking residual, the object centre, the force allocation, the grip
+    #   penalty and the reaction wrench are all projections of the same gripper
+    #   poses. Deriving them together removes five of the six FK sweeps this cost
+    #   used to run per timestep.
+    fk_params, points, centers, _, _ = jax.vmap(
+        C.grasp_kinematics_with_poses, in_axes=(None, 0)
+    )(system, q)  # (T,k,7), (T,k,3), (T,3)
+
     # --- Grasp tracking: each arm follows its object-derived gripper pose --
-    def track_res(delta_t, q_t):
+    def track_res(delta_t, fk_params_t):
         xi = _object_pose(delta_t, T_obj0)
         targets = _gripper_targets(xi, offsets)
-        qs = system.split_q(q_t)
-        errs = []
-        for m, qm, tgt in zip(system.manipulators, qs, targets):
-            fk = C._gripper_world_pose(m, qm)
-            errs.append((fk.inverse() @ tgt).log())
+        errs = [
+            (jaxlie.SE3(fk_params_t[i]).inverse() @ tgt).log()
+            for i, tgt in enumerate(targets)
+        ]
         return jnp.concatenate(errs)  # (6k,)
 
-    track = jax.vmap(track_res)(delta, q)  # (T, 6k)
+    track = jax.vmap(track_res)(delta, fk_params)  # (T, 6k)
     cost += w_track * jnp.sum(track**2)
 
     # --- Joint-space regularity ------------------------------------------
@@ -386,37 +500,20 @@ def _flat_cost(
     # --- Allocate forces (exact object dynamics) -------------------------
     # Balance about the *actual* object centre (contact-point centroid), so the
     # allocated forces satisfy the same Newton-Euler residual a caller measures.
-    centers = jax.vmap(C.object_center_world, in_axes=(None, 0))(system, q)  # (T,3)
     _, a_lin = _fd_vel_acc(centers, dt)
     omega, alpha = _angular_rates(phis, dt)
     R_mats = jax.vmap(lambda R: R.as_matrix())(xis.rotation())  # (T,3,3)
-    lam = jax.vmap(allocate_forces, in_axes=(None, 0, 0, 0, 0, 0, 0, 0))(
-        system, q, centers, R_mats, a_lin, alpha, omega, squeeze
+    lam = jax.vmap(allocate_forces_at, in_axes=(None, 0, 0, 0, 0, 0, 0, 0))(
+        system, points, centers, R_mats, a_lin, alpha, omega, squeeze
     )  # (T, k, 3)
 
     # --- Torque effort + limits via GRiD inverse dynamics ----------------
-    dof_offsets = []
-    idx = 0
-    for m in system.manipulators:
-        dof_offsets.append(idx)
-        idx += m.num_dof
-    for i, m in enumerate(system.manipulators):
-        o = dof_offsets[i]
-        q_i = q[:, o : o + m.num_dof]
-        f_i = lam[:, i, :]
-        qd_i, qdd_i = _fd_vel_acc(q_i, dt)
-        fext_i = jax.vmap(C.manipulator_contact_fext, in_axes=(None, 0, 0))(
-            m, q_i, f_i
-        )
-        tau_i = m.grid.inverse_dynamics(q_i, qd_i, qdd_i, f_ext=fext_i)
-        cost += cfg.w_effort * jnp.sum(tau_i**2)
-        over_i = jnp.maximum(0.0, jnp.abs(tau_i) - cfg.tau_max) ** 2
-        cost += cfg.w_torque_limit * jnp.sum(over_i)
+    cost += _torque_cost(system, q, lam, points, dt, cfg)
 
     # --- Grip validity + squeeze regularization --------------------------
     grip = jax.vmap(
-        C.grip_validity_penalty, in_axes=(None, 0, 0, None, None)
-    )(system, q, lam, cfg.mu_friction, cfg.f_min)
+        C.grip_validity_penalty_at, in_axes=(None, 0, 0, 0, None, None)
+    )(system, centers, points, lam, cfg.mu_friction, cfg.f_min)
     cost += cfg.w_grip * jnp.sum(grip)
     cost += cfg.w_squeeze_reg * jnp.sum(squeeze**2)
 
@@ -437,11 +534,12 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: FlatContactTrajOptConfig):
         z0, z0, cost0, z0, g0,
         jnp.zeros((m, nz)), jnp.zeros((m, nz)), jnp.zeros(m),
         jnp.int32(0), jnp.int32(0), jnp.int32(0),
+        jnp.bool_(False),  # converged
     )
 
-    def step(carry, _):
+    def body(carry):
         (x, best_x, best_cost, x_prev, g_prev,
-         s_buf, y_buf, rho_buf, m_used, newest, it) = carry
+         s_buf, y_buf, rho_buf, m_used, newest, it, _) = carry
         cost_val, g = jax.value_and_grad(cost_fn)(x)
         g = g * endpoint_mask
         s_k = x - x_prev
@@ -451,8 +549,11 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: FlatContactTrajOptConfig):
         valid = (sy > 1e-10 * yy + 1e-30) & (it > 0)
         new_newest = (newest + 1) % m
         actual_newest = jnp.where(valid, new_newest, newest)
-        s_buf = jnp.where(valid, s_buf.at[new_newest].set(s_k), s_buf)
-        y_buf = jnp.where(valid, y_buf.at[new_newest].set(y_k), y_buf)
+        # Update only the newest slot. Selecting on the *row* is O(nz); the
+        # earlier `where` over the whole updated buffer was O(m * nz) for the
+        # same result.
+        s_buf = s_buf.at[new_newest].set(jnp.where(valid, s_k, s_buf[new_newest]))
+        y_buf = y_buf.at[new_newest].set(jnp.where(valid, y_k, y_buf[new_newest]))
         rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / (sy + 1e-30)), rho_buf)
         m_used = jnp.where(valid & (m_used < m), m_used + 1, m_used)
         newest = actual_newest
@@ -469,10 +570,28 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: FlatContactTrajOptConfig):
         improved = new_cost < best_cost
         best_x = jnp.where(improved, x_new, best_x)
         best_cost = jnp.where(improved, new_cost, best_cost)
+        # Stationary point: further steps cannot move `best_x`. Static-gated so
+        # the disabled default emits no reduction at all.
+        converged = (
+            jnp.max(jnp.abs(g)) < cfg.grad_tol
+            if cfg.grad_tol > 0.0
+            else jnp.bool_(False)
+        )
         return (
             x_new, best_x, best_cost, x, g,
             s_buf, y_buf, rho_buf, m_used, newest, it + 1,
-        ), None
+            converged,
+        )
+
+    # Gated on the *static* config so the default (disabled) emits exactly the
+    # graph it always did -- see the matching note in
+    # :mod:`_contact_rich_trajopt` for why this is off by default.
+    if cfg.grad_tol > 0.0:
+        def step(carry, _):
+            return jax.lax.cond(carry[-1], lambda c: c, body, carry), None
+    else:
+        def step(carry, _):
+            return body(carry), None
 
     (_, best_x, *_), _ = jax.lax.scan(step, init, None, length=cfg.n_inner_iters)
     return best_x

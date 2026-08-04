@@ -113,8 +113,8 @@ def _extract_world_arrays(world_geoms) -> tuple[np.ndarray, np.ndarray, np.ndarr
 
 def chomp_trajopt_cuda(
     init_trajs: Float[Array, "B T n_act"],
-    start: Float[Array, "n_act"],
-    goal: Float[Array, "n_act"],
+    start: Float[Array, "*batch n_act"],
+    goal: Float[Array, "*batch n_act"],
     robot: "Robot",
     robot_coll: "RobotCollisionSpherized",
     world_geoms: tuple,
@@ -135,7 +135,7 @@ def chomp_trajopt_cuda(
     # no bounds checking, so exceeding MAX_ACT/MAX_JOINTS silently corrupts
     # per-thread state rather than crashing. Shapes are static under jit, so
     # this costs nothing at runtime and fails at trace time.
-    check_capacity(__file__, _LIB_NAME, n_joints=twists.shape[0],
+    check_capacity(__file__, _LIB_NAME, n_joints=robot.joints.twists.shape[0],
                    n_act=init_trajs.shape[-1], kernel="chomp_trajopt_cuda")
 
     B, T, n_act = init_trajs.shape
@@ -168,6 +168,8 @@ def chomp_trajopt_cuda(
     world_boxes = jnp.asarray(wb_np)
     world_halfspaces = jnp.asarray(wh_np)
 
+    # [n_act] (shared) or [B, n_act] (per-trajectory endpoints); both broadcast
+    # into the pinning below and the kernel derives its stride from the size.
     start_f = jnp.asarray(start, dtype=jnp.float32)
     goal_f = jnp.asarray(goal, dtype=jnp.float32)
 
