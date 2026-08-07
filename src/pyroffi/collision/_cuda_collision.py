@@ -183,6 +183,143 @@ def _extract_world_arrays(
 
 
 # ---------------------------------------------------------------------------
+# JAX-native world geometry extraction (traceable variants)
+# ---------------------------------------------------------------------------
+#
+# The ``*_np`` helpers above convert a CollGeom to host numpy so the result can
+# be handed to a CPU FFI kernel eagerly.  They therefore CANNOT run when the
+# CollGeom holds traced arrays (inside jax.jit / vmap / pmap / scan): a tracer
+# has no concrete value for ``np.asarray`` to read.
+#
+# The ``*_jax`` variants below perform the identical layout conversion using
+# pure JAX ops, so they are safe on tracers and return jnp arrays that can be
+# threaded straight into ``jax.ffi.ffi_call`` inside a trace.  Shapes are static
+# in JAX, so the ``get_batch_axes`` / half-space guards still work.
+
+def _pose_translation_jax(pose) -> jax.Array:
+    """Traceable analogue of :func:`_pose_translation_np` (returns a jnp array)."""
+    return jnp.asarray(pose.wxyz_xyz)[..., 4:7].astype(jnp.float32)
+
+
+def _pose_rotation_matrix_jax(pose) -> jax.Array:
+    """Traceable analogue of :func:`_pose_rotation_matrix_np`.
+
+    Quaternion (w, x, y, z) → rotation matrix, in pure JAX so it works on
+    traced poses.
+    """
+    wxyz = jnp.asarray(pose.wxyz_xyz)[..., :4].astype(jnp.float32)
+    w, x, y, z = wxyz[..., 0], wxyz[..., 1], wxyz[..., 2], wxyz[..., 3]
+    r00 = 1 - 2 * (y * y + z * z)
+    r01 = 2 * (x * y - w * z)
+    r02 = 2 * (x * z + w * y)
+    r10 = 2 * (x * y + w * z)
+    r11 = 1 - 2 * (x * x + z * z)
+    r12 = 2 * (y * z - w * x)
+    r20 = 2 * (x * z - w * y)
+    r21 = 2 * (y * z + w * x)
+    r22 = 1 - 2 * (x * x + y * y)
+    R = jnp.stack(
+        [r00, r01, r02, r10, r11, r12, r20, r21, r22], axis=-1
+    ).reshape(wxyz.shape[:-1] + (3, 3))
+    return R.astype(jnp.float32)
+
+
+def _extract_world_arrays_jax(
+    world_geom: CollGeom,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Traceable analogue of :func:`_extract_world_arrays` (returns jnp arrays).
+
+    Safe to call inside a JAX trace: performs no host-side numpy conversion, so
+    a CollGeom holding traced arrays is handled correctly.
+
+    Returns:
+        spheres    — float32 [Ms, 4]
+        capsules   — float32 [Mc, 7]
+        boxes      — float32 [Mb, 15]
+        halfspaces — float32 [Mh, 6]
+    """
+    empty_s = jnp.zeros((0, 4),  dtype=jnp.float32)
+    empty_c = jnp.zeros((0, 7),  dtype=jnp.float32)
+    empty_b = jnp.zeros((0, 15), dtype=jnp.float32)
+    empty_h = jnp.zeros((0, 6),  dtype=jnp.float32)
+
+    axes = world_geom.get_batch_axes()
+
+    # Normalize: scalar → single obstacle
+    if len(axes) == 0:
+        world_geom = world_geom.broadcast_to((1,))
+        axes = (1,)
+
+    if len(axes) > 1:
+        raise ValueError(
+            "VAMP/CUDA world extraction only supports world_geom without leading "
+            f"batch dimensions; got shape {axes}. Pre-flatten the world geometry."
+        )
+
+    if isinstance(world_geom, Sphere):
+        centers = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        radii   = jnp.asarray(world_geom.radius, dtype=jnp.float32)      # (M,)
+        spheres = jnp.concatenate([centers, radii[:, None]], axis=-1)    # (M, 4)
+        return spheres, empty_c, empty_b, empty_h
+
+    if isinstance(world_geom, Capsule):
+        centers = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        axes_v  = jnp.asarray(world_geom.axis,   dtype=jnp.float32)      # (M, 3)
+        heights = jnp.asarray(world_geom.height, dtype=jnp.float32)      # (M,)
+        radii   = jnp.asarray(world_geom.radius, dtype=jnp.float32)      # (M,)
+        half_h  = heights[:, None] * 0.5
+        a       = centers - axes_v * half_h                              # (M, 3)
+        b_      = centers + axes_v * half_h                              # (M, 3)
+        capsules = jnp.concatenate([a, b_, radii[:, None]], axis=-1)     # (M, 7)
+        return empty_s, capsules, empty_b, empty_h
+
+    if isinstance(world_geom, Box):
+        centers = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        R       = _pose_rotation_matrix_jax(world_geom.pose)             # (M, 3, 3)
+        ax1     = R[..., :, 0]                                           # (M, 3)
+        ax2     = R[..., :, 1]                                           # (M, 3)
+        ax3     = R[..., :, 2]                                           # (M, 3)
+        hl      = jnp.asarray(world_geom.half_lengths, dtype=jnp.float32)  # (M, 3)
+        boxes   = jnp.concatenate([centers, ax1, ax2, ax3, hl], axis=-1)   # (M, 15)
+        return empty_s, empty_c, boxes, empty_h
+
+    if isinstance(world_geom, HalfSpace):
+        R       = _pose_rotation_matrix_jax(world_geom.pose)             # (M, 3, 3)
+        normals = R[..., :, 2].astype(jnp.float32)                       # (M, 3)
+        points  = _pose_translation_jax(world_geom.pose)                 # (M, 3)
+        halfspaces = jnp.concatenate([normals, points], axis=-1)         # (M, 6)
+        return empty_s, empty_c, empty_b, halfspaces
+
+    raise NotImplementedError(
+        f"World extraction does not support world_geom of type "
+        f"{type(world_geom).__name__}. Supported: Sphere, Capsule, Box, HalfSpace."
+    )
+
+
+def _check_attachments_agree(inner, coarse_inner, checker_name: str) -> None:
+    """Require the coarse model to carry the same attachment topology as the fine.
+
+    The coarse guard indexes its "needs a fine check" flags by geometry row, so
+    a fine attachment row with no coarse counterpart would never be flagged --
+    a silently missed collision rather than a loud error.  Only the *topology*
+    (parent link per entry) has to match; the geometry itself is expected to
+    differ, and must enclose the fine geometry like every other coarse row.
+    """
+    if coarse_inner is None:
+        return
+    fine = tuple(getattr(inner, "attach_parent_link_indices", ()))
+    coarse = tuple(getattr(coarse_inner, "attach_parent_link_indices", ()))
+    if fine != coarse:
+        raise ValueError(
+            f"{checker_name}: the fine and coarse models must carry the same "
+            f"attachment entries (fine parents {list(fine)} != coarse "
+            f"{list(coarse)}). The coarse guard flags fine geometry by row, so "
+            "an unmatched attachment row would never be checked. Compose the "
+            "same AttachmentSet into both models."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
 
@@ -240,6 +377,10 @@ class CUDADifferentiableSDFCollisionChecker:
         coarse_inner: Optional[Union[RobotCollision, RobotCollisionSpherized]] = None,
     ) -> None:
         _load_and_register()  # verify the .so exists and register FFI targets
+
+        _check_attachments_agree(
+            inner, coarse_inner, "CUDADifferentiableSDFCollisionChecker"
+        )
 
         self._inner = inner
 
@@ -322,11 +463,16 @@ class CUDADifferentiableSDFCollisionChecker:
         next compute_world_collision_distance call retraces with the new world
         shapes.
         """
-        ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
-        self._ws = jnp.array(ws_np)
-        self._wc = jnp.array(wc_np)
-        self._wb = jnp.array(wb_np)
-        self._wh = jnp.array(wh_np)
+        # Force eager evaluation of the geometry properties: if this upload
+        # happens during a caller's jax.jit trace (concrete world geometry),
+        # accessing e.g. Sphere.radius would otherwise stage tracers that
+        # _extract_world_arrays cannot convert to numpy.
+        with jax.ensure_compile_time_eval():
+            ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
+            self._ws = jnp.array(ws_np)
+            self._wc = jnp.array(wc_np)
+            self._wb = jnp.array(wb_np)
+            self._wh = jnp.array(wh_np)
         self._cached_world_id = id(world_geom)
         # Invalidate JIT cache so the new world shapes trigger retracing.
         self._cached_robot_id = None
@@ -379,9 +525,15 @@ class CUDADifferentiableSDFCollisionChecker:
 
         Separated from FK so that coarse and fine models can share a single
         ``robot.forward_kinematics`` call (same joints → same transforms).
+
+        ``Ts_world_link_arr`` has one row per *kinematics* link, while an
+        attached model's geometry has extra rows in its tail.  The inner model's
+        own ``_append_attachment_poses`` closes that gap with the same
+        ``T_WB = T_WL(cfg) · T_LB`` compose the pure-JAX path uses, so the two
+        backends pose attachments identically by construction.
         """
         def _apply(T_arr):
-            T = jaxlie.SE3(T_arr)
+            T = jaxlie.SE3(inner._append_attachment_poses(T_arr))
             if isinstance(inner, RobotCollisionSpherized):
                 coll_n_s = jax.vmap(
                     lambda ts, c: c.transform(ts),
@@ -514,13 +666,15 @@ class CUDADifferentiableSDFCollisionChecker:
             out = collision_world_sphere_reduced(
                 centers_soa, radii, ws, wc, wb, wh, n=N
             )
-            return out.reshape(*batch_shape, N, M)
 
         else:  # RobotCollision (capsule-based)
             caps_soa, N, batch_shape = self._capsule_robot_arrays(coll, is_batched)
 
             out = collision_world_capsule(caps_soa, ws, wc, wb, wh)  # [B, N, M]
-            return out.reshape(*batch_shape, N, M)
+
+        # Disabled attachment rows report +inf against every obstacle, matching
+        # the pure-JAX path (which the custom_jvp below uses for tangents).
+        return self._inner._mask_inactive_world(out.reshape(*batch_shape, N, M))
 
     def _compute_self_impl(self, robot, cfg):
         """Self-collision implementation — JIT'd via _ensure_jit."""
@@ -551,7 +705,10 @@ class CUDADifferentiableSDFCollisionChecker:
             caps_aoi = jnp.transpose(caps_soa, (1, 2, 0))  # [B, N, 7]
             out = collision_self_capsule(caps_aoi, self._pair_i, self._pair_j)
 
-        return out.reshape(*batch_shape, P)
+        # Pairs touching a disabled attachment slot report +inf (see the JAX path).
+        return self._inner._mask_inactive_pairs(
+            out.reshape(*batch_shape, P), self._pair_i, self._pair_j
+        )
 
     # ── Coarse-first implementations (used when coarse_inner is set) ───────
 
@@ -584,6 +741,9 @@ class CUDADifferentiableSDFCollisionChecker:
             cc_caps, _, _ = self._capsule_robot_arrays(coarse_coll, is_batched)
             coarse_out = collision_world_capsule(cc_caps, ws, wc, wb, wh)
 
+        # Mask before the reduce: a disabled attachment row is not a reason to
+        # fall through to the fine kernel.
+        coarse_out = self._coarse_inner._mask_inactive_world(coarse_out)
         coarse_clear = jnp.all(coarse_out > 0)
 
         # ── Output shape for fine result ──────────────────────────────────
@@ -605,7 +765,9 @@ class CUDADifferentiableSDFCollisionChecker:
             return out.reshape(B, N_fine, M)
 
         result = jax.lax.cond(coarse_clear, _return_clear, _run_fine, None)
-        return result.reshape(*batch_shape, N_fine, M)
+        return self._inner._mask_inactive_world(
+            result.reshape(*batch_shape, N_fine, M)
+        )
 
     def _compute_self_impl_coarse_first(self, robot, cfg):
         """Two-phase self-collision: coarse guard → fine kernel on collision.
@@ -646,6 +808,9 @@ class CUDADifferentiableSDFCollisionChecker:
                 cc_aoi, self._coarse_pair_i, self._coarse_pair_j
             )
 
+        coarse_out = self._coarse_inner._mask_inactive_pairs(
+            coarse_out, self._coarse_pair_i, self._coarse_pair_j
+        )
         coarse_clear = jnp.all(coarse_out > 0)
         batch_shape = (B,) if is_batched else ()
 
@@ -670,7 +835,9 @@ class CUDADifferentiableSDFCollisionChecker:
             return out.reshape(B, P_fine)
 
         result = jax.lax.cond(coarse_clear, _return_clear, _run_fine, None)
-        return result.reshape(*batch_shape, P_fine)
+        return self._inner._mask_inactive_pairs(
+            result.reshape(*batch_shape, P_fine), self._pair_i, self._pair_j
+        )
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -809,21 +976,79 @@ CUDARobotCollisionChecker = CUDADifferentiableSDFCollisionChecker
 # ---------------------------------------------------------------------------
 
 
-def _spherized_local_geometry(model: RobotCollisionSpherized) -> np.ndarray:
-    """Extract link-LOCAL sphere geometry from a spherized model.
+def link_parent_joint_for(robot: "Robot", model) -> Array:
+    """Per-geometry-row joint index, extended over ``model``'s attachment rows.
 
-    Returns a float32 array ``[K, 4]`` of (x, y, z, r) in link-local frames,
-    laid out with ``k = s * N + n`` (sphere ``s`` of link ``n``; N = num_links),
+    The fused-FK kernels pose row ``n`` with ``T_joint[link_parent_joint[n]]``.
+    An attachment row is rigidly fixed to its parent link, so it wants exactly
+    that link's transform — which is to say the *same* joint index the parent link
+    already uses.  The constant link←body offset is folded into the sphere centers
+    instead (see :func:`_spherized_local_geometry`), so the pair is exact and the
+    FK walk itself needs no virtual joint.
+
+    This is also what keeps ``NL`` (which the kernels read off this array's
+    length) equal to ``model.num_links``, so the ``k = s * NL + n`` geometry
+    layout and the per-row ``link_hit`` flags stay consistent.
+    """
+    lpj = jnp.asarray(robot.links.parent_joint_indices, dtype=jnp.int32)
+    parents = getattr(model, "attach_parent_link_indices", ())
+    if not parents:
+        return lpj
+    return jnp.concatenate([lpj, lpj[jnp.asarray(parents, dtype=jnp.int32)]])
+
+
+def _spherized_local_geometry(model: RobotCollisionSpherized) -> Array:
+    """Extract row-LOCAL sphere geometry from a spherized model.
+
+    Returns a float32 array ``[K, 4]`` of (x, y, z, r), laid out with
+    ``k = s * N + n`` (sphere ``s`` of row ``n``; N = ``model.num_links``),
     matching the binary kernel's expected layout.  Padding spheres keep their
     radius < 0 sentinel so the kernel skips them.
+
+    Attachment rows need two adjustments, because the kernel poses row ``n`` by
+    a single link transform it looks up itself and carries no per-row offset:
+
+    * The stored centers are in the attachment's *body* frame, one indirection
+      further out than a link frame.  A sphere is rotation-invariant, so folding
+      the constant link←body transform into the centers is exact —
+      ``T_WB · c = T_WL · (T_LB · c)`` — and needs no virtual joint in the FK
+      walk.  Pair that with the parent link's own transform (see
+      :func:`link_parent_joint_for`) and the row is posed correctly.
+    * A disabled slot takes the same negative-radius sentinel as padding.  This
+      checker returns a verdict rather than a distance, so an inert sphere has no
+      minimum to poison — unlike the SDF path, which must mask distances instead.
+
+    A pytree leaf in, a device array out: ``attach_T_parent_body`` and
+    ``attach_active`` stay differentiable/traceable rather than being frozen into
+    host numpy.
     """
     # coll has batch axes (N, S): centers [N, S, 3], radii [N, S].
-    centers = np.asarray(model.coll.pose.translation(), dtype=np.float32)  # [N, S, 3]
-    radii = np.asarray(model.coll.radius, dtype=np.float32)                # [N, S]
-    N, S = radii.shape
-    local = np.concatenate([centers, radii[..., None]], axis=-1)           # [N, S, 4]
-    local = np.transpose(local, (1, 0, 2)).reshape(S * N, 4)               # [S*N, 4]
-    return np.ascontiguousarray(local, dtype=np.float32)
+    centers = model.coll.pose.translation().astype(jnp.float32)  # [N, S, 3]
+    radii = model.coll.radius.astype(jnp.float32)                # [N, S]
+
+    if model.attach_parent_link_indices:
+        from ..attachments._compose import _INERT_RADIUS
+
+        n_link = model.num_robot_links
+        assert model.attach_T_parent_body is not None
+        T_LB = jaxlie.SE3(
+            jnp.asarray(model.attach_T_parent_body, dtype=jnp.float32)[:, None, :]
+        )  # batch (K, 1), broadcasting over the S spheres of each row
+        centers = jnp.concatenate(
+            [centers[:n_link], T_LB.apply(centers[n_link:])], axis=0
+        )
+        assert model.attach_active is not None
+        live = jnp.asarray(model.attach_active)[:, None]  # [K, 1]
+        radii = jnp.concatenate(
+            [
+                radii[:n_link],
+                jnp.where(live, radii[n_link:], jnp.float32(_INERT_RADIUS)),
+            ],
+            axis=0,
+        )
+
+    local = jnp.concatenate([centers, radii[..., None]], axis=-1)  # [N, S, 4]
+    return jnp.swapaxes(local, 0, 1).reshape(-1, 4)                # [S*N, 4]
 
 
 class CUDABinaryCollisionChecker:
@@ -855,7 +1080,14 @@ class CUDABinaryCollisionChecker:
     model (each coarse sphere covers the fine spheres of its link).  Otherwise the
     coarse guard can produce false negatives (missed collisions).  The
     ``panda_spherized_coarse.urdf`` style of one-enclosing-sphere-per-link models
-    satisfy this.
+    satisfy this.  Attachment rows are guarded per row like any other, so an
+    attached coarse model must enclose the fine model's attachment geometry too —
+    hence the requirement that both models carry the same ``AttachmentSet``.
+
+    Attachments are supported (see :func:`_spherized_local_geometry`): a grasped
+    object's spheres ride the parent link's transform with the link←body offset
+    folded into their centers, and an inactive slot is gated to the same
+    negative-radius sentinel the kernel already skips for padding.
 
     Usage::
 
@@ -888,6 +1120,9 @@ class CUDABinaryCollisionChecker:
                 "coarse_inner must also be a RobotCollisionSpherized; got "
                 f"{type(coarse_inner).__name__}."
             )
+        # Before the num_links check below, which an attachment mismatch would
+        # also trip -- but with a message pointing at the wrong thing.
+        _check_attachments_agree(inner, coarse_inner, "CUDABinaryCollisionChecker")
         if coarse_inner is not None and coarse_inner.num_links != inner.num_links:
             raise ValueError(
                 "Fine and coarse models must share the same link set "
@@ -898,10 +1133,10 @@ class CUDABinaryCollisionChecker:
         self._inner = inner
         self._coarse_inner = coarse_inner
 
-        # Static link-local sphere geometry (config-independent), device-resident.
-        self._f_local = jnp.asarray(_spherized_local_geometry(inner))  # [Kf, 4]
+        # Row-local sphere geometry (config-independent), device-resident.
+        self._f_local = _spherized_local_geometry(inner)  # [Kf, 4]
         if coarse_inner is not None:
-            self._c_local = jnp.asarray(_spherized_local_geometry(coarse_inner))
+            self._c_local = _spherized_local_geometry(coarse_inner)
             self._c_pair_i = jnp.asarray(coarse_inner.active_idx_i, dtype=jnp.int32)
             self._c_pair_j = jnp.asarray(coarse_inner.active_idx_j, dtype=jnp.int32)
         else:
@@ -949,11 +1184,14 @@ class CUDABinaryCollisionChecker:
 
     def set_world(self, world_geom: CollGeom) -> None:
         """Pre-upload world geometry to the device (call once, before the loop)."""
-        ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
-        self._ws = jnp.array(ws_np)
-        self._wc = jnp.array(wc_np)
-        self._wb = jnp.array(wb_np)
-        self._wh = jnp.array(wh_np)
+        # See the SDF checker's set_world: eager-eval so a concrete world can be
+        # uploaded even when this runs inside a caller's jax.jit trace.
+        with jax.ensure_compile_time_eval():
+            ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
+            self._ws = jnp.array(ws_np)
+            self._wc = jnp.array(wc_np)
+            self._wb = jnp.array(wb_np)
+            self._wh = jnp.array(wh_np)
         self._cached_world_id = id(world_geom)
 
     def _ensure_world_cache(self, world_geom: CollGeom) -> None:
@@ -966,8 +1204,9 @@ class CUDABinaryCollisionChecker:
         if id(robot) == self._cached_robot_id:
             return
         _robot = robot
+        _link_parent_joint = link_parent_joint_for(robot, self._inner)
 
-        def _impl(cfg_flat, ws, wc, wb, wh):
+        def _impl(cfg_flat, ws, wc, wb, wh, f_local, c_local):
             j = _robot.joints
             return collision_binary(
                 cfg_flat,
@@ -979,9 +1218,9 @@ class CUDABinaryCollisionChecker:
                 mimic_off=j.mimic_offset,
                 mimic_act_idx=j.mimic_act_indices,
                 topo_inv=j._topo_sort_inv,
-                link_parent_joint=_robot.links.parent_joint_indices,
-                f_local=self._f_local,
-                c_local=self._c_local,
+                link_parent_joint=_link_parent_joint,
+                f_local=f_local,
+                c_local=c_local,
                 world_spheres=ws,
                 world_capsules=wc,
                 world_boxes=wb,
@@ -1022,8 +1261,18 @@ class CUDABinaryCollisionChecker:
         # the world arrays are broadcast unchanged to every device.  Inside a
         # jit/vmap/pmap trace this transparently falls back to a single call
         # (the surrounding transform owns device placement).
+        # f_local/c_local are passed as operands rather than closed over so that
+        # re-deriving them from a changed ``attach_active`` / ``T_parent_body``
+        # does not bake a stale constant into the compiled function.
         free = eager_pmap_batch(
-            self._jit_binary, cfg_flat, self._ws, self._wc, self._wb, self._wh
+            self._jit_binary,
+            cfg_flat,
+            self._ws,
+            self._wc,
+            self._wb,
+            self._wh,
+            self._f_local,
+            self._c_local,
         )
         free = free.reshape(batch_axes) if batch_axes else free.reshape(())
         return free != 0

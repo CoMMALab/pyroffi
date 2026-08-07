@@ -6,6 +6,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_glass_solve.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -13,13 +14,10 @@
 
 namespace ffi = xla::ffi;
 
-#ifndef MAX_JOINTS
-#define MAX_JOINTS 64
-#endif
-
-#ifndef MAX_ACT
-#define MAX_ACT 16
-#endif
+// MAX_JOINTS / MAX_ACT come from _build_params.cuh via _ik_cuda_helpers.cuh above.
+// (This file used to re-declare them with #ifndef fallbacks; since the helper is
+// included first those blocks never fired, so they were dead code that read like
+// the authoritative default. Removed — _build_params.cuh is the only definition.)
 
 static __device__ __forceinline__
 float box_distance_sq(const float* ee, const float* box_min, const float* box_max)
@@ -154,6 +152,27 @@ static __device__ void build_jacobian(
     }
 }
 
+/**
+ * Levenberg-Marquardt step. ALL 32 lanes of the warp must call this together.
+ *
+ * `cfg`, `J`, `col_scale`, `A` and `rhs` all live in the per-warp shared workspace.
+ * Every lane runs this whole LM iteration redundantly and the identical-value writes
+ * to that workspace are what make it come out right; `delta` below is the one buffer
+ * that is thread-local, so it stays fully serial per lane (parallelising a loop that
+ * writes thread-local memory would leave each lane holding 31/32 garbage).
+ *
+ * The Cholesky is the exception that could NOT stay redundant: it factors A in place,
+ * so 32 lanes each destructively rewriting the same shared A only survived because the
+ * factorisation is branch-uniform and the lanes therefore never lose lockstep. That is
+ * an assumption about the scheduler, not a guarantee — under independent thread
+ * scheduling a skewed lane can read an entry another lane has already overwritten.
+ * Routing it through the warp-cooperative GLASS solve makes the sharing explicit and
+ * puts the other 31 lanes to work instead of having them race.
+ *
+ * `N` is the compile-time solve bucket; A is assembled at stride N and the tail is
+ * identity-padded (inert, exactly as the fixed-joint pinning is).
+ */
+template <uint32_t N>
 static __device__ void lm_step(
     float*       cfg,
     float*       J,
@@ -165,37 +184,47 @@ static __device__ void lm_step(
     const float* s_lower,
     const float* s_upper,
     const int*   s_fixed_mask,
+    int*         s_fail,
     int          n_act,
-    float        lam)
+    float        lam,
+    int          lane)
 {
-    for (int a = 0; a < n_act; a++) {
+    for (int a = lane; a < n_act; a += 32) {
         float sq = 0.0f;
         for (int k = 0; k < 6; k++) sq += (W[k] * J[k*n_act+a]) * (W[k] * J[k*n_act+a]);
         col_scale[a] = sqrtf(sq) + 1e-8f;
     }
+    __syncwarp();
 
-    for (int i = 0; i < n_act; i++) {
-        for (int j = 0; j < n_act; j++) {
-            float acc = 0.0f;
-            for (int k = 0; k < 6; k++)
-                acc += (W[k]*J[k*n_act+i]) * (W[k]*J[k*n_act+j]) / (col_scale[i] * col_scale[j]);
-            A[i*n_act + j] = acc;
-            if (i == j) A[i*n_act + j] += lam;
-        }
+    const int n_act2 = n_act * n_act;
+    for (int ij = lane; ij < n_act2; ij += 32) {
+        const int i = ij / n_act, j = ij % n_act;
+        float acc = 0.0f;
+        for (int k = 0; k < 6; k++)
+            acc += (W[k]*J[k*n_act+i]) * (W[k]*J[k*n_act+j]) / (col_scale[i] * col_scale[j]);
+        if (i == j) acc += lam;
+        A[i*(int)N + j] = acc;
+    }
+    for (int i = lane; i < n_act; i += 32) {
         float rb = 0.0f;
         for (int k = 0; k < 6; k++)
             rb += (W[k]*J[k*n_act+i]) * r[k] / col_scale[i];
         rhs[i] = -rb;
     }
+    __syncwarp();
 
-    for (int a = 0; a < n_act; a++) {
+    for (int a = lane; a < n_act; a += 32) {
         if (!s_fixed_mask[a]) continue;
-        for (int j = 0; j < n_act; j++) A[a*n_act+j] = A[j*n_act+a] = 0.0f;
-        A[a*n_act+a] = 1.0f;
+        for (int j = 0; j < n_act; j++) A[a*(int)N+j] = A[j*(int)N+a] = 0.0f;
+        A[a*(int)N+a] = 1.0f;
         rhs[a] = 0.0f;
     }
+    // Disjoint from the pinning above (top-left n_act block vs. the tail).
+    pyroffi::pad_tail_identity<float, N>(lane, 32, n_act, A, rhs);
+    __syncwarp();
 
-    chol_solve(A, rhs, n_act);
+    pyroffi::tier_posv<pyroffi::Tier::Warp, float, N>(A, rhs, s_fail);
+    __syncwarp();
 
     float delta[MAX_ACT];
     for (int a = 0; a < n_act; a++) delta[a] = rhs[a] / col_scale[a];
@@ -207,10 +236,23 @@ static __device__ void lm_step(
     const float R = 0.18f;
     const float scale = (dnorm > R) ? R / (dnorm + 1e-18f) : 1.0f;
 
-    for (int a = 0; a < n_act; a++)
+    // One lane per component. This is a read-modify-write on the SHARED cfg, so the
+    // old redundant form was only safe while the lanes held lockstep: a lane that read
+    // cfg[a] after another had already written it would apply the step twice. Striding
+    // by lane gives each component exactly one writer, which removes the hazard rather
+    // than relying on the scheduler to hide it.
+    for (int a = lane; a < n_act; a += 32)
         cfg[a] = clampf(cfg[a] + scale * delta[a], s_lower[a], s_upper[a]);
+    __syncwarp();
 }
 
+/**
+ * Templated on the compile-time solve bucket `N` only — NOT on pyroffi::Tier.
+ * Like the Brownian kernel, hit-and-run is structurally warp-per-seed: a warp owns one
+ * chord walk and its lanes share one direction and one target. The warp IS the unit of
+ * work, so there is no thread/block variant of the same algorithm to expose.
+ */
+template <uint32_t N>
 __global__
 void hit_and_run_ik_kernel(
     const float* __restrict__ seeds,
@@ -250,6 +292,8 @@ void hit_and_run_ik_kernel(
     __shared__ float s_lower[MAX_ACT];
     __shared__ float s_upper[MAX_ACT];
     __shared__ int   s_fixed_mask[MAX_ACT];
+    // Non-PD flag for the GLASS solve, one slot per warp (blockDim.x <= 1024).
+    __shared__ int   s_solve_fail[32];
     // NOTE: box bounds are per-problem; each warp reads its own bounds into
     // local registers (w_box_min/w_box_max) rather than block-wide shared memory.
 
@@ -442,8 +486,8 @@ void hit_and_run_ik_kernel(
             build_jacobian(J, T_world, s_twists, s_act_idx, s_mimic_mul,
                           s_mimic_act_idx, s_ancestor_mask, target_jnt, n_joints, n_act);
 
-            lm_step(cfg, J, r, W, col_scale, A, rhs, s_lower, s_upper, s_fixed_mask,
-                   n_act, lam);
+            lm_step<N>(cfg, J, r, W, col_scale, A, rhs, s_lower, s_upper, s_fixed_mask,
+                   &s_solve_fail[warp_id_in_block], n_act, lam, lane_id);
 
             float r_t[6];
             fk_and_residual(cfg, s_twists, s_parent_tf, s_parent_idx, s_act_idx,
@@ -545,33 +589,62 @@ static ffi::Error HitAndRunIkCudaImpl(
     const size_t smem_per_warp = (MAX_JOINTS * 7 + MAX_ACT * 6 + MAX_ACT + MAX_ACT + MAX_ACT + 6 + MAX_ACT + MAX_ACT * MAX_ACT + MAX_ACT + 7) * sizeof(float);
     const size_t smem_bytes    = static_cast<size_t>(warps_per_block) * smem_per_warp;
 
-    hit_and_run_ik_kernel<<<dim3(blocks), tpb, smem_bytes, stream>>>(
-        seeds.typed_data(),
-        twists.typed_data(),
-        parent_tf.typed_data(),
-        parent_idx.typed_data(),
-        act_idx.typed_data(),
-        mimic_mul.typed_data(),
-        mimic_off.typed_data(),
-        mimic_act_idx.typed_data(),
-        topo_inv.typed_data(),
-        ancestor_masks.typed_data(),
-        box_mins.typed_data(),
-        box_maxs.typed_data(),
-        lower.typed_data(),
-        upper.typed_data(),
-        fixed_mask.typed_data(),
-        rng_seed.typed_data(),
-        out_cfg->typed_data(),
-        out_err->typed_data(),
-        out_ee_points->typed_data(),
-        out_targets->typed_data(),
-        n_problems, n_samples, n_joints, n_act,
-        static_cast<int>(target_jnt),
-        static_cast<int>(max_iter),
-        static_cast<int>(n_iterations),
-        pos_weight, ori_weight, lambda_init,
-        eps_pos, eps_ori, noise_std);
+#define HIT_AND_RUN_KERNEL_ARGS \
+        seeds.typed_data(), \
+        twists.typed_data(), \
+        parent_tf.typed_data(), \
+        parent_idx.typed_data(), \
+        act_idx.typed_data(), \
+        mimic_mul.typed_data(), \
+        mimic_off.typed_data(), \
+        mimic_act_idx.typed_data(), \
+        topo_inv.typed_data(), \
+        ancestor_masks.typed_data(), \
+        box_mins.typed_data(), \
+        box_maxs.typed_data(), \
+        lower.typed_data(), \
+        upper.typed_data(), \
+        fixed_mask.typed_data(), \
+        rng_seed.typed_data(), \
+        out_cfg->typed_data(), \
+        out_err->typed_data(), \
+        out_ee_points->typed_data(), \
+        out_targets->typed_data(), \
+        n_problems, n_samples, n_joints, n_act, \
+        static_cast<int>(target_jnt), \
+        static_cast<int>(max_iter), \
+        static_cast<int>(n_iterations), \
+        pos_weight, ori_weight, lambda_init, \
+        eps_pos, eps_ori, noise_std
+
+    // Dispatch on the compile-time solve bucket. n_act is already checked against
+    // MAX_ACT above, so buckets larger than solve_bucket(MAX_ACT) are unreachable for
+    // a given build rather than an overflow of A's MAX_ACT^2 slot.
+    const int bucket = pyroffi::solve_bucket(n_act);
+    switch (bucket) {
+    case 7:
+        hit_and_run_ik_kernel<7><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            HIT_AND_RUN_KERNEL_ARGS);
+        break;
+    case 8:
+        hit_and_run_ik_kernel<8><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            HIT_AND_RUN_KERNEL_ARGS);
+        break;
+    case 16:
+        hit_and_run_ik_kernel<16><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            HIT_AND_RUN_KERNEL_ARGS);
+        break;
+    case 32:
+        hit_and_run_ik_kernel<32><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            HIT_AND_RUN_KERNEL_ARGS);
+        break;
+    default:
+        return ffi::Error(
+            ffi::ErrorCode::kInvalidArgument,
+            "HitAndRunIkCuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ")."
+        );
+    }
+#undef HIT_AND_RUN_KERNEL_ARGS
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

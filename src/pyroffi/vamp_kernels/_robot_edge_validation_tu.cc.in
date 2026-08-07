@@ -31,3 +31,8 @@ extern "C" void *pyroffi_get_validate_edges() noexcept
 {
     return reinterpret_cast<void *>(&validate_edges_@ROBOT_NAME@);
 }
+
+extern "C" void *pyroffi_get_project_configs() noexcept
+{
+    return reinterpret_cast<void *>(&project_configs_@ROBOT_NAME@);
+}

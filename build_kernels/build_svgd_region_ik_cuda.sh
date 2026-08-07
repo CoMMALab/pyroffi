@@ -6,7 +6,12 @@
 
 set -euo pipefail
 
+# Build parameters (--max-joints / --max-act / --debug) + guardrails live in one
+# place so the kernel builds cannot drift apart. Defaults are applied there and
+# ALWAYS passed as -D, so a .so never depends on a header fallback for its capacity.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_build_params.sh"
+parse_build_params "$@"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
 SRC="${KERNELS_DIR}/region_ik/_svgd_region_ik_cuda_kernel.cu"
 OUT="${KERNELS_DIR}/region_ik/_svgd_region_ik_cuda_lib.so"
@@ -27,6 +32,7 @@ GPU_ARCH="${GPU_ARCH:--arch=native}"
 nvcc \
   -O3 \
   -std=c++17 \
+  ${BUILD_PARAM_FLAGS} \
   ${GPU_ARCH} \
   --shared \
   --compiler-options "-fPIC" \

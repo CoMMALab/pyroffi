@@ -8,6 +8,8 @@ from ._geometry import CollGeom as CollGeom
 from ._geometry import HalfSpace as HalfSpace
 from ._geometry import Heightmap as Heightmap
 from ._geometry import Sphere as Sphere
+from ._geometry import box_with_mjcf_dynamics as box_with_mjcf_dynamics
+from ._geometry import geom_from_mjcf_body as geom_from_mjcf_body
 from ._robot_collision import RobotCollision as RobotCollision
 from ._robot_collision import RobotCollisionSpherized as RobotCollisionSpherized
 from ._neural_collision import NeuralRobotCollision as NeuralRobotCollision

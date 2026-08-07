@@ -44,7 +44,11 @@ from jaxtyping import Float
 
 from ._geometry import CollGeom
 from ._robot_collision import RobotCollisionSpherized
-from ._cuda_collision import _extract_world_arrays, _spherized_local_geometry
+from ._cuda_collision import (
+    _extract_world_arrays,
+    _spherized_local_geometry,
+    link_parent_joint_for,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +100,10 @@ class RoboGPUCollisionChecker:
         self._inner = inner
         self._edge_granularity = int(edge_granularity)
 
-        # Robot sphere geometry (link-local, static across configs).
+        # Robot sphere geometry (row-local, static across configs). Attachment
+        # rows carry their link←body offset folded into the centers, so they are
+        # posed by the parent link's transform like any other row -- see
+        # ``_spherized_local_geometry`` / ``link_parent_joint_for``.
         self._f_local   = jnp.asarray(_spherized_local_geometry(inner))  # [K, 4]
         self._f_pair_i  = jnp.asarray(inner.active_idx_i, dtype=jnp.int32)
         self._f_pair_j  = jnp.asarray(inner.active_idx_j, dtype=jnp.int32)
@@ -204,6 +211,7 @@ class RoboGPUCollisionChecker:
         from ..cuda_kernels.collision._robogpu_collision_ffi import robogpu_collision
 
         _robot = robot
+        _link_parent_joint = link_parent_joint_for(robot, self._inner)
         _f_local   = self._f_local
         _f_pair_i  = self._f_pair_i
         _f_pair_j  = self._f_pair_j
@@ -241,7 +249,7 @@ class RoboGPUCollisionChecker:
                 mimic_off=j.mimic_offset,
                 mimic_act_idx=j.mimic_act_indices,
                 topo_inv=j._topo_sort_inv,
-                link_parent_joint=_robot.links.parent_joint_indices,
+                link_parent_joint=_link_parent_joint,
                 f_local=_f_local,
                 f_pair_i=_f_pair_i,
                 f_pair_j=_f_pair_j,

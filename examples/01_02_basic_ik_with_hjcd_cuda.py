@@ -12,7 +12,6 @@ import pyroffi as pk
 import viser
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
-from pyroffi.optimization_engines._hjcd_ik import hjcd_solve_cuda
 
 
 def main():
@@ -61,13 +60,13 @@ def main():
         # Solve IK, warm-starting from the previous solution for stability.
         rng_key, subkey = jax.random.split(rng_key)
         start_time = time.perf_counter()
-        solution = hjcd_solve_cuda(
-            robot=robot,
-            target_link_indices=(target_link_index,),
-            target_poses=(target_pose,),
+        solution = robot.inverse_kinematics(
+            target_link_name,
+            target_pose,
             rng_key=subkey,
             previous_cfg=solution,
             fixed_joint_mask=fixed_joint_mask,
+            use_cuda=True,
         )
         solution.block_until_ready()  # Wait for async dispatch to finish.
 

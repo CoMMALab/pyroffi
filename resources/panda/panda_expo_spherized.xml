@@ -1,0 +1,92 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="panda">
+  <compiler angle="radian" autolimits="true" />
+  <worldbody>
+    <body name="panda_link0" pos="0 0 0" quat="1 0 0 0">
+      <inertial pos="0 0 0.05" mass="2.9" fullinertia="0.1 0.1 0.1 0 0 0" />
+      <geom name="panda_link0_col0" type="sphere" size="0.09992840141" pos="-0.06769875437 -0.002108172514 0.04563426599" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+      <geom name="panda_link0_col1" type="sphere" size="0.09655689448" pos="0.003264273517 -0.006073323544 0.01528355386" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+      <geom name="panda_link0_col2" type="sphere" size="0.08393574506" pos="-0.0007232219214 -0.007229740731 0.09110066295" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+      <joint name="panda_joint1" type="hinge" axis="0 0 1" limited="true" range="-2.9671 2.9671" />
+      <body name="panda_link1" pos="0 0 0.333" quat="1 0 0 0">
+        <inertial pos="0 -0.04 -0.05" mass="2.7" fullinertia="0.1 0.1 0.1 0 0 0" />
+        <geom name="panda_link1_col0" type="sphere" size="0.07921370119" pos="0.002086691558 -0.05021052063 -0.1263627857" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+        <geom name="panda_link1_col1" type="sphere" size="0.07956531644" pos="-0.00438573584 0.007618425414 -0.1361920834" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+        <geom name="panda_link1_col2" type="sphere" size="0.09011889249" pos="9.979375318e-05 -0.04154995084 -0.01260452624" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+        <joint name="panda_joint2" type="hinge" axis="0 0 1" limited="true" range="-1.8326 1.8326" />
+        <body name="panda_link2" pos="0 0 0" quat="0.7071067812 -0.7071067812 0 0">
+          <inertial pos="0 -0.04 0.06" mass="2.73" fullinertia="0.1 0.1 0.1 0 0 0" />
+          <geom name="panda_link2_col0" type="sphere" size="0.08071622998" pos="-0.003401031718 -0.1365692168 -0.009945307858" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+          <geom name="panda_link2_col1" type="sphere" size="0.08155669272" pos="-0.0006191270077 -0.1276052147 0.04954361916" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+          <geom name="panda_link2_col2" type="sphere" size="0.09051492065" pos="-0.001623673947 -0.0144069409 0.0441133976" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+          <joint name="panda_joint3" type="hinge" axis="0 0 1" limited="true" range="-2.9671 2.9671" />
+          <body name="panda_link3" pos="0 -0.316 0" quat="0.7071067812 0.7071067812 0 0">
+            <inertial pos="0.01 0.01 -0.05" mass="2.04" fullinertia="0.1 0.1 0.1 0 0 0" />
+            <geom name="panda_link3_col0" type="sphere" size="0.08472139388" pos="-0.001927209669 0.02376899309 -0.07678207755" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+            <geom name="panda_link3_col1" type="sphere" size="0.08361480385" pos="0.0683818832 0.02958304435 -0.07410679758" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+            <geom name="panda_link3_col2" type="sphere" size="0.09676288068" pos="0.05293546617 0.03456144035 -0.002934596734" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+            <joint name="panda_joint4" type="hinge" axis="0 0 1" limited="true" range="-3.1416 0.0873" />
+            <body name="panda_link4" pos="0.0825 0 0" quat="0.7071067812 0.7071067812 0 0">
+              <inertial pos="-0.03 0.03 0.02" mass="2.08" fullinertia="0.1 0.1 0.1 0 0 0" />
+              <geom name="panda_link4_col0" type="sphere" size="0.08799092263" pos="-0.02962601185 0.002358888043 0.03232189268" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+              <geom name="panda_link4_col1" type="sphere" size="0.07587809116" pos="-0.08520279825 0.08589642495 0.01370202564" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+              <geom name="panda_link4_col2" type="sphere" size="0.06811912417" pos="-0.01320060715 0.07594007254 0.02842753753" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+              <joint name="panda_joint5" type="hinge" axis="0 0 1" limited="true" range="-2.9671 2.9671" />
+              <body name="panda_link5" pos="-0.0825 0.384 0" quat="0.7071067812 -0.7071067812 0 0">
+                <inertial pos="0 0.04 -0.12" mass="3" fullinertia="0.1 0.1 0.1 0 0 0" />
+                <geom name="panda_link5_col0" type="sphere" size="0.07056106895" pos="0.0008338264306 0.01549125556 -0.2274925411" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                <geom name="panda_link5_col1" type="sphere" size="0.075" pos="-0.001882138778 0.03562687337 -0.1455314755" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                <geom name="panda_link5_col2" type="sphere" size="0.075" pos="-0.0006095960271 0.0551832132 -0.06483878195" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                <geom name="panda_link5_col3" type="sphere" size="0.07100325823" pos="-0.002289402299 0.06178162992 0.001957321307" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                <joint name="panda_joint6" type="hinge" axis="0 0 1" limited="true" range="-0.0873 3.8223" />
+                <body name="panda_link6" pos="0 0 0" quat="0.7071067812 0.7071067812 0 0">
+                  <inertial pos="0.04 0 0" mass="1.3" fullinertia="0.1 0.1 0.1 0 0 0" />
+                  <geom name="panda_link6_col0" type="sphere" size="0.06891240925" pos="0.01969848759 0.008381296881 0.005857049953" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                  <geom name="panda_link6_col1" type="sphere" size="0.0767544657" pos="0.08561112732 0.01425693929 0.0009406536701" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                  <joint name="panda_joint7" type="hinge" axis="0 0 1" limited="true" range="-2.9671 2.9671" />
+                  <body name="panda_link7" pos="0.088 0 0" quat="0.7071067812 0.7071067812 0 0">
+                    <inertial pos="0 0 0.08" mass="0.2" fullinertia="0.1 0.1 0.1 0 0 0" />
+                    <geom name="panda_link7_col0" type="sphere" size="0.04160294682" pos="-0.01580682583 -0.01019330509 0.0750849992" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                    <geom name="panda_link7_col1" type="sphere" size="0.04250639677" pos="0.01364504548 -0.02265510901 0.06808412801" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                    <geom name="panda_link7_col2" type="sphere" size="0.06035551429" pos="0.01607830636 0.03480086848 0.07614420354" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                    <body name="panda_link8" pos="0 0 0.107" quat="1 0 0 0">
+                      <inertial pos="0 0 0" mass="0" fullinertia="0.1 0.1 0.1 0 0 0" />
+                      <body name="panda_hand" pos="0 0 0" quat="0.9238795325 0 0 -0.3826834324">
+                        <inertial pos="0 0 0.04" mass="0.81" fullinertia="0.1 0.1 0.1 0 0 0" />
+                        <geom name="panda_hand_col0" type="sphere" size="0.04955992848" pos="-0.00146935822 -0.07225058973 0.01867768168" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                        <geom name="panda_hand_col1" type="sphere" size="0.05273996666" pos="8.97506543e-05 -0.02852135338 0.01787008718" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                        <geom name="panda_hand_col2" type="sphere" size="0.05037795752" pos="2.461043005e-05 0.022362018 0.02075210027" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                        <geom name="panda_hand_col3" type="sphere" size="0.04526606947" pos="0.00335725164 0.07148850709 0.02536971495" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                        <body name="panda_marker_holder" pos="-0.01 -0.032 0.065" quat="1 0 0 0">
+                          <inertial pos="0 0 0.02" mass="0.2" fullinertia="0.001 0.001 0.001 0 0 0" />
+                          <geom name="panda_marker_holder_col0" type="sphere" size="0.02200814337" pos="0.01076403819 0.01514877751 0.01511237677" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                          <geom name="panda_marker_holder_col1" type="sphere" size="0.02169983275" pos="0.01187788881 0.05036849901 0.01541163493" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                          <geom name="panda_marker_holder_col2" type="sphere" size="0.02386968955" pos="0.01014437992 0.03235479072 0.04952057451" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                          <body name="panda_marker" pos="-0.075 0.0285 0.15" quat="0.7071067812 -0.7071067812 0 0">
+                            <inertial pos="0 0 0.05" mass="0.05" fullinertia="0.0002 0.0002 0.0002 0 0 0" />
+                            <geom name="panda_marker_col0" type="sphere" size="0.007849835791" pos="0.08343090117 0.01076043211 0.003719909349" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <geom name="panda_marker_col1" type="sphere" size="0.007716618944" pos="0.08447521925 0.02382489108 0.003924980294" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <geom name="panda_marker_col2" type="sphere" size="0.008291761391" pos="0.08431049436 0.03366232291 0.003944925498" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <geom name="panda_marker_col3" type="sphere" size="0.008637155406" pos="0.08388865739 0.04484698549 0.003469950054" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <geom name="panda_marker_col4" type="sphere" size="0.01430734619" pos="0.08415174484 0.06440145522 0.003336489201" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <geom name="panda_marker_col5" type="sphere" size="0.009114719927" pos="0.08408064395 0.08237097412 0.003348881379" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <geom name="panda_marker_col6" type="sphere" size="0.008653651923" pos="0.08401804417 0.09440763295 0.003893573303" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            <body name="panda_tip" pos="0.08125 0.0035 0.003625" quat="1 0 0 0">
+                              <inertial pos="0 0 0.02" mass="0.01" fullinertia="5e-05 5e-05 5e-05 0 0 0" />
+                              <geom name="panda_tip_col0" type="sphere" size="0.00108073093" pos="6.73531249e-05 3.753798592e-05 -0.0002921637497" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                              <geom name="panda_tip_col1" type="sphere" size="0.00107442576" pos="2.150935143e-05 -7.066665421e-05 0.0003051725216" quat="1 0 0 0" group="3" rgba="0.8 0.3 0.3 0.5" />
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

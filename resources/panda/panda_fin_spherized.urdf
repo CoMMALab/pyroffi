@@ -1,0 +1,501 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="panda_fin" xmlns:xacro="http://www.ros.org/wiki/xacro" path="panda_fin/panda_fin.urdf">
+	<link name="panda_link0">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0.05"></origin>
+			<mass value="2.9"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/collision/link0.obj"></mesh>
+			</geometry>
+			<material name="panda_white">
+				<color rgba="1. 1. 1. 1."></color>
+			</material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.10126692801713943"></sphere>
+			</geometry>
+			<origin xyz="-0.0677214115858078 0.008337213657796383 0.04689021036028862" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.09044819325208664"></sphere>
+			</geometry>
+			<origin xyz="0.013542966917157173 -0.03748471662402153 0.07151161879301071" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08972761034965515"></sphere>
+			</geometry>
+			<origin xyz="0.013786203227937222 0.03491155430674553 0.06880950182676315" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link1">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 -0.04 -0.05"></origin>
+			<mass value="2.7"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/link1.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.07972574234008789"></sphere>
+			</geometry>
+			<origin xyz="0.002243590774014592 -0.04797864332795143 -0.1270715296268463" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08072123676538467"></sphere>
+			</geometry>
+			<origin xyz="-0.003225532593205571 0.00856104213744402 -0.1354217380285263" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08966995030641556"></sphere>
+			</geometry>
+			<origin xyz="0.0017455220222473145 -0.041778985410928726 -0.01358106080442667" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link2">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 -0.04 0.06"></origin>
+			<mass value="2.73"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/link2.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.0840897336602211"></sphere>
+			</geometry>
+			<origin xyz="0.004882116336375475 -0.12526829540729523 -0.008165844716131687" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07986199855804443"></sphere>
+			</geometry>
+			<origin xyz="-0.0003202657971996814 -0.12791742384433746 0.048763707280159" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.078125"></sphere>
+			</geometry>
+			<origin xyz="0.0015256485203281045 -0.020491698756814003 0.013866372406482697" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07465934008359909"></sphere>
+			</geometry>
+			<origin xyz="0.0013705797027796507 -0.018358921632170677 0.07402107864618301" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link3">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.01 0.01 -0.05"></origin>
+			<mass value="2.04"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/link3.obj"></mesh>
+			</geometry>
+			<material name="panda_red">
+				<color rgba="1. 1. 1. 1."></color>
+			</material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.08310193568468094"></sphere>
+			</geometry>
+			<origin xyz="0.007403122261166573 0.025979533791542053 -0.08878330886363983" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07976767420768738"></sphere>
+			</geometry>
+			<origin xyz="0.010532907210290432 0.026278812438249588 -0.014824564568698406" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08087553083896637"></sphere>
+			</geometry>
+			<origin xyz="0.0797896534204483 0.034265246242284775 -0.062295060604810715" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07437945157289505"></sphere>
+			</geometry>
+			<origin xyz="0.08182152360677719 0.035998545587062836 0.0034552286379039288" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link4">
+		<inertial>
+			<origin rpy="0 0 0" xyz="-0.03 0.03 0.02"></origin>
+			<mass value="2.08"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/link4.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.08175943791866302"></sphere>
+			</geometry>
+			<origin xyz="-0.060851313173770905 0.0023394396994262934 0.03370635583996773" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07298461347818375"></sphere>
+			</geometry>
+			<origin xyz="0.003270984161645174 0.00107867072802037 0.037748951464891434" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07478832453489304"></sphere>
+			</geometry>
+			<origin xyz="-0.08455026149749756 0.08557829260826111 0.012476463802158833" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08779212832450867"></sphere>
+			</geometry>
+			<origin xyz="-0.02035510167479515 0.08364228159189224 0.01634736731648445" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link5">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0.04 -0.12"></origin>
+			<mass value="3"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/link5.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.06387495249509811"></sphere>
+			</geometry>
+			<origin xyz="0.004112467169761658 -0.011578512378036976 -0.2253546118736267" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.06523194909095764"></sphere>
+			</geometry>
+			<origin xyz="0.003711832920089364 0.033834345638751984 -0.22544234991073608" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08580641448497772"></sphere>
+			</geometry>
+			<origin xyz="0.0020355279557406902 0.03612865135073662 -0.14501182734966278" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.08524442464113235"></sphere>
+			</geometry>
+			<origin xyz="-0.0030026810709387064 0.04565533623099327 -0.07025618851184845" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.07330939173698425"></sphere>
+			</geometry>
+			<origin xyz="0.003254505107179284 0.05730493739247322 -0.001441541942767799" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link6">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0.04 0 0"></origin>
+			<mass value="1.3"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/link6.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.06544798612594604"></sphere>
+			</geometry>
+			<origin xyz="0.012117501348257065 0.011150920763611794 0.005004492588341236" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.05634875223040581"></sphere>
+			</geometry>
+			<origin xyz="0.08312170952558517 -0.024535682052373886 0.0061310892924666405" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.05812494456768036"></sphere>
+			</geometry>
+			<origin xyz="0.08412863314151764 0.03119036927819252 0.006573904771357775" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link7">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0.08"></origin>
+			<mass value=".2"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/collision/link7.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.04191533848643303"></sphere>
+			</geometry>
+			<origin xyz="-0.014472768642008305 -0.01578252948820591 0.07604453712701797" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.04208065941929817"></sphere>
+			</geometry>
+			<origin xyz="-0.012011309154331684 0.03165599703788757 0.07759419083595276" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.044971901923418045"></sphere>
+			</geometry>
+			<origin xyz="0.03254354000091553 -0.010619185864925385 0.07612627744674683" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.03991672396659851"></sphere>
+			</geometry>
+			<origin xyz="0.044911518692970276 0.04094996303319931 0.07794035971164703" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_link8">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<mass value="0.0"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+	</link>
+	<link name="panda_hand">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0.04"></origin>
+			<mass value=".81"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<geometry>
+				<mesh filename="meshes/visual/hand.obj"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.03302106261253357"></sphere>
+			</geometry>
+			<origin xyz="0.001054460764862597 -0.07508683949708939 0.0038138381205499172" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.0330592580139637"></sphere>
+			</geometry>
+			<origin xyz="-0.0022754394449293613 -0.07423511892557144 0.04343494400382042" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.05389418080449104"></sphere>
+			</geometry>
+			<origin xyz="-0.00039200132596306503 -0.030241698026657104 0.016960300505161285" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.05151264742016792"></sphere>
+			</geometry>
+			<origin xyz="-0.0011994430096819997 0.02195023000240326 0.019868046045303345" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.04549508914351463"></sphere>
+			</geometry>
+			<origin xyz="0.0020553625654429197 0.0706414133310318 0.025192998349666595" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_leftfinger">
+		<contact>
+			<friction_anchor></friction_anchor>
+			<stiffness value="30000.0"></stiffness>
+			<damping value="1000.0"></damping>
+			<spinning_friction value="0.1"></spinning_friction>
+			<lateral_friction value="1.0"></lateral_friction>
+		</contact>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0.01 0.02"></origin>
+			<mass value="0.1"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<origin rpy="0 0 -1.57079632679" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="meshes/visual/finray_finger.stl" scale="0.001 0.001 0.001"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.03822862356901169"></sphere>
+			</geometry>
+			<origin xyz="0.0025789702776819468 0.006372286472469568 0.038084812462329865" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.04261866956949234"></sphere>
+			</geometry>
+			<origin xyz="0.0008318245527334511 0.0024522484745830297 0.11171113699674606" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_rightfinger">
+		<contact>
+			<friction_anchor></friction_anchor>
+			<stiffness value="30000.0"></stiffness>
+			<damping value="1000.0"></damping>
+			<spinning_friction value="0.1"></spinning_friction>
+			<lateral_friction value="1.0"></lateral_friction>
+		</contact>
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 -0.01 0.02"></origin>
+			<mass value="0.1"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+		<visual>
+			<origin rpy="0 0 1.57079632679" xyz="0 0 0"></origin>
+			<geometry>
+				<mesh filename="meshes/visual/finray_finger.stl" scale="0.001 0.001 0.001"></mesh>
+			</geometry>
+			<material name="panda_white"></material>
+		</visual>
+		<collision>
+			<geometry>
+				<sphere radius="0.03822862356901169"></sphere>
+			</geometry>
+			<origin xyz="-0.0025789702776819468 -0.006372286472469568 0.038084812462329865" rpy="0 0 0"></origin>
+		</collision>
+		<collision>
+			<geometry>
+				<sphere radius="0.04261866956949234"></sphere>
+			</geometry>
+			<origin xyz="-0.0008318245527334511 -0.0024522484745830297 0.11171113699674606" rpy="0 0 0"></origin>
+		</collision>
+	</link>
+	<link name="panda_grasptarget">
+		<inertial>
+			<origin rpy="0 0 0" xyz="0 0 0"></origin>
+			<mass value="0.0"></mass>
+			<inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"></inertia>
+		</inertial>
+	</link>
+	<joint name="panda_joint1" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.8973" soft_upper_limit="2.8973"></safety_controller>
+		<origin rpy="0 0 0" xyz="0 0 0.333"></origin>
+		<parent link="panda_link0"></parent>
+		<child link="panda_link1"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87" lower="-2.9671" upper="2.9671" velocity="2.3925"></limit>
+	</joint>
+	<joint name="panda_joint2" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-1.7628" soft_upper_limit="1.7628"></safety_controller>
+		<origin rpy="-1.57079632679 0 0" xyz="0 0 0"></origin>
+		<parent link="panda_link1"></parent>
+		<child link="panda_link2"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87" lower="-1.8326" upper="1.8326" velocity="2.3925"></limit>
+	</joint>
+	<joint name="panda_joint3" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.8973" soft_upper_limit="2.8973"></safety_controller>
+		<origin rpy="1.57079632679 0 0" xyz="0 -0.316 0"></origin>
+		<parent link="panda_link2"></parent>
+		<child link="panda_link3"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87" lower="-2.9671" upper="2.9671" velocity="2.3925"></limit>
+	</joint>
+	<joint name="panda_joint4" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-3.0718" soft_upper_limit="-0.0698"></safety_controller>
+		<origin rpy="1.57079632679 0 0" xyz="0.0825 0 0"></origin>
+		<parent link="panda_link3"></parent>
+		<child link="panda_link4"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="87" lower="-3.1416" upper="0.0873" velocity="2.3925"></limit>
+	</joint>
+	<joint name="panda_joint5" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.8973" soft_upper_limit="2.8973"></safety_controller>
+		<origin rpy="-1.57079632679 0 0" xyz="-0.0825 0.384 0"></origin>
+		<parent link="panda_link4"></parent>
+		<child link="panda_link5"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12" lower="-2.9671" upper="2.9671" velocity="2.8710"></limit>
+	</joint>
+	<joint name="panda_joint6" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-0.0175" soft_upper_limit="3.7525"></safety_controller>
+		<origin rpy="1.57079632679 0 0" xyz="0 0 0"></origin>
+		<parent link="panda_link5"></parent>
+		<child link="panda_link6"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12" lower="-0.0873" upper="3.8223" velocity="2.8710"></limit>
+	</joint>
+	<joint name="panda_joint7" type="revolute">
+		<safety_controller k_position="100.0" k_velocity="40.0" soft_lower_limit="-2.8973" soft_upper_limit="2.8973"></safety_controller>
+		<origin rpy="1.57079632679 0 0" xyz="0.088 0 0"></origin>
+		<parent link="panda_link6"></parent>
+		<child link="panda_link7"></child>
+		<axis xyz="0 0 1"></axis>
+		<limit effort="12" lower="-2.9671" upper="2.9671" velocity="2.8710"></limit>
+	</joint>
+	<joint name="panda_joint8" type="fixed">
+		<origin rpy="0 0 0" xyz="0 0 0.107"></origin>
+		<parent link="panda_link7"></parent>
+		<child link="panda_link8"></child>
+		<axis xyz="0 0 0"></axis>
+	</joint>
+	<joint name="panda_hand_joint" type="fixed">
+		<parent link="panda_link8"></parent>
+		<child link="panda_hand"></child>
+		<origin rpy="0 0 -0.785398163397" xyz="0 0 0"></origin>
+	</joint>
+	<joint name="panda_finger_joint1" type="prismatic">
+		<parent link="panda_hand"></parent>
+		<child link="panda_leftfinger"></child>
+		<origin rpy="0 0 0" xyz="0 0 0.0584"></origin>
+		<axis xyz="0 1 0"></axis>
+		<limit effort="20" lower="0.0135" upper="0.04" velocity="0.2"></limit>
+	</joint>
+	<joint name="panda_finger_joint2" type="prismatic">
+		<parent link="panda_hand"></parent>
+		<child link="panda_rightfinger"></child>
+		<origin rpy="0 0 0" xyz="0 0 0.0584"></origin>
+		<axis xyz="0 -1 0"></axis>
+		<limit effort="20" lower="0.0135" upper="0.04" velocity="0.2"></limit>
+		<mimic joint="panda_finger_joint1"></mimic>
+	</joint>
+	<joint name="panda_grasptarget_hand" type="fixed">
+		<parent link="panda_hand"></parent>
+		<child link="panda_grasptarget"></child>
+		<origin rpy="0 0 0" xyz="0 0 0.105"></origin>
+	</joint>
+</robot>

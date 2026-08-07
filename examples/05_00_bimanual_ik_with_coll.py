@@ -11,7 +11,8 @@ Two obstacles are demonstrated:
   - A floor half-space (z = 0).
   - A user-draggable sphere obstacle.
 
-Both arm IK targets are passed natively as a multi-EE tuple to ls_ik_solve.
+Both arm IK targets are passed natively as a multi-EE tuple to
+robot.inverse_kinematics(solver="ls").
 The residual vector is [W*f_right | W*f_left | sqrt_wc*f_coll], giving the
 LM solver a full 6D Jacobian contribution per arm — no scalar penalty hack.
 """
@@ -25,7 +26,6 @@ import numpy as np
 import pyroffi as pk
 import viser
 from pyroffi.collision import HalfSpace, RobotCollision, Sphere, collide
-from pyroffi.optimization_engines._ls_ik import ls_ik_solve
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
 
@@ -133,16 +133,16 @@ def main():
         rng_key, subkey = jax.random.split(rng_key)
         start_time = time.perf_counter()
 
-        solution = ls_ik_solve(
-            robot=robot,
-            target_link_indices=(right_ee_idx, left_ee_idx),
-            target_poses=(target_pose_right, target_pose_left),
+        solution = robot.inverse_kinematics(
+            (right_ee_name, left_ee_name),
+            (target_pose_right, target_pose_left),
             rng_key=subkey,
             previous_cfg=solution,
+            solver="ls",
             num_seeds=32,
             max_iter=60,
             fixed_joint_mask=fixed_joint_mask,
-            constraint_fns=constraint_fns,
+            constraints=constraint_fns,
             constraint_args=(sphere_world,),
             constraint_weights=constraint_weights,
         )

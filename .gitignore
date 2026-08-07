@@ -23,3 +23,8 @@ src/pyroffi/cuda_kernels/**/*.o
 src/pyroffi/cuda_kernels/**/*.ptx
 NVIDIA*.sh
 NVIDIA-OptiX-SDK-9.1.0-linux64-x86_64
+*mp4
+resources/*.csv
+resources/*.pdf
+.claude/
+.claude

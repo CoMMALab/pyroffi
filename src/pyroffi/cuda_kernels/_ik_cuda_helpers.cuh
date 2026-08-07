@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "_build_params.cuh"   // MAX_JOINTS / MAX_ACT + guardrails + exported accessors
 #include "_fk_cuda_helpers.cuh"
 
 #include <cmath>
@@ -21,15 +22,13 @@
 
 // ---------------------------------------------------------------------------
 // Compile-time limits (override by defining before include)
+//
+// MAX_JOINTS / MAX_ACT are NOT defined here — they are the build-parameter pair
+// and live in _build_params.cuh (included above), which also carries the
+// static_assert guardrails and exports them for Python-side validation. Set them
+// with the build scripts' --max-joints / --max-act flags, never by editing a
+// header.
 // ---------------------------------------------------------------------------
-
-#ifndef MAX_JOINTS
-#define MAX_JOINTS 64
-#endif
-
-#ifndef MAX_ACT
-#define MAX_ACT 16
-#endif
 
 #ifndef MAX_EE
 #define MAX_EE 4

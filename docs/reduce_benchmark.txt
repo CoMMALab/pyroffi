@@ -1,0 +1,187 @@
+================================================================================
+Block reduction: pyroffi block_reduce_sum vs glass::reduce vs glass::reduce_fast
+================================================================================
+Measured 2026-07-16, RTX A5000 / sm_86, nvcc 12.0, -O3.
+Benchmark source: scratchpad/bench_reduce.cu (see "Reproducing" below).
+
+WHY THIS EXISTS
+---------------
+A survey of the trajopt kernels concluded that pyroffi's hand-rolled
+block_reduce_sum beat GLASS and should be kept. That conclusion compared against
+glass::reduce -- the array-based tree reduce -- which is the WRONG function for
+this contract. GLASS also ships glass::reduce_fast(T partial, T* s_scratch), a
+register-partial -> block-sum overload with exactly block_reduce_sum's signature
+and algorithm. Measured against the right function, the conclusion reverses.
+
+THE TASK BEING TIMED
+--------------------
+Every thread in a block holds one register value; produce the block-wide sum,
+available to ALL threads. That is block_reduce_sum's contract. glass::reduce is
+charged for the smem[tid]=val staging it needs to accept the same input, because
+that staging is unavoidable when using it here.
+
+1024 blocks x 2000 reductions per launch, mean of 5 launches.
+
+  bdim |      pyroffi | glass::reduce |  reduce_fast |     rf(nots) | result agreement
+-------|--------------|--------------|--------------|--------------|------------------
+    64 |     5.052 ms |    10.352 ms |     3.879 ms |     3.880 ms | all bit-identical
+   128 |     9.285 ms |    20.536 ms |     6.567 ms |     6.567 ms | all bit-identical
+   256 |    17.874 ms |    41.717 ms |    11.063 ms |    11.074 ms | all bit-identical
+   512 |    35.197 ms |    97.624 ms |    22.755 ms |    22.754 ms | all bit-identical
+  1024 |    80.244 ms |   324.142 ms |    62.162 ms |    62.162 ms | all bit-identical
+
+  rf(nots) = reduce_fast<float, TRAILING_SYNC=false>, the variant whose barrier
+             semantics match pyroffi's exactly (caller owns the next barrier).
+
+Shared memory:
+  pyroffi, reduce_fast :  ceil(bdim/32) floats
+  glass::reduce        :  bdim floats            (16-32x more)
+
+RESULTS
+-------
+1. glass::reduce (tree) loses to pyroffi by 2.0x - 4.0x, widening with bdim.
+   The original survey was RIGHT about this function. It is a halving tree with a
+   barrier PER LEVEL (~10 at bdim=1024) against 2 for the shuffle forms.
+
+2. glass::reduce_fast BEATS pyroffi by 1.29x - 1.62x, and is BIT-IDENTICAL at
+   every width. This is the function pyroffi should have been compared against.
+
+3. TRAILING_SYNC makes no measurable difference (3.879 vs 3.880 at bdim=64;
+   62.162 vs 62.162 at 1024). The extra barrier is free here, so prefer the
+   default (true) -- it makes s_scratch safe to reuse on return, which pyroffi's
+   version does NOT guarantee.
+
+WHY reduce_fast WINS (both are warp-shuffle -- the algorithm is not the difference)
+----------------------------------------------------------------------------------
+The inter-warp combine stage. pyroffi's:
+
+    float ws = (tid < n_warps) ? smem[tid] : 0.0f;   // EVERY thread reads smem
+    ws = warp_reduce_sum(ws);                        // EVERY warp runs the tree
+    if (tid == 0) smem[0] = ws;
+
+Every warp in the block redundantly executes the full 5-step shuffle tree, and
+only warp 0's answer is ever used. GLASS guards the stage:
+
+    if (rank < 32) { ... }
+
+so exactly one warp does it. At bdim=1024 that is 32 warps of redundant shuffle
+work vs 1 -- which is why the gap grows with block size. The gap is smallest at
+bdim=64 (2 warps) and largest at 1024.
+
+CORRECTNESS: pyroffi's REDUCTIONS ARE BROKEN (found while doing this swap)
+--------------------------------------------------------------------------
+Both hand-rolled block reductions return the block total ONLY ON THREAD 0.
+Probed directly (probe_stomp.cu), reducing 1.0f per thread:
+
+  bdim=   8  expect    8 on every thread | correct on   0/  8 threads
+  bdim=  32  expect   32 on every thread | correct on   1/ 32 threads
+  bdim=  64  expect   64 on every thread | correct on   1/ 64 threads
+  bdim= 128  expect  128 on every thread | correct on   1/128 threads
+
+The tail of stomp's block_reduce_sum_scalar:
+
+    float out = (threadIdx.x < nwarp) ? warp_sums[lane] : 0.0f;
+    if (wid == 0) out = warp_reduce_sum_scalar(out);
+    __syncthreads();
+    return out;                 // <-- never broadcast
+
+__shfl_down_sync leaves the full sum only in LANE 0, and only warp 0 runs the
+second stage. So threads >= 32 return 0.0f and lanes 1..31 return partial sums.
+There is no broadcast step. (sco's block_reduce_sum does broadcast, via
+`if (tid==0) smem[0]=ws; __syncthreads(); return smem[0];` -- it is correct, just
+slow. Only stomp's `_scalar` pair is wrong.)
+
+At bdim=8 thread 0 returns 32, not 8: warp_reduce_sum_scalar shuffles with a full
+0xffffffff mask on a PARTIAL warp, which is UB. Second, separate bug.
+
+IMPACT -- stomp_softmax_kernel is broken at its DEFAULT config (n_samples=128).
+Every thread k<K consumes min_c, mean_shift, std_shift and sum_w, so all of them
+are garbage off thread 0. Replicated verbatim (probe_softmax.cu), checking the
+softmax invariant sum_k weights[b,k] == 1:
+
+  K=  8 (bdim=  8): sum(weights)=1     finite= 8/ 8   w[0]=1 w[1]=0
+  K= 16 (bdim= 16): sum(weights)=1     finite=16/16   w[0]=1 w[1]=0
+  K= 32 (bdim= 32): sum(weights)=inf   finite= 1/32   w[0]=0 w[1]=inf
+  K= 64 (bdim= 64): sum(weights)=inf   finite= 2/64   w[0]=0 w[1]=0
+
+  K < 32: sums to 1 and LOOKS fine, but it is one-hot -- all mass on a single
+          sample. Off thread 0 min_c is garbage, so shifted = c - garbage is huge
+          and exp(-huge) flushes to 0. STOMP silently degenerates into greedy
+          "keep the best sample" -- random search, not the STOMP update.
+  K >= 32: sum_w is 0.0f off thread 0, so w/(sum_w+1e-30) = w*1e30 -> inf.
+
+  stomp_update_kernel is NOT affected: it reduces into delta_d but only thread 0
+  ever reads it (`if (k == 0)`), which is precisely the one thread the reduction
+  gets right. That is why this has stayed hidden.
+
+Swapping to glass::reduce_fast FIXES this: it broadcasts through s_scratch[0] and
+returns the total to every thread. Verified after the swap -- see VERIFICATION.
+
+DECISION
+--------
+* pyroffi's block_reduce_sum / block_reduce_sum_scalar are REPLACED by
+  glass::reduce_fast. Faster, bit-identical (where pyroffi was correct at all),
+  same shared memory, safer barrier semantics -- and it fixes the broadcast bug
+  above.
+
+* glass::reduce (the tree) is LEFT ALONE -- deliberately. It is not a slower
+  version of reduce_fast that wants fixing; it is the barrier-policy-parameterized
+  body (reduce_impl<Bar,...>) that the glass::, glass::cgrps:: and thread-tier
+  surfaces all share. __shfl_down_sync is warp-intrinsic: it cannot serve
+  ThreadBarrier (size=1) or an arbitrary cooperative-groups GroupBarrier. The
+  split between reduce (generic, policy-shared) and reduce_fast (NVIDIA shuffle,
+  block-scoped) is exactly what lets one body serve every scope. Rewriting
+  reduce's body around shuffles would break the thread and cgrps tiers to speed up
+  a function whose fast twin already exists.
+
+  Corollary: DO NOT "port pyroffi's implementation into GLASS." That port runs
+  backwards -- GLASS's version is already pyroffi's algorithm, better optimized.
+
+VERIFICATION (after the swap)
+-----------------------------
+stomp_softmax_kernel, same probe, reductions swapped to GLASS (probe_softmax_fixed.cu):
+
+  config                 sum(weights)   finite     w[0]        max weight
+  K=  8 (bdim=  8)       1              8/8        0.364773    0.364773
+  K= 16 (bdim= 16)       1              16/16      0.201271    0.201271
+  K= 32 (bdim= 32)       1              32/32      0.105958    0.105958
+  K= 64 (bdim= 64)       1              64/64      0.054396    0.054396
+  K=128 (bdim=128)       1              128/128    0.0275639   0.0275639
+
+sum(weights) == 1 at every K (was inf for K>=32), every weight finite (was 1-2 of
+K), and max weight now falls as 1/K the way a softmax over K samples should --
+it is a real distribution instead of the one-hot the old code collapsed to.
+
+WHAT WAS ADDED TO GLASS
+-----------------------
+glass::reduce_fast_min(T partial, T* s_scratch) -- the min twin of the existing
+register-partial reduce_fast. GLASS had NO min reduction at any scope; stomp's
+softmax needs a max-shift, so the swap could not be completed without it. Written
+to match the sum overload exactly (same shape, same scratch sizing, same
+TRAILING_SYNC contract).
+
+Covered by a new GLASS test in its own style: test_reduce_min_partial in
+test/test_l1.py + k_reduce_min_partial_hs in test/cuda/test_l1.cu, routed through
+sweep_scalar with exact=True. exact is the right bar here and the sum twin cannot
+meet it: min SELECTS an input element instead of accumulating, so there is no
+grouping-dependent rounding and the result must be byte-identical at EVERY thread
+count in the sweep. Passes; the rest of test_l1.py is unaffected.
+
+  *** external/GLASS is a SUBMODULE pinned at b665907. This addition is UNCOMMITTED
+      there. pyroffi builds locally but WILL NOT BUILD for anyone else until the
+      change is committed in saiccoumar/GLASS and the submodule re-pinned. ***
+
+WHAT WAS **NOT** CHANGED, AND WHY
+---------------------------------
+glass::reduce (the tree) keeps its body. It is not a slow reduce_fast that wants
+fixing -- it is reduce_impl<Bar,...>, the barrier-policy-parameterized body shared
+by the glass::, glass::cgrps:: and thread-tier surfaces. __shfl_down_sync is
+warp-intrinsic and cannot serve ThreadBarrier (size=1) or an arbitrary
+cooperative-groups GroupBarrier. Rewriting it around shuffles would break those
+tiers to speed up a function whose fast twin already exists. The reduce /
+reduce_fast split is the design working as intended, not an oversight.
+
+REPRODUCING
+-----------
+  nvcc -O3 -arch=sm_86 -I external/GLASS -I src/pyroffi/cuda_kernels \
+       bench_reduce.cu -o bench_reduce && ./bench_reduce

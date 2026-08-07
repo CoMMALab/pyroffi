@@ -1,4 +1,12 @@
 from ._hjcd_ik import hjcd_solve as hjcd_solve
+from ._quik_ik import (
+    QuIKSolver as QuIKSolver,
+    quik_ik_solve as quik_ik_solve,
+)
+from ._halley_ik import (
+    HalleyJAXSolver as HalleyJAXSolver,
+    halley_ik_solve as halley_ik_solve,
+)
 from ._ls_ik import ls_ik_solve as ls_ik_solve
 from ._ls_ik import ls_ik_solve_cuda as ls_ik_solve_cuda
 from ._sqp_ik import sqp_ik_solve as sqp_ik_solve
@@ -23,6 +31,16 @@ from ._sco_optimization import ScoTrajOptConfig as ScoTrajOptConfig
 from ._sco_optimization import TrajOptConfig as TrajOptConfig
 from ._sco_optimization import sco_trajopt as sco_trajopt
 from ._sco_optimization import make_init_trajs as make_init_trajs
+from ._contact_trajopt import ContactTrajOptConfig as ContactTrajOptConfig
+from ._contact_trajopt import contact_sco_trajopt as contact_sco_trajopt
+from ._flat_contact_trajopt import (
+    FlatContactTrajOptConfig as FlatContactTrajOptConfig,
+)
+from ._flat_contact_trajopt import flat_contact_trajopt as flat_contact_trajopt
+from ._contact_rich_trajopt import (
+    ContactRichTrajOptConfig as ContactRichTrajOptConfig,
+)
+from ._contact_rich_trajopt import contact_rich_trajopt as contact_rich_trajopt
 from ._chomp_optimization import ChompTrajOptConfig as ChompTrajOptConfig
 from ._chomp_optimization import chomp_trajopt as chomp_trajopt
 from ._stomp_optimization import StompTrajOptConfig as StompTrajOptConfig

@@ -1,0 +1,16 @@
+[submodule "external/GRiD"]
+	path = external/GRiD
+	url = https://github.com/A2R-Lab/GRiD.git
+	branch = modernizing-tests
+[submodule "external/QuIK"]
+	path = external/QuIK
+	url = https://github.com/steffanlloyd/quik.git
+[submodule "external/GLASS"]
+	path = external/GLASS
+	url = https://github.com/saiccoumar/GLASS.git
+[submodule "external/cricket"]
+	path = external/cricket
+	url = git@github.com:saiccoumar/cricket.git
+[submodule "external/vamp"]
+	path = external/vamp
+	url = https://github.com/commalab/vamp

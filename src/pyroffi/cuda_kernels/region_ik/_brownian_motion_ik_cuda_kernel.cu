@@ -36,6 +36,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_glass_solve.cuh"
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -248,12 +249,21 @@ static __device__ void build_jacobian_warp(
 /**
  * Warp-parallel Gauss-Newton step.  ALL 32 lanes must call this together.
  *
- * Builds (J_WD^T J_WD + λI) and rhs in parallel, pins fixed joints, then
- * calls chol_solve on lane 0.  A warp-reduction computes the trust-region
+ * Builds (J_WD^T J_WD + λI) and rhs in parallel, pins fixed joints, then solves
+ * with the warp-level GLASS Cholesky.  A warp-reduction computes the trust-region
  * norm; the scaled step is applied in parallel.  Trust-region radius = 0.18.
  *
  * w_A and w_rhs are scratch and are overwritten.
+ *
+ * `N` is the compile-time solve bucket from pyroffi::solve_bucket(n_act), and A is
+ * assembled at stride **N** (not n_act) so the GLASS solve reads it directly. The
+ * trailing N-n_act rows/cols are identity-padded, which is inert for exactly the
+ * reason the fixed-joint pinning above it is: zero row/col + unit diagonal + zero
+ * rhs forces delta[pad] == 0. N <= MAX_ACT always holds because the bucket is
+ * derived from n_act, which the host has already checked against MAX_ACT, so the
+ * stride-N block still fits w_A's MAX_ACT^2 allocation.
  */
+template <uint32_t N>
 static __device__ void gn_step_warp(
     float* __restrict__       w_J,
     float* __restrict__       w_r,
@@ -264,6 +274,7 @@ static __device__ void gn_step_warp(
     const float* __restrict__ s_lower,
     const float* __restrict__ s_upper,
     const int*   __restrict__ s_fixed_mask,
+    int* __restrict__         s_fail,
     const float W[6],
     int n_act, float lam, int lane)
 {
@@ -278,15 +289,16 @@ static __device__ void gn_step_warp(
     }
     __syncwarp();
 
-    // 2. Build A (n_act × n_act) and rhs (n_act) in parallel.
+    // 2. Build A (n_act × n_act, stride N) and rhs (n_act) in parallel.
     const int n_act2 = n_act * n_act;
     for (int ij = lane; ij < n_act2; ij += 32) {
         const int i = ij / n_act, jj = ij % n_act;
         float acc = 0.0f;
         for (int k = 0; k < 6; k++)
             acc += W[k]*W[k] * w_J[k*n_act+i] * w_J[k*n_act+jj];
-        w_A[ij] = acc / (w_col_scale[i] * w_col_scale[jj]);
-        if (i == jj) w_A[ij] += lam;
+        float v = acc / (w_col_scale[i] * w_col_scale[jj]);
+        if (i == jj) v += lam;
+        w_A[i*(int)N + jj] = v;
     }
     for (int i = lane; i < n_act; i += 32) {
         float rb = 0.0f;
@@ -300,16 +312,20 @@ static __device__ void gn_step_warp(
     for (int a = lane; a < n_act; a += 32) {
         if (!s_fixed_mask[a]) continue;
         for (int jj = 0; jj < n_act; jj++) {
-            w_A[a*n_act + jj] = 0.0f;
-            w_A[jj*n_act + a] = 0.0f;
+            w_A[a*(int)N + jj] = 0.0f;
+            w_A[jj*(int)N + a] = 0.0f;
         }
-        w_A[a*n_act + a] = 1.0f;
-        w_rhs[a]          = 0.0f;
+        w_A[a*(int)N + a] = 1.0f;
+        w_rhs[a]           = 0.0f;
     }
+    // 3b. Identity-pad the tail. Disjoint from the pinning above (top-left block
+    // vs. the tail), so no barrier is needed between them.
+    pyroffi::pad_tail_identity<float, N>(lane, 32, n_act, w_A, w_rhs);
     __syncwarp();
 
-    // 4. Cholesky solve (serial, lane 0; n_act is small).
-    if (lane == 0) chol_solve(w_A, w_rhs, n_act);
+    // 4. Warp-parallel Cholesky solve (GLASS). On a non-PD A the solve zeros
+    // w_rhs, so the step below degenerates to "no move" rather than NaN-ing cfg.
+    pyroffi::tier_posv<pyroffi::Tier::Warp, float, N>(w_A, w_rhs, s_fail);
     __syncwarp();
 
     // 5. Trust-region norm via warp reduction.
@@ -336,6 +352,17 @@ static __device__ void gn_step_warp(
 // Kernel
 // ---------------------------------------------------------------------------
 
+/**
+ * Templated on the compile-time solve bucket `N` only — NOT on pyroffi::Tier.
+ *
+ * Unlike the IK kernels, this method is structurally warp-per-seed: each warp owns
+ * one Brownian walk, its lanes carry independent RNG streams that feed one shared
+ * proposal, and the shared w_cfg is walked cooperatively. There is no thread-tier
+ * or block-tier reading of the same algorithm to expose — the warp IS the unit of
+ * work here. So the tiering that ls_ik/hjcd/sqp get does not apply; what this kernel
+ * had to gain was the 31 lanes that used to idle through the lane-0 Cholesky.
+ */
+template <uint32_t N>
 __global__
 void brownian_motion_ik_kernel(
     const float* __restrict__ seeds,
@@ -379,6 +406,10 @@ void brownian_motion_ik_kernel(
     __shared__ float s_upper[MAX_ACT];
     __shared__ int   s_fixed_mask[MAX_ACT];
     __shared__ float s_target_quat[4];
+    // Non-PD flag for the GLASS solve, one slot per warp (blockDim.x <= 1024 => 32
+    // warps). Static rather than carved out of wsmem: it is an int, the workspace is
+    // float, and 128 bytes does not move the occupancy needle.
+    __shared__ int   s_solve_fail[32];
     // NOTE: box bounds are per-problem and are held in lane-0 local registers
     // (w_box_min/w_box_max), not in block-wide shared memory.
 
@@ -500,8 +531,9 @@ void brownian_motion_ik_kernel(
         }
 
         // GN step (warp-parallel).
-        gn_step_warp(w_J, w_r, w_cfg, w_col_scale, w_A, w_rhs,
-                     s_lower, s_upper, s_fixed_mask, W, n_act, lam, lane);
+        gn_step_warp<N>(w_J, w_r, w_cfg, w_col_scale, w_A, w_rhs,
+                     s_lower, s_upper, s_fixed_mask, &s_solve_fail[warp_in_block],
+                     W, n_act, lam, lane);
     }
 
     // ─── Phase 2 init: reset to best_cfg, compute FK + J there ────────────
@@ -640,8 +672,9 @@ void brownian_motion_ik_kernel(
                                         s_mimic_mul, s_mimic_act_idx, s_ancestor_mask,
                                         n_joints, n_act, target_jnt, lane);
 
-                    gn_step_warp(w_J, w_r, w_cfg, w_col_scale, w_A, w_rhs,
-                                 s_lower, s_upper, s_fixed_mask, W, n_act, lam, lane);
+                    gn_step_warp<N>(w_J, w_r, w_cfg, w_col_scale, w_A, w_rhs,
+                                 s_lower, s_upper, s_fixed_mask,
+                                 &s_solve_fail[warp_in_block], W, n_act, lam, lane);
                 }
 
                 // FK on corrected cfg; update best.
@@ -800,42 +833,72 @@ static ffi::Error BrownianMotionIkCudaImpl(
     // Clear any pre-existing CUDA error on this thread before our launch.
     (void)cudaGetLastError();
 
-    brownian_motion_ik_kernel<<<dim3(blocks), tpb, smem_bytes, stream>>>(
-        seeds.typed_data(),
-        init_points.typed_data(),
-        twists.typed_data(),
-        parent_tf.typed_data(),
-        parent_idx.typed_data(),
-        act_idx.typed_data(),
-        mimic_mul.typed_data(),
-        mimic_off.typed_data(),
-        mimic_act_idx.typed_data(),
-        topo_inv.typed_data(),
-        ancestor_mask.typed_data(),
-        target_quat.typed_data(),
-        box_mins.typed_data(),
-        box_maxs.typed_data(),
-        lower.typed_data(),
-        upper.typed_data(),
-        fixed_mask.typed_data(),
-        rng_seed.typed_data(),
-        out_cfg->typed_data(),
-        out_err->typed_data(),
-        out_ee_points->typed_data(),
-        out_target_points->typed_data(),
-        n_problems,
-        n_seeds,
-        n_joints,
-        n_act,
-        static_cast<int>(target_jnt),
-        static_cast<int>(max_iter),
-        pos_weight,
-        ori_weight,
-        lambda_init,
-        eps_pos,
-        noise_std,
-        static_cast<int>(n_brownian_steps),
-        static_cast<int>(fk_check_freq));
+#define BROWNIAN_KERNEL_ARGS                                                       \
+        seeds.typed_data(),                                                        \
+        init_points.typed_data(),                                                  \
+        twists.typed_data(),                                                       \
+        parent_tf.typed_data(),                                                    \
+        parent_idx.typed_data(),                                                   \
+        act_idx.typed_data(),                                                      \
+        mimic_mul.typed_data(),                                                    \
+        mimic_off.typed_data(),                                                    \
+        mimic_act_idx.typed_data(),                                                \
+        topo_inv.typed_data(),                                                     \
+        ancestor_mask.typed_data(),                                                \
+        target_quat.typed_data(),                                                  \
+        box_mins.typed_data(),                                                     \
+        box_maxs.typed_data(),                                                     \
+        lower.typed_data(),                                                        \
+        upper.typed_data(),                                                        \
+        fixed_mask.typed_data(),                                                   \
+        rng_seed.typed_data(),                                                     \
+        out_cfg->typed_data(),                                                     \
+        out_err->typed_data(),                                                     \
+        out_ee_points->typed_data(),                                               \
+        out_target_points->typed_data(),                                           \
+        n_problems,                                                                \
+        n_seeds,                                                                   \
+        n_joints,                                                                  \
+        n_act,                                                                     \
+        static_cast<int>(target_jnt),                                              \
+        static_cast<int>(max_iter),                                                \
+        pos_weight,                                                                \
+        ori_weight,                                                                \
+        lambda_init,                                                               \
+        eps_pos,                                                                   \
+        noise_std,                                                                 \
+        static_cast<int>(n_brownian_steps),                                        \
+        static_cast<int>(fk_check_freq)
+
+    // Dispatch on the compile-time solve bucket. `bucket` is derived from n_act,
+    // which is already checked against MAX_ACT above, so it can never exceed
+    // solve_bucket(MAX_ACT) — the larger instantiations are simply unreachable for a
+    // given build, not a latent overflow of w_A's MAX_ACT^2 allocation.
+    const int bucket = pyroffi::solve_bucket(n_act);
+    switch (bucket) {
+    case 7:
+        brownian_motion_ik_kernel<7><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            BROWNIAN_KERNEL_ARGS);
+        break;
+    case 8:
+        brownian_motion_ik_kernel<8><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            BROWNIAN_KERNEL_ARGS);
+        break;
+    case 16:
+        brownian_motion_ik_kernel<16><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            BROWNIAN_KERNEL_ARGS);
+        break;
+    case 32:
+        brownian_motion_ik_kernel<32><<<dim3(blocks), tpb, smem_bytes, stream>>>(
+            BROWNIAN_KERNEL_ARGS);
+        break;
+    default:
+        return ffi::Error(
+            ffi::ErrorCode::kInvalidArgument,
+            "BrownianMotionIkCuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ")."
+        );
+    }
+#undef BROWNIAN_KERNEL_ARGS
 
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

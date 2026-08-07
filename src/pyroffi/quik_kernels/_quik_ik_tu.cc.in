@@ -1,0 +1,17 @@
+// Translation unit compiled once by cricket's JIT for the QuIK IK FFI handler.
+//
+// Unlike the VAMP kernels, QuIK needs no per-robot codegen: its solver is
+// templated on a dynamic DOF, so the single ``quik_ik_solve`` handler works for
+// every serial robot (the DH table is a runtime FFI buffer).  pyroffi still runs
+// it through the same cricket JIT + ``jax.ffi.register_ffi_target`` path so the
+// CPU backend needs no ahead-of-time build step.
+//
+// Placeholder:
+//   @FFI_HEADER@  absolute path to _quik_ik_ffi.hh
+
+#include "@FFI_HEADER@"
+
+extern "C" void *pyroffi_get_quik_ik_solve() noexcept
+{
+    return reinterpret_cast<void *>(&quik_ik_solve);
+}

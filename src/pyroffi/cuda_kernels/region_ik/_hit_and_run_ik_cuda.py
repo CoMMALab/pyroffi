@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 from functools import lru_cache
+from .._build_params import check_capacity
 from pathlib import Path
 
 import jax
@@ -105,6 +106,12 @@ def hit_and_run_ik_cuda(
     box_maxs[p], enabling multiple distinct regions in a single kernel launch.
     """
     _load_and_register()
+    # Refuse robots larger than this .so was compiled to hold. The kernels do
+    # no bounds checking, so exceeding MAX_ACT/MAX_JOINTS silently corrupts
+    # per-thread state rather than crashing. Shapes are static under jit, so
+    # this costs nothing at runtime and fails at trace time.
+    check_capacity(__file__, _LIB_NAME, n_joints=twists.shape[0],
+                   n_act=seeds.shape[-1], kernel="hit_and_run_ik_cuda")
 
     n_problems, n_samples, n_act = seeds.shape
     rb = _robot_buffers(

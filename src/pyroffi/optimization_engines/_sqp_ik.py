@@ -727,6 +727,159 @@ def sqp_ik_solve_cuda(
 
 
 # ---------------------------------------------------------------------------
+# Multi-GPU sharding of the batched CUDA solver
+# ---------------------------------------------------------------------------
+#
+# The batched kernel below (``_sqp_ik_solve_cuda_batch_jit``) solves all
+# ``n_problems`` targets in a single kernel launch — but on a *single* GPU.  On
+# a multi-GPU host we can split the problem axis across every local device with
+# ``jax.pmap`` so each GPU only solves ``n_problems / n_devices`` targets.  Since
+# the per-problem SQP solves are fully independent, this is embarrassingly
+# parallel and yields close to an ``n_devices`` speedup on the solve itself
+# (minus a fixed pmap dispatch + result-gather overhead).
+#
+# Set ``PYROFFI_SQP_IK_NO_PMAP=1`` to force the single-GPU path.
+
+import os as _os
+from functools import lru_cache as _lru_cache
+
+
+# Below this many problems the batched kernel is dispatch-bound (fixed per-call
+# host/FFI overhead dominates the GPU compute), so splitting across devices adds
+# pmap coordination overhead without a compute win — measured crossover on an
+# RTX A5000 x4 host sits between N=60 (pmap ~15% slower) and N=400 (pmap ~1.7x
+# faster).  256 is a conservative default; override with PYROFFI_SQP_IK_PMAP_MIN.
+_PMAP_MIN_PROBLEMS_DEFAULT = 256
+
+
+def _sharding_enabled(n_problems: int, n_devices: int) -> bool:
+    """Shard only when it actually helps: >1 GPU and a compute-bound batch.
+
+    For small batches the per-call dispatch overhead dominates and pmap is a net
+    loss, so we require ``n_problems`` above a threshold (tunable via env).  Set
+    ``PYROFFI_SQP_IK_NO_PMAP=1`` to force the single-GPU path regardless.
+    """
+    if _os.environ.get("PYROFFI_SQP_IK_NO_PMAP", "").lower() in ("1", "true", "yes"):
+        return False
+    if n_devices <= 1:
+        return False
+    try:
+        min_problems = int(_os.environ.get("PYROFFI_SQP_IK_PMAP_MIN", _PMAP_MIN_PROBLEMS_DEFAULT))
+    except ValueError:
+        min_problems = _PMAP_MIN_PROBLEMS_DEFAULT
+    return n_problems >= max(n_devices, min_problems)
+
+
+@_lru_cache(maxsize=None)
+def _make_pmapped_batch(
+    num_seeds:           int,
+    max_iter:            int,
+    n_inner_iters:       int,
+    pos_weight:          float,
+    ori_weight:          float,
+    lambda_init:         float,
+    eps_pos:             float,
+    eps_ori:             float,
+    continuity_weight:   float,
+    enable_collision:    bool,
+    collision_weight:    float,
+    collision_margin:    float,
+    target_link_indices: tuple,
+    constraint_fns:      tuple,
+) -> Callable:
+    """Build (once per static signature) a pmapped per-device batched solver.
+
+    The returned callable maps the problem axis (``rng_key``, ``previous_cfgs``,
+    ``target_wxyz``) across devices with ``in_axes=0`` and *broadcasts* every
+    shared array (robot model, collision buffers, per-EE masks, constraint
+    weights) with ``in_axes=None``.  It is cached so XLA compiles the pmap exactly
+    once — calling it repeatedly (e.g. once per trajectory waypoint) reuses the
+    compiled executable instead of re-tracing every call.
+    """
+    def _body(
+        rng_key, previous_cfgs, target_wxyz,
+        robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
+        robot_spheres_local, robot_sphere_joint_idx,
+        world_spheres, world_capsules, world_boxes, world_halfspaces,
+        constraint_weights, constraint_args,
+    ):
+        return _sqp_ik_solve_cuda_batch_jit(
+            robot=robot,
+            target_poses_batch=jaxlie.SE3(target_wxyz),
+            rng_key=rng_key,
+            previous_cfgs=previous_cfgs,
+            num_seeds=num_seeds,
+            max_iter=max_iter,
+            n_inner_iters=n_inner_iters,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            lambda_init=lambda_init,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            enable_collision=enable_collision,
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=constraint_fns,
+            constraint_args=constraint_args,
+            constraint_weights=constraint_weights,
+        )
+
+    # Mapped: rng_key, previous_cfgs, target_wxyz.  Broadcast (None): everything else
+    # (including constraint_args — array data, so a runtime broadcast arg rather
+    # than part of the lru_cache compilation key, which must stay hashable).
+    return jax.pmap(
+        _body,
+        in_axes=(0, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None),
+    )
+
+
+def _run_batch_sharded(
+    pmapped: Callable,
+    target_poses_batch: jaxlie.SE3,
+    rng_key: Array,
+    previous_cfgs: Float[Array, "n_problems n_act"],
+    n_devices: int,
+    *broadcast_args,
+) -> Float[Array, "n_problems n_act"]:
+    """Split the problem axis across ``n_devices`` GPUs via a cached pmap.
+
+    Pads the problem axis up to a multiple of ``n_devices`` (repeating the last
+    target — winners for the padding are discarded), reshapes the per-problem
+    arrays to ``(n_devices, per_device, ...)``, runs the cached pmapped solver,
+    then flattens and trims the result back to ``n_problems``.
+    """
+    n_problems, n_act = previous_cfgs.shape
+    pad = (-n_problems) % n_devices
+
+    wxyz_xyz = target_poses_batch.wxyz_xyz  # (n_problems, 7)
+    if pad:
+        prev_pad = jnp.broadcast_to(previous_cfgs[-1:], (pad, n_act))
+        wxyz_pad = jnp.broadcast_to(wxyz_xyz[-1:], (pad, wxyz_xyz.shape[-1]))
+        previous_cfgs = jnp.concatenate([previous_cfgs, prev_pad], axis=0)
+        wxyz_xyz = jnp.concatenate([wxyz_xyz, wxyz_pad], axis=0)
+
+    per_device = (n_problems + pad) // n_devices
+    prev_sh = previous_cfgs.reshape(n_devices, per_device, n_act)
+    wxyz_sh = wxyz_xyz.reshape(n_devices, per_device, wxyz_xyz.shape[-1])
+    keys = jax.random.split(rng_key, n_devices)  # (n_devices, 2)
+
+    winners = pmapped(keys, prev_sh, wxyz_sh, *broadcast_args)  # (n_devices, per_device, n_act)
+    winners = winners.reshape(n_devices * per_device, n_act)
+    return winners[:n_problems]
+
+
+# ---------------------------------------------------------------------------
 # Public entry point — CUDA batched
 # ---------------------------------------------------------------------------
 
@@ -965,37 +1118,59 @@ def sqp_ik_solve_cuda_batch(
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
 
-    winners = _sqp_ik_solve_cuda_batch_jit(
-        robot=robot,
-        target_poses_batch=target_poses,
-        rng_key=rng_key,
-        previous_cfgs=previous_cfgs,
-        num_seeds=num_seeds,
-        max_iter=max_iter,
-        n_inner_iters=n_inner_iters,
-        pos_weight=pos_weight,
-        ori_weight=ori_weight,
-        lambda_init=lambda_init,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        continuity_weight=continuity_weight,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
-    )
+    enable_collision = bool(collision_free and collision_enabled)
+    n_problems = previous_cfgs.shape[0]
+    n_devices = jax.local_device_count()
+
+    if _sharding_enabled(n_problems, n_devices):
+        # Split the problem axis across all local GPUs (embarrassingly parallel).
+        # The pmapped executable is cached per static signature so the per-waypoint
+        # solve loop reuses one compilation instead of re-tracing every call.
+        pmapped = _make_pmapped_batch(
+            num_seeds, max_iter, n_inner_iters, pos_weight, ori_weight,
+            lambda_init, eps_pos, eps_ori, continuity_weight,
+            enable_collision, collision_weight, collision_margin,
+            tuple(target_link_indices), tuple(cuda_constraint_fns),
+        )
+        winners = _run_batch_sharded(
+            pmapped, target_poses, rng_key, previous_cfgs, n_devices,
+            robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
+            robot_spheres_local, robot_sphere_joint_idx,
+            world_spheres, world_capsules, world_boxes, world_halfspaces,
+            cuda_constraint_weights, tuple(cuda_constraint_args),
+        )
+    else:
+        winners = _sqp_ik_solve_cuda_batch_jit(
+            robot=robot,
+            target_poses_batch=target_poses,
+            rng_key=rng_key,
+            previous_cfgs=previous_cfgs,
+            num_seeds=num_seeds,
+            max_iter=max_iter,
+            n_inner_iters=n_inner_iters,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            lambda_init=lambda_init,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            enable_collision=enable_collision,
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        )
 
     if post_constraint_fns and constraint_refine_iters > 0:
         fmask = (
@@ -1020,3 +1195,213 @@ def sqp_ik_solve_cuda_batch(
         )(winners, target_poses.wxyz_xyz)
 
     return winners
+
+
+# ---------------------------------------------------------------------------
+# Public entry point — CUDA sequential warm-started (single device scan)
+# ---------------------------------------------------------------------------
+
+def sqp_ik_solve_cuda_sequential(
+    robot:               Robot,
+    target_link_indices: int | tuple[int, ...],
+    target_poses_seq:    jaxlie.SE3,
+    rng_key:             Array,
+    num_threads:         int,
+    num_seeds:           int   = 32,
+    max_iter:            int   = 60,
+    n_inner_iters:       int   = 2,
+    pos_weight:          float = 50.0,
+    ori_weight:          float = 10.0,
+    lambda_init:         float = 5e-3,
+    eps_pos:             float = 1e-8,
+    eps_ori:             float = 1e-8,
+    continuity_weight:   float = 0.0,
+    initial_prev_cfgs:   Float[Array, "num_threads n_act"] | None = None,
+    fixed_joint_mask:    Float[Array, "n_act"] | None = None,
+    constraints:         Sequence[Callable] | None = None,
+    constraint_args:     Sequence | None = None,
+    constraint_weights:  Sequence[float] | None = None,
+    collision_constraint_indices: Sequence[int] | None = None,
+    collision_free:      bool = False,
+    collision_checker:   Any | None = None,
+    collision_world:     Any | None = None,
+    collision_weight:    float = 1e4,
+    collision_margin:    float = 0.02,
+) -> Float[Array, "n_waypoints num_threads n_act"]:
+    """Sequentially warm-started multi-thread IK along a pose sequence, on-device.
+
+    This is the batched-CUDA solver specialised for the planner's *continuity-aware
+    warm-start* scheme.  ``num_threads`` (= K) independent IK chains are threaded
+    left-to-right along ``target_poses_seq``: at waypoint ``i`` every thread solves
+    the same target pose, but thread ``k`` is warm-started from thread ``k``'s
+    winning config at waypoint ``i-1`` (and biased toward it by ``continuity_weight``
+    in winner selection).  This keeps adjacent configs in the same IK branch so the
+    planner's layered graph stays connected through tight regions.
+
+    The waypoint dependency is genuinely sequential, but the *parallelism* — K
+    threads × ``num_seeds`` SQP seeds per waypoint — is fully preserved.  The whole
+    left-to-right sweep is fused into a single ``jax.lax.scan``, so it compiles to
+    one device program and one dispatch: no Python loop, no per-waypoint host↔device
+    round-trip, and no per-waypoint re-extraction of the (waypoint-invariant) robot
+    and collision buffers.  This removes the large per-call overhead that dominates
+    when each waypoint's batch (K ≈ tens) is itself dispatch-bound.
+
+    Seeding scheme (identical to the per-waypoint path):
+        * n_warm ≈ K/2 seeds drawn near the thread's previous config (σ = 0.05);
+        * the remaining seeds drawn uniformly at random;
+        * winner selected by task error + collision + ``continuity_weight·‖q−prev‖²``.
+      Waypoint 0 uses ``initial_prev_cfgs`` (random uniform if ``None``) as the
+      warm-start pool and ``continuity_weight = 0`` (nothing to be continuous with).
+
+    Only CUDA-side constraints (collision) are supported; passing constraints that
+    require post-CUDA JAX refinement raises, because per-winner JAX refinement cannot
+    be expressed inside the scan.  Callers with such constraints should fall back to
+    the per-waypoint :func:`sqp_ik_solve_cuda_batch` loop.
+
+    Args:
+        robot:               The robot model.
+        target_link_indices: Index (or tuple) of target link(s).
+        target_poses_seq:    Ordered SE(3) targets, shape ``(n_waypoints,)`` — one
+                             pose per waypoint (each solved by all K threads).
+        rng_key:             JAX PRNG key.
+        num_threads:         Number of warm-started chains K (== pool size / waypoint).
+        initial_prev_cfgs:   Warm-start pool for waypoint 0, shape ``(K, n_act)``;
+                             random uniform when ``None``.
+        (remaining args mirror :func:`sqp_ik_solve_cuda_batch`.)
+
+    Returns:
+        Winning configs for every thread at every waypoint, shape
+        ``(n_waypoints, num_threads, n_act)``.
+    """
+    if isinstance(target_link_indices, int):
+        target_link_indices = (target_link_indices,)
+
+    n_act = robot.joints.num_actuated_joints
+    K     = int(num_threads)
+
+    if fixed_joint_mask is None:
+        fixed_joint_mask_int = jnp.zeros(n_act, dtype=jnp.int32)
+    else:
+        fixed_joint_mask_int = fixed_joint_mask.astype(jnp.int32)
+
+    (
+        cuda_constraint_fns,
+        cuda_constraint_args,
+        cuda_constraint_weights,
+        post_constraint_fns,
+        post_constraint_args,
+        post_constraint_weights,
+    ) = split_cuda_and_post_constraints(
+        constraints=constraints,
+        constraint_args=constraint_args,
+        constraint_weights=constraint_weights,
+        collision_constraint_indices=collision_constraint_indices,
+        collision_free=collision_free,
+    )
+    if post_constraint_fns:
+        raise ValueError(
+            "sqp_ik_solve_cuda_sequential does not support post-CUDA JAX constraints; "
+            "use the per-waypoint sqp_ik_solve_cuda_batch loop for those."
+        )
+
+    # ── Per-EE ancestor masks (single-EE convention, mirrors the batch path) ──
+    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
+    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
+    parent_idx_np    = np.array(robot.joints.parent_indices)
+    n_joints         = robot.joints.num_joints
+    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
+    j = target_joint_idx
+    while j >= 0:
+        ancestor_mask_np[j] = 1
+        j = int(parent_idx_np[j])
+    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
+    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
+
+    (
+        robot_spheres_local,
+        robot_sphere_joint_idx,
+        world_spheres,
+        world_capsules,
+        world_boxes,
+        world_halfspaces,
+        collision_enabled,
+    ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    enable_collision = bool(collision_free and collision_enabled)
+
+    lower = robot.joints.lower_limits
+    upper = robot.joints.upper_limits
+
+    # ── Initial warm-start pool for waypoint 0 ────────────────────────────────
+    if initial_prev_cfgs is None:
+        rng_key, k0 = jax.random.split(rng_key)
+        init_prev = jax.random.uniform(
+            k0, (K, n_act), minval=lower, maxval=upper, dtype=jnp.float32
+        )
+    else:
+        init_prev = jnp.asarray(initial_prev_cfgs, dtype=jnp.float32)
+        init_prev = jnp.broadcast_to(init_prev, (K, n_act))
+
+    wxyz_seq = target_poses_seq.wxyz_xyz.astype(jnp.float32)   # (n_waypoints, 7)
+    n_waypoints = wxyz_seq.shape[0]
+    # continuity_weight is 0 at waypoint 0 (no predecessor), then the caller's value.
+    cont_seq = jnp.where(
+        jnp.arange(n_waypoints) == 0, 0.0, float(continuity_weight)
+    ).astype(jnp.float32)
+
+    # ── One warm-start chain per thread, swept left-to-right via lax.scan ──────
+    # ``prev_local`` carries this device's slice of the K threads; ``keys_local``
+    # is its per-waypoint PRNG stream.  wxyz_seq / cont_seq / robot / buffers are
+    # identical across threads and devices, so they are captured (replicated).
+    def _scan_core(prev_local, keys_local):
+        def _body(prev_pool, xs):
+            wxyz_i, key_i, cont_i = xs
+            k_local = prev_pool.shape[0]
+            target_batch = jaxlie.SE3(jnp.broadcast_to(wxyz_i, (k_local, wxyz_i.shape[-1])))
+            winners = _sqp_ik_solve_cuda_batch_jit(
+                robot=robot,
+                target_poses_batch=target_batch,
+                rng_key=key_i,
+                previous_cfgs=prev_pool,
+                num_seeds=num_seeds,
+                max_iter=max_iter,
+                n_inner_iters=n_inner_iters,
+                pos_weight=pos_weight,
+                ori_weight=ori_weight,
+                lambda_init=lambda_init,
+                eps_pos=eps_pos,
+                eps_ori=eps_ori,
+                continuity_weight=cont_i,
+                fixed_joint_mask_int=fixed_joint_mask_int,
+                ancestor_masks=ancestor_masks,
+                target_jnts=target_jnts,
+                robot_spheres_local=robot_spheres_local,
+                robot_sphere_joint_idx=robot_sphere_joint_idx,
+                world_spheres=world_spheres,
+                world_capsules=world_capsules,
+                world_boxes=world_boxes,
+                world_halfspaces=world_halfspaces,
+                enable_collision=enable_collision,
+                collision_weight=collision_weight,
+                collision_margin=collision_margin,
+                target_link_indices=target_link_indices,
+                constraint_fns=cuda_constraint_fns,
+                constraint_args=cuda_constraint_args,
+                constraint_weights=cuda_constraint_weights,
+            )   # (k_local, n_act) — one winner per thread
+            return winners, winners
+
+        _, pools_local = jax.lax.scan(_body, prev_local, (wxyz_seq, keys_local, cont_seq))
+        return pools_local   # (n_waypoints, k_local, n_act)
+
+    # NOTE on parallelism: the K warm-start chains are mutually independent, so
+    # sharding the thread axis across GPUs is tempting — but it does not help. Each
+    # per-waypoint solve is one CUDA kernel running ``max_iter`` *sequential* inner
+    # SQP iterations per thread; with K×num_seeds threads already resident the wall
+    # time is bound by a single thread's iteration *latency*, not by thread count.
+    # Splitting K across devices leaves each device with the same per-waypoint
+    # latency (measured: no speedup, minus pmap overhead), so the sweep is run on a
+    # single device. The genuine win here is fusing the whole left-to-right sweep
+    # into one on-device scan — no Python loop, no per-waypoint host↔device
+    # round-trip, no re-extraction of the waypoint-invariant robot/collision buffers.
+    keys = jax.random.split(rng_key, n_waypoints)  # (n_waypoints, 2)
+    return _scan_core(init_prev, keys)   # (n_waypoints, K, n_act)

@@ -866,6 +866,8 @@ def hjcd_solve_cuda(
     collision_weight: float = 1e4,
     collision_margin: float = 0.02,
     constraint_refine_iters: int = 12,
+    ancestor_masks: Array | None = None,
+    target_jnts: Array | None = None,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`hjcd_solve`.
 
@@ -973,24 +975,28 @@ def hjcd_solve_cuda(
 
     # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
     # These cannot be computed inside jax.jit because parent_joint_indices
-    # and parent_indices are JAX-array leaves of the Robot pytree.
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    parent_idx_np           = np.array(robot.joints.parent_indices)
-    n_joints                = robot.joints.num_joints
-    n_ee_count              = len(target_link_indices)
+    # and parent_indices are JAX-array leaves of the Robot pytree.  Callers that
+    # want to run this solver *inside* a jax.jit trace (e.g. via
+    # Robot.inverse_kinematics) precompute them from the robot's concrete
+    # kinematic structure and pass them in, skipping this host-side block.
+    if ancestor_masks is None or target_jnts is None:
+        parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
+        parent_idx_np           = np.array(robot.joints.parent_indices)
+        n_joints                = robot.joints.num_joints
+        n_ee_count              = len(target_link_indices)
 
-    target_joints_np    = np.zeros(n_ee_count, dtype=np.int32)
-    ancestor_masks_np   = np.zeros((n_ee_count, n_joints), dtype=np.int32)
-    for _i, _link_idx in enumerate(target_link_indices):
-        _tgt_jnt = int(parent_joint_indices_np[_link_idx])
-        target_joints_np[_i] = _tgt_jnt
-        _j = _tgt_jnt
-        while _j >= 0:
-            ancestor_masks_np[_i, _j] = 1
-            _j = int(parent_idx_np[_j])
+        target_joints_np    = np.zeros(n_ee_count, dtype=np.int32)
+        ancestor_masks_np   = np.zeros((n_ee_count, n_joints), dtype=np.int32)
+        for _i, _link_idx in enumerate(target_link_indices):
+            _tgt_jnt = int(parent_joint_indices_np[_link_idx])
+            target_joints_np[_i] = _tgt_jnt
+            _j = _tgt_jnt
+            while _j >= 0:
+                ancestor_masks_np[_i, _j] = 1
+                _j = int(parent_idx_np[_j])
 
-    target_jnts    = jnp.array(target_joints_np)
-    ancestor_masks = jnp.array(ancestor_masks_np)
+        target_jnts    = jnp.array(target_joints_np)
+        ancestor_masks = jnp.array(ancestor_masks_np)
 
     (
         robot_spheres_local,

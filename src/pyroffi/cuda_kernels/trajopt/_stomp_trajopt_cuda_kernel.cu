@@ -25,6 +25,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "glass.cuh"
 #include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
@@ -76,52 +77,40 @@ void block_reduce_sum(float* smem, int tid)
 
 // Warp-/block-level scalar reductions used by softmax/update kernels.
 // These avoid large shared-memory scratch buffers and reduce sync overhead.
-static __device__ __forceinline__ float warp_reduce_sum_scalar(float v)
-{
-    for (int offset = 16; offset > 0; offset >>= 1)
-        v += __shfl_down_sync(0xffffffff, v, offset);
-    return v;
-}
-
-static __device__ __forceinline__ float warp_reduce_min_scalar(float v)
-{
-    for (int offset = 16; offset > 0; offset >>= 1)
-        v = fminf(v, __shfl_down_sync(0xffffffff, v, offset));
-    return v;
-}
-
+/**
+ * Block reductions over one per-thread value, broadcast to EVERY thread.
+ *
+ * Shims over GLASS so the call sites keep their `f(v)` shape. The scratch is a
+ * function-local __shared__ (one slot per warp; blockDim.x <= 1024 => 32 warps),
+ * which is what the previous hand-rolled versions used and keeps the signature free
+ * of a scratch argument. GLASS's default TRAILING_SYNC=true means the scratch is
+ * safe to reuse across the back-to-back calls in stomp_softmax_kernel.
+ *
+ * THESE REPLACE HAND-ROLLED VERSIONS THAT WERE WRONG. The old pair ended on
+ *
+ *     float out = (threadIdx.x < nwarp) ? warp_sums[lane] : 0.0f;
+ *     if (wid == 0) out = warp_reduce_sum_scalar(out);
+ *     return out;                          // never broadcast
+ *
+ * __shfl_down_sync leaves the total only in LANE 0 and only warp 0 ran the second
+ * stage, so the result was correct on thread 0 ALONE — threads >= 32 got 0.0f.
+ * stomp_update_kernel survived because only thread 0 reads its reduction, but
+ * stomp_softmax_kernel has every thread k<K consume min_c/mean_shift/std_shift/sum_w:
+ * at the default n_samples=128 that made sum(weights) = inf, and below K=32 it
+ * silently collapsed the softmax to one-hot (greedy, not STOMP). The old code also
+ * shuffled a full 0xffffffff mask over partial warps (UB at bdim < 32).
+ * See docs/reduce_benchmark.txt.
+ */
 static __device__ __forceinline__ float block_reduce_sum_scalar(float v)
 {
-    __shared__ float warp_sums[32];
-    const int lane = threadIdx.x & 31;
-    const int wid  = threadIdx.x >> 5;
-    const int nwarp = (blockDim.x + 31) >> 5;
-
-    v = warp_reduce_sum_scalar(v);
-    if (lane == 0) warp_sums[wid] = v;
-    __syncthreads();
-
-    float out = (threadIdx.x < nwarp) ? warp_sums[lane] : 0.0f;
-    if (wid == 0) out = warp_reduce_sum_scalar(out);
-    __syncthreads();
-    return out;
+    __shared__ float s_scratch[32];
+    return glass::reduce_fast<float>(v, s_scratch);
 }
 
 static __device__ __forceinline__ float block_reduce_min_scalar(float v)
 {
-    __shared__ float warp_mins[32];
-    const int lane = threadIdx.x & 31;
-    const int wid  = threadIdx.x >> 5;
-    const int nwarp = (blockDim.x + 31) >> 5;
-
-    v = warp_reduce_min_scalar(v);
-    if (lane == 0) warp_mins[wid] = v;
-    __syncthreads();
-
-    float out = (threadIdx.x < nwarp) ? warp_mins[lane] : 1e30f;
-    if (wid == 0) out = warp_reduce_min_scalar(out);
-    __syncthreads();
-    return out;
+    __shared__ float s_scratch[32];
+    return glass::reduce_fast_min<float>(v, s_scratch);
 }
 
 // ---------------------------------------------------------------------------

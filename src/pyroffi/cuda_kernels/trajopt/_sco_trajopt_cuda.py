@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import ctypes
 from functools import lru_cache
+from .._build_params import check_capacity
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, NamedTuple, Union
 
 import numpy as np
 import jax
@@ -149,6 +150,175 @@ def _extract_world_arrays(
 # Main Python entry point
 # ---------------------------------------------------------------------------
 
+class ScoTrajoptPrepared(NamedTuple):
+    """Concrete kernel arguments hoisted out of the JAX trace.
+
+    Everything here is derived from the robot, its collision model and the world
+    geometry — none of it depends on the trajectories being optimized, and some of
+    it (sphere centres, world geometry flattening) needs CONCRETE values because it
+    goes through numpy. Building it eagerly with :func:`prepare_sco_trajopt_cuda`
+    lets :func:`sco_trajopt_cuda_prepared` be called from inside ``jax.jit``:
+    under a trace, jnp operations on closure constants are staged out and become
+    tracers, so a wrapper that recomputed these would raise
+    ``TracerArrayConversionError``.
+
+    Reuse one instance across calls; it is cheap to keep and immutable.
+    """
+
+    twists: Array
+    parent_tf: Array
+    parent_idx: Array
+    act_idx: Array
+    mimic_mul: Array
+    mimic_off: Array
+    mimic_act_idx: Array
+    topo_inv: Array
+    lower: Array
+    upper: Array
+    sphere_offsets: Array
+    sphere_radii: Array
+    pair_i: Array
+    pair_j: Array
+    world_spheres: Array
+    world_capsules: Array
+    world_boxes: Array
+    world_halfspaces: Array
+    n_joints: int
+    n_act: int
+    S: int
+
+
+def prepare_sco_trajopt_cuda(
+    robot: "Robot",
+    robot_coll: "RobotCollisionSpherized",
+    world_geoms: tuple,
+) -> ScoTrajoptPrepared:
+    """Flatten robot / collision / world data into kernel arguments, eagerly.
+
+    Call this OUTSIDE ``jax.jit`` (once per scene) and pass the result to
+    :func:`sco_trajopt_cuda_prepared`.
+    """
+    from pyroffi.collision._robot_collision import RobotCollisionSpherized
+
+    if not isinstance(robot_coll, RobotCollisionSpherized):
+        raise TypeError(
+            "sco_trajopt_cuda requires a RobotCollisionSpherized collision model. "
+            f"Got: {type(robot_coll).__name__}"
+        )
+    _load_and_register()
+
+    # coll.pose.translation() → (N, S, 3) sphere centres in link frame; needs a
+    # concrete value (numpy) hence the eager-only contract of this function.
+    sphere_off_np = np.asarray(robot_coll.coll.pose.translation(), dtype=np.float32)
+    sphere_rad_np = np.asarray(robot_coll.coll.radius,             dtype=np.float32)
+    N, S = sphere_off_np.shape[:2]
+    ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geoms)
+
+    return ScoTrajoptPrepared(
+        twists=jnp.asarray(robot.joints.twists, dtype=jnp.float32),
+        parent_tf=jnp.asarray(robot.joints.parent_transforms, dtype=jnp.float32),
+        parent_idx=jnp.asarray(robot.joints.parent_indices, dtype=jnp.int32),
+        act_idx=jnp.asarray(robot.joints.actuated_indices, dtype=jnp.int32),
+        mimic_mul=jnp.asarray(robot.joints.mimic_multiplier, dtype=jnp.float32),
+        mimic_off=jnp.asarray(robot.joints.mimic_offset, dtype=jnp.float32),
+        mimic_act_idx=jnp.asarray(robot.joints.mimic_act_indices, dtype=jnp.int32),
+        topo_inv=jnp.asarray(robot.joints._topo_sort_inv, dtype=jnp.int32),
+        lower=jnp.asarray(robot.joints.lower_limits, dtype=jnp.float32),
+        upper=jnp.asarray(robot.joints.upper_limits, dtype=jnp.float32),
+        sphere_offsets=jnp.asarray(sphere_off_np.reshape(-1), dtype=jnp.float32),
+        sphere_radii=jnp.asarray(sphere_rad_np.reshape(-1), dtype=jnp.float32),
+        pair_i=jnp.asarray(robot_coll.active_idx_i, dtype=jnp.int32),
+        pair_j=jnp.asarray(robot_coll.active_idx_j, dtype=jnp.int32),
+        world_spheres=jnp.asarray(ws_np),
+        world_capsules=jnp.asarray(wc_np),
+        world_boxes=jnp.asarray(wb_np),
+        world_halfspaces=jnp.asarray(wh_np),
+        n_joints=int(robot.joints.num_joints),
+        n_act=int(robot.joints.lower_limits.shape[0]),
+        S=int(S),
+    )
+
+
+def sco_trajopt_cuda_prepared(
+    init_trajs: Float[Array, "B T n_act"],
+    start: Float[Array, "*batch n_act"],
+    goal: Float[Array, "*batch n_act"],
+    prep: ScoTrajoptPrepared,
+    opt_cfg: "ScoTrajOptConfig",
+    *,
+    fd_eps: float = 1e-4,
+) -> tuple[Float[Array, "T n_act"], Float[Array, "B"], Float[Array, "B T n_act"]]:
+    """``sco_trajopt_cuda`` with the host-side prep hoisted out — jit-safe.
+
+    Contains only array ops and the FFI call, so it can be traced (and fused with
+    surrounding seeding / scoring code) inside ``jax.jit``.
+    """
+    B, T, n_act = init_trajs.shape
+    check_capacity(__file__, _LIB_NAME, n_joints=prep.twists.shape[0],
+                   n_act=n_act, kernel="sco_trajopt_cuda")
+
+    start_f = jnp.asarray(start, dtype=jnp.float32)
+    goal_f  = jnp.asarray(goal,  dtype=jnp.float32)
+    for name, arr in (("start", start_f), ("goal", goal_f)):
+        if arr.shape not in ((n_act,), (B, n_act)):
+            raise ValueError(
+                f"sco_trajopt_cuda: {name} must be [n_act] or [B, n_act]; "
+                f"got {arr.shape} with B={B}, n_act={n_act}."
+            )
+
+    # Pin endpoints in the initial trajectories.
+    init_pinned = jnp.asarray(init_trajs, dtype=jnp.float32)
+    init_pinned = init_pinned.at[:, 0, :].set(start_f)
+    init_pinned = init_pinned.at[:, -1, :].set(goal_f)
+
+    # Per-block workspace layout (floats) — must match sco_trajopt_kernel:
+    #   4 * T*n_act    (grad, dir, best_x, g_prev)
+    #   T * G * n_act  (J_k, G=5)
+    #   2 * m * T*n_act(s_lbfgs + y_lbfgs)
+    #   2 * 8          (rho_buf + alpha_hist, SCO_MAX_M=8)
+    #   T*n_joints*7   (T_world_pool, one FK workspace per timestep)
+    _SCO_MAX_G, _SCO_MAX_M = 5, 8
+    m = opt_cfg.m_lbfgs
+    n = T * n_act
+    workspace_stride = (4 * n + T * _SCO_MAX_G * n_act + 2 * m * n
+                        + 2 * _SCO_MAX_M + T * prep.n_joints * 7)
+
+    out_trajs, out_costs, _ = jax.ffi.ffi_call(
+        "sco_trajopt_cuda",
+        (
+            jax.ShapeDtypeStruct((B, T, n_act), jnp.float32),
+            jax.ShapeDtypeStruct((B,), jnp.float32),
+            jax.ShapeDtypeStruct((B * workspace_stride,), jnp.float32),
+        ),
+    )(
+        init_pinned,
+        prep.twists, prep.parent_tf, prep.parent_idx, prep.act_idx,
+        prep.mimic_mul, prep.mimic_off, prep.mimic_act_idx, prep.topo_inv,
+        prep.sphere_offsets, prep.sphere_radii,
+        prep.pair_i, prep.pair_j,
+        prep.world_spheres, prep.world_capsules, prep.world_boxes,
+        prep.world_halfspaces,
+        prep.lower, prep.upper, start_f, goal_f,
+        n_outer_iters          = np.int64(opt_cfg.n_outer_iters),
+        n_inner_iters          = np.int64(opt_cfg.n_inner_iters),
+        m_lbfgs                = np.int64(opt_cfg.m_lbfgs),
+        S                      = np.int64(prep.S),
+        w_smooth               = np.float32(opt_cfg.w_smooth),
+        w_acc                  = np.float32(opt_cfg.w_acc),
+        w_jerk                 = np.float32(opt_cfg.w_jerk),
+        w_limits               = np.float32(opt_cfg.w_limits),
+        w_trust                = np.float32(opt_cfg.w_trust),
+        w_collision            = np.float32(opt_cfg.w_collision),
+        w_collision_max        = np.float32(opt_cfg.w_collision_max),
+        penalty_scale          = np.float32(opt_cfg.penalty_scale),
+        collision_margin       = np.float32(opt_cfg.collision_margin),
+        smooth_min_temperature = np.float32(opt_cfg.smooth_min_temperature),
+        fd_eps                 = np.float32(fd_eps),
+    )
+    best_traj = out_trajs[jnp.argmin(out_costs)]
+    return best_traj, out_costs, out_trajs
+
+
 def sco_trajopt_cuda(
     init_trajs:  Float[Array, "B T n_act"],
     start:       Float[Array, " n_act"],
@@ -168,8 +338,11 @@ def sco_trajopt_cuda(
 
     Args:
         init_trajs:  Initial trajectory batch, shape ``[B, T, n_act]``.
-        start:       Start joint configuration, shape ``[n_act]``.
-        goal:        Goal joint configuration, shape ``[n_act]``.
+        start:       Start joint configuration: ``[n_act]`` shared by the whole
+                     batch, or ``[B, n_act]`` for per-trajectory starts. The
+                     kernel picks the stride from the buffer size, so a batched
+                     buffer optimizes B DISTINCT transits in ONE launch.
+        goal:        Goal joint configuration: ``[n_act]`` or ``[B, n_act]``.
         robot:       Robot kinematics pytree (``Robot``).
         robot_coll:  Sphere-based collision model (``RobotCollisionSpherized``).
         world_geoms: Tuple of world collision geometry objects.
@@ -178,6 +351,8 @@ def sco_trajopt_cuda(
 
     Returns:
         best_traj:   Trajectory with lowest final nonlinear cost, ``[T, n_act]``.
+                     Meaningless with per-trajectory endpoints (it would compare
+                     different problems) — use ``final_trajs`` / ``costs`` there.
         costs:       Final nonlinear cost per trajectory, ``[B]``.
         final_trajs: All optimised trajectories, ``[B, T, n_act]``.
 
@@ -185,116 +360,7 @@ def sco_trajopt_cuda(
         RuntimeError: If the compiled library is not found.
         TypeError:    If ``robot_coll`` is not a ``RobotCollisionSpherized``.
     """
-    from pyroffi.collision._robot_collision import RobotCollisionSpherized
+    prep = prepare_sco_trajopt_cuda(robot, robot_coll, world_geoms)
+    return sco_trajopt_cuda_prepared(init_trajs, start, goal, prep, opt_cfg,
+                                     fd_eps=fd_eps)
 
-    if not isinstance(robot_coll, RobotCollisionSpherized):
-        raise TypeError(
-            "sco_trajopt_cuda requires a RobotCollisionSpherized collision model. "
-            f"Got: {type(robot_coll).__name__}"
-        )
-
-    _load_and_register()
-
-    B, T, n_act = init_trajs.shape
-    n_joints = robot.joints.num_joints
-
-    # ── Robot FK parameters ────────────────────────────────────────────────
-    twists        = jnp.asarray(robot.joints.twists,          dtype=jnp.float32)
-    parent_tf     = jnp.asarray(robot.joints.parent_transforms, dtype=jnp.float32)
-    parent_idx    = jnp.asarray(robot.joints.parent_indices,  dtype=jnp.int32)
-    act_idx       = jnp.asarray(robot.joints.actuated_indices, dtype=jnp.int32)
-    mimic_mul     = jnp.asarray(robot.joints.mimic_multiplier, dtype=jnp.float32)
-    mimic_off     = jnp.asarray(robot.joints.mimic_offset,    dtype=jnp.float32)
-    mimic_act_idx = jnp.asarray(robot.joints.mimic_act_indices, dtype=jnp.int32)
-    topo_inv      = jnp.asarray(robot.joints._topo_sort_inv,  dtype=jnp.int32)
-
-    lower = jnp.asarray(robot.joints.lower_limits, dtype=jnp.float32)
-    upper = jnp.asarray(robot.joints.upper_limits, dtype=jnp.float32)
-
-    # ── Sphere collision model ─────────────────────────────────────────────
-    # coll.pose.translation() → (N, S, 3)  sphere centers in link frame
-    # coll.radius             → (N, S)     sphere radii (negative = padding)
-    sphere_off_np = np.asarray(robot_coll.coll.pose.translation(), dtype=np.float32)
-    sphere_rad_np = np.asarray(robot_coll.coll.radius,             dtype=np.float32)
-
-    N, S = sphere_off_np.shape[:2]
-
-    # Flatten to [N*S*3] and [N*S] for the kernel
-    sphere_offsets = jnp.asarray(sphere_off_np.reshape(-1), dtype=jnp.float32)
-    sphere_radii   = jnp.asarray(sphere_rad_np.reshape(-1), dtype=jnp.float32)
-
-    pair_i = jnp.asarray(robot_coll.active_idx_i, dtype=jnp.int32)
-    pair_j = jnp.asarray(robot_coll.active_idx_j, dtype=jnp.int32)
-
-    # ── World geometry ─────────────────────────────────────────────────────
-    ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geoms)
-    world_spheres    = jnp.asarray(ws_np)
-    world_capsules   = jnp.asarray(wc_np)
-    world_boxes      = jnp.asarray(wb_np)
-    world_halfspaces = jnp.asarray(wh_np)
-
-    # ── Endpoints ──────────────────────────────────────────────────────────
-    start_f = jnp.asarray(start, dtype=jnp.float32)
-    goal_f  = jnp.asarray(goal,  dtype=jnp.float32)
-
-    # Pin endpoints in the initial trajectories
-    init_pinned = jnp.asarray(init_trajs, dtype=jnp.float32)
-    init_pinned = init_pinned.at[:, 0, :].set(start_f)
-    init_pinned = init_pinned.at[:, -1, :].set(goal_f)
-
-    # ── Workspace allocation ───────────────────────────────────────────────
-    # Per-block workspace layout (floats) — must match sco_trajopt_kernel:
-    #   4 * T*n_act             (grad, dir, best_x, g_prev)
-    #   T * G * n_act           (J_k, G=5)
-    #   2 * m * T * n_act       (s_lbfgs + y_lbfgs)
-    #   2 * 8                   (rho_buf + alpha_hist, SCO_MAX_M=8)
-    #   T * n_joints * 7        (T_world_pool, one FK workspace per timestep)
-    _SCO_MAX_G = 5
-    _SCO_MAX_M = 8
-    m = opt_cfg.m_lbfgs
-    n = T * n_act
-    workspace_stride = (
-        4 * n
-        + T * _SCO_MAX_G * n_act
-        + 2 * m * n
-        + 2 * _SCO_MAX_M
-        + T * n_joints * 7
-    )
-
-    # ── FFI call ───────────────────────────────────────────────────────────
-    out_trajs, out_costs, _ = jax.ffi.ffi_call(
-        "sco_trajopt_cuda",
-        (
-            jax.ShapeDtypeStruct((B, T, n_act),      jnp.float32),
-            jax.ShapeDtypeStruct((B,),               jnp.float32),
-            jax.ShapeDtypeStruct((B * workspace_stride,), jnp.float32),
-        ),
-    )(
-        init_pinned,
-        twists, parent_tf, parent_idx, act_idx,
-        mimic_mul, mimic_off, mimic_act_idx, topo_inv,
-        sphere_offsets, sphere_radii,
-        pair_i, pair_j,
-        world_spheres, world_capsules, world_boxes, world_halfspaces,
-        lower, upper, start_f, goal_f,
-        n_outer_iters          = np.int64(opt_cfg.n_outer_iters),
-        n_inner_iters          = np.int64(opt_cfg.n_inner_iters),
-        m_lbfgs                = np.int64(opt_cfg.m_lbfgs),
-        S                      = np.int64(S),
-        w_smooth               = np.float32(opt_cfg.w_smooth),
-        w_acc                  = np.float32(opt_cfg.w_acc),
-        w_jerk                 = np.float32(opt_cfg.w_jerk),
-        w_limits               = np.float32(opt_cfg.w_limits),
-        w_trust                = np.float32(opt_cfg.w_trust),
-        w_collision            = np.float32(opt_cfg.w_collision),
-        w_collision_max        = np.float32(opt_cfg.w_collision_max),
-        penalty_scale          = np.float32(opt_cfg.penalty_scale),
-        collision_margin       = np.float32(opt_cfg.collision_margin),
-        smooth_min_temperature = np.float32(opt_cfg.smooth_min_temperature),
-        fd_eps                 = np.float32(fd_eps),
-    )
-
-    best_idx  = jnp.argmin(out_costs)
-    best_traj = out_trajs[best_idx]
-
-    return best_traj, out_costs, out_trajs

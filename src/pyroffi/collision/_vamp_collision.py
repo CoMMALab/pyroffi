@@ -43,7 +43,7 @@ from jax import Array
 from jaxtyping import Float
 
 from ._geometry import CollGeom
-from ._cuda_collision import _extract_world_arrays
+from ._cuda_collision import _extract_world_arrays, _extract_world_arrays_jax
 
 _KERNELS_DIR = Path(__file__).resolve().parent.parent / "vamp_kernels"
 _FFI_HEADER = _KERNELS_DIR / "_edge_validation_ffi.hh"
@@ -187,6 +187,30 @@ def _preload_runtime_libs() -> None:
 # Registered (target_name) per (robot hash, kind) so we only register once.
 _REGISTERED: dict[str, str] = {}
 
+# JIT sessions pinned for the lifetime of the process. XLA FFI targets cannot
+# be unregistered, so the JIT-owned code behind them must never be freed --
+# storing the session only on a checker instance lets a garbage-collected
+# checker take the code with it and leaves later checkers (which skip
+# re-registration via _REGISTERED) calling a dangling pointer.
+_SESSIONS: dict[str, object] = {}
+
+
+def _is_traced(x) -> bool:
+    """True if ``x`` (or any leaf of a CollGeom's arrays) is a JAX tracer.
+
+    Used to pick between the eager host path (concrete arrays → device_put →
+    cached FFI call) and the fully-traceable path (JAX-native world extraction →
+    ffi_call on the traced arrays), so the VAMP checker can be called from inside
+    jax.jit / vmap / pmap / scan.
+    """
+    if isinstance(x, jax.core.Tracer):
+        return True
+    # CollGeom: probe its pose (present on every supported primitive).
+    pose = getattr(x, "pose", None)
+    if pose is not None and isinstance(getattr(pose, "wxyz_xyz", None), jax.core.Tracer):
+        return True
+    return False
+
 
 class VAMPCPUCollisionChecker:
     """JIT-compiled VAMP CPU collision checker with batch edge validation.
@@ -277,6 +301,7 @@ class VAMPCPUCollisionChecker:
         self._key = jit.hash_source(tu_source, opts)
         self._configs_target = f"vamp_configs_{robot_token}_{src_hash}"
         self._edges_target = f"vamp_edges_{robot_token}_{src_hash}"
+        self._project_target = f"vamp_project_{robot_token}_{src_hash}"
 
         if self._key not in _REGISTERED:
             _preload_runtime_libs()
@@ -295,12 +320,16 @@ class VAMPCPUCollisionChecker:
                 session.handler_capsule("pyroffi_get_validate_edges"),
                 platform="cpu",
             )
+            jax.ffi.register_ffi_target(
+                self._project_target,
+                session.handler_capsule("pyroffi_get_project_configs"),
+                platform="cpu",
+            )
             # Keep the session alive for the process lifetime: the JIT-owned code
             # must outlive every FFI call into it.
             _REGISTERED[self._key] = self._configs_target
-            self._session = session
-        else:
-            self._session = None
+            _SESSIONS[self._key] = session
+        self._session = _SESSIONS[self._key]
 
         # World geometry cache (mirrors the CUDA checkers).
         self._ws = np.zeros((0, 4), dtype=np.float32)
@@ -353,6 +382,32 @@ class VAMPCPUCollisionChecker:
             self._wp = np.zeros((0, 3), dtype=np.float32)
             self._capt = (0.0, 0.0, 0.0)
         self._world_cache_key = None  # invalidate the per-call cache
+
+    def set_world_geoms(self, world_geoms) -> None:
+        """Cache a heterogeneous obstacle list (mix of Sphere/Capsule/Box geoms).
+
+        :meth:`set_world` takes a single ``CollGeom`` (one primitive type);
+        this loops :func:`_extract_world_arrays` over a sequence and
+        concatenates the per-type buffers, so scenes mixing spheres and boxes
+        (e.g. the IK benchmark environment) can be cached in one call.
+        """
+        ws, wc, wb = [], [], []
+        for g in world_geoms:
+            s, c, b, h = _extract_world_arrays(g)
+            if h.shape[0] != 0:
+                raise NotImplementedError(
+                    "The VAMP backend has no half-space primitive; represent a "
+                    "ground plane as a large flat Box instead."
+                )
+            ws.append(s)
+            wc.append(c)
+            wb.append(b)
+        self._ws = np.concatenate(ws, axis=0) if ws else np.zeros((0, 4), np.float32)
+        self._wc = np.concatenate(wc, axis=0) if wc else np.zeros((0, 7), np.float32)
+        self._wb = np.concatenate(wb, axis=0) if wb else np.zeros((0, 15), np.float32)
+        self._wp = np.zeros((0, 3), dtype=np.float32)
+        self._capt = (0.0, 0.0, 0.0)
+        self._world_cache_key = None
 
     @staticmethod
     @lru_cache(maxsize=1)
@@ -413,6 +468,44 @@ class VAMPCPUCollisionChecker:
         self._world_cache = arrays
         return arrays
 
+    def _world_args_traced(
+        self,
+        world_geom: Optional[CollGeom],
+        point_cloud: Optional[Array],
+        capt: Optional[tuple[float, float, float]],
+    ):
+        """Traceable analogue of :meth:`_world_args`.
+
+        Returns the obstacle buffers as *jnp* arrays (JAX-native extraction, no
+        host numpy round-trip and no ``device_put``), so they can be threaded
+        straight into ``ffi_call`` inside a jit/vmap/pmap trace.  ``capt`` stays
+        a tuple of concrete Python floats (it is a static FFI attribute).
+
+        Note: obstacle identity/id caching is skipped here — under a trace the
+        arrays are tracers, and the (cheap) JAX extraction is folded into the
+        surrounding compilation anyway.
+        """
+        if world_geom is not None:
+            ws, wc, wb, wh = _extract_world_arrays_jax(world_geom)
+            if wh.shape[0] != 0:
+                raise NotImplementedError(
+                    "The VAMP backend has no half-space primitive; represent a "
+                    "ground plane as a large flat Box instead."
+                )
+        else:
+            ws = jnp.asarray(self._ws, dtype=jnp.float32)
+            wc = jnp.asarray(self._wc, dtype=jnp.float32)
+            wb = jnp.asarray(self._wb, dtype=jnp.float32)
+
+        if point_cloud is not None:
+            wp = jnp.asarray(point_cloud, dtype=jnp.float32).reshape(-1, 3)
+            capt_v = capt if capt is not None else (0.0, 1.0, 0.0)
+        else:
+            wp = jnp.asarray(self._wp, dtype=jnp.float32)
+            capt_v = self._capt
+
+        return ws, wc, wb, wp, tuple(float(x) for x in capt_v)
+
     # ── Public API (mirrors CUDABinaryCollisionChecker) ─────────────────────
 
     def _jit_fn(self, kind: str, capt: tuple[float, float, float]):
@@ -455,6 +548,123 @@ class VAMPCPUCollisionChecker:
         self._jit_cache[key] = fn
         return fn
 
+    def _project_jit_fn(self, capt: tuple[float, float, float], attrs: tuple):
+        """Cached jitted wrapper for the projection FFI call (see ``_jit_fn``)."""
+        key = ("project", capt, attrs)
+        fn = self._jit_cache.get(key)
+        if fn is not None:
+            return fn
+
+        rmin, rmax, rpt = (np.float32(capt[0]), np.float32(capt[1]), np.float32(capt[2]))
+        seed, num_particles, num_iters, temperature, sigma0, sigma_shrink, sigma_grow, bisect_iters = attrs
+        tgt = self._project_target
+
+        def impl(q, lower, upper, ws, wc, wb, wp):
+            B, dim = q.shape
+            return jax.ffi.ffi_call(
+                tgt,
+                (
+                    jax.ShapeDtypeStruct((B, dim), jnp.float32),
+                    jax.ShapeDtypeStruct((B,), jnp.bool_),
+                ),
+            )(q, lower, upper, ws, wc, wb, wp,
+              capt_r_min=rmin, capt_r_max=rmax, capt_r_point=rpt,
+              seed=np.int64(seed),
+              num_particles=np.int64(num_particles),
+              num_iters=np.int64(num_iters),
+              temperature=np.float32(temperature),
+              sigma0=np.float32(sigma0),
+              sigma_shrink=np.float32(sigma_shrink),
+              sigma_grow=np.float32(sigma_grow),
+              bisect_iters=np.int64(bisect_iters))
+
+        fn = jax.jit(impl)
+        self._jit_cache[key] = fn
+        return fn
+
+    def project_collision_free(
+        self,
+        robot,  # accepted for API parity; FK is baked into the JIT binary
+        cfg: Float[Array, "*batch actuated_count"],
+        world_geom: Optional[CollGeom] = None,
+        point_cloud: Optional[Array] = None,
+        capt: Optional[tuple[float, float, float]] = None,
+        *,
+        lower: Optional[Array] = None,
+        upper: Optional[Array] = None,
+        seed: int = 0,
+        num_particles: int = 32,
+        num_iters: int = 8,
+        temperature: float = 0.1,
+        sigma0: float = 0.1,
+        sigma_shrink: float = 0.7,
+        sigma_grow: float = 1.6,
+        bisect_iters: int = 12,
+    ) -> tuple[Array, Array]:
+        """MPPI-project configurations onto the collision-free set (seed repair).
+
+        Collision-free inputs pass through unchanged.  Each colliding input runs
+        a small derivative-free MPPI optimization (VAMP's collision oracle is
+        boolean, so no gradients exist to follow): per iteration,
+        ``num_particles`` particles are drawn around a running mean as
+        antithetic +/- pairs at stratified log-spaced radius scales (for sample
+        diversity), the feasible ones are softmax-weighted by
+        ``exp(-||q - seed||^2 / temperature)``, and the mean moves to the
+        weighted average.  The sampling scale starts at ``sigma0`` and adapts
+        (``sigma_shrink`` on feasible evidence, ``sigma_grow`` when the whole
+        population collides).  The best feasible particle found is finally
+        bisected back toward the input for ``bisect_iters`` iterations, so the
+        result is a near-closest free configuration.  Deterministic per
+        (``seed``, batch index), independent of thread schedule.
+
+        Parallelism is one OpenMP thread per batch element (particles within an
+        element run serially on that thread's SIMD units), so cores don't
+        contend over a single problem.
+
+        Args:
+            cfg:   ``[*batch, n_act]`` configurations to project.
+            lower/upper: per-joint clamp bounds ``[n_act]``; default unbounded.
+
+        Returns:
+            ``(q_projected, ok)`` with shapes ``[*batch, n_act]`` / ``[*batch]``;
+            ``ok`` is False where no free configuration was found (``q`` is then
+            returned unchanged).
+        """
+        ws, wc, wb, wp, capt = self._world_args(world_geom, point_cloud, capt)
+        cfg = jnp.asarray(cfg, dtype=jnp.float32)
+        batch_axes = cfg.shape[:-1]
+        n_act = cfg.shape[-1]
+        B = int(np.prod(batch_axes)) if batch_axes else 1
+        cpu = self._cpu_device()
+        cfg_flat = jax.device_put(cfg.reshape(B, n_act), cpu)
+
+        big = np.float32(np.finfo(np.float32).max)
+        lo = np.full(n_act, -big, np.float32) if lower is None else np.asarray(
+            lower, np.float32
+        )
+        hi = np.full(n_act, big, np.float32) if upper is None else np.asarray(
+            upper, np.float32
+        )
+        lo = jax.device_put(np.nan_to_num(lo, neginf=-big, posinf=big), cpu)
+        hi = jax.device_put(np.nan_to_num(hi, neginf=-big, posinf=big), cpu)
+
+        attrs = (
+            int(seed),
+            max(2, int(num_particles)),  # >= one antithetic pair
+            int(num_iters),
+            float(temperature),
+            float(sigma0),
+            float(sigma_shrink),
+            float(sigma_grow),
+            int(bisect_iters),
+        )
+        q_out, ok = self._project_jit_fn(capt, attrs)(
+            cfg_flat, lo, hi, ws, wc, wb, wp
+        )
+        if batch_axes:
+            return q_out.reshape(*batch_axes, n_act), ok.reshape(batch_axes)
+        return q_out.reshape(n_act), ok.reshape(())
+
     def check_collision_free(
         self,
         robot,  # accepted for API parity; FK is baked into the JIT binary
@@ -469,6 +679,20 @@ class VAMPCPUCollisionChecker:
         ``point_cloud`` (point radius defaults to 0 — set ``r_point`` to give the
         cloud thickness).
         """
+        # Traced call (inside jax.jit / vmap / pmap / scan): extract the world
+        # with JAX ops and feed the tracers straight into ffi_call — no host
+        # numpy conversion or CPU device_put (both illegal on tracers). The FFI
+        # target is CPU-registered, so the enclosing trace must be compiled for
+        # the CPU backend.
+        if _is_traced(cfg) or _is_traced(world_geom):
+            ws, wc, wb, wp, capt_v = self._world_args_traced(world_geom, point_cloud, capt)
+            cfg = jnp.asarray(cfg, dtype=jnp.float32)
+            batch_axes = cfg.shape[:-1]
+            n_act = cfg.shape[-1]
+            B = int(np.prod(batch_axes)) if batch_axes else 1
+            out = self._jit_fn("configs", capt_v)(cfg.reshape(B, n_act), ws, wc, wb, wp)
+            return out.reshape(batch_axes) if batch_axes else out.reshape(())
+
         ws, wc, wb, wp, capt = self._world_args(world_geom, point_cloud, capt)
         cfg = jnp.asarray(cfg, dtype=jnp.float32)
         batch_axes = cfg.shape[:-1]
@@ -502,6 +726,24 @@ class VAMPCPUCollisionChecker:
         collision-free; validate the start separately with
         :meth:`check_collision_free` if you need it.
         """
+        # Traced call: JAX-native extraction + ffi_call on the tracers (see
+        # check_collision_free for the platform caveat).
+        if _is_traced(edge_cfgs) or _is_traced(world_geom):
+            ws, wc, wb, wp, capt_v = self._world_args_traced(world_geom, point_cloud, capt)
+            edge_cfgs = jnp.asarray(edge_cfgs, dtype=jnp.float32)
+            *edge_axes, endpoints, n_act = edge_cfgs.shape
+            if endpoints != 2:
+                raise ValueError(
+                    "VAMP edge validation expects exactly 2 endpoints per edge "
+                    f"(got {endpoints}); it discretises internally at the robot "
+                    "resolution."
+                )
+            E = int(np.prod(edge_axes)) if edge_axes else 1
+            out = self._jit_fn("edges", capt_v)(
+                edge_cfgs.reshape(E, 2, n_act), ws, wc, wb, wp
+            )
+            return out.reshape(tuple(edge_axes)) if edge_axes else out.reshape(())
+
         ws, wc, wb, wp, capt = self._world_args(world_geom, point_cloud, capt)
         edge_cfgs = jnp.asarray(edge_cfgs, dtype=jnp.float32)
         *edge_axes, endpoints, n_act = edge_cfgs.shape
