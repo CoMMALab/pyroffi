@@ -61,6 +61,9 @@ namespace ffi = xla::ffi;
  * @param fixed_mask    (n_act,) int32                 1 = frozen joint
  * @param out           (n_problems, n_seeds, n_act)   best configurations
  * @param out_err       (n_problems, n_seeds)          best weighted sq. errors
+ * @param out_feasible  (n_problems, n_seeds) int32     1 if the returned config
+ *                                                      satisfies the collision
+ *                                                      constraint, else 0
  * @param n_inner_iters int                            projected-gradient steps
  * @param pos_weight    scalar                         weight on position residual
  * @param ori_weight    scalar                         weight on orientation residual
@@ -70,6 +73,36 @@ namespace ffi = xla::ffi;
  * @param max_iter      int                            outer SQP iteration budget
  */
 // Launch shape per tier (SQP is register/local-memory heavy; keep blocks modest).
+// Hard-constraint stage. The cap on simultaneously-enforced collision rows is a
+// storage/occupancy trade (MAX_ACT floats each, thread-local); sweeps bound the
+// alternating projection when the constraints and the box conflict.
+// Added to a seed's reported error when it ends infeasible, so host-side winner
+// selection puts every feasible seed ahead of every infeasible one.
+// TODO(task 8): silent correctness cliff -- past this many simultaneously
+// violated constraints the extras degrade to the soft term with no runtime
+// warning, so the "hard" guarantee quietly weakens. Report it at least.
+#define PYROFFI_MAX_COLL_CON   4
+#define PYROFFI_COLL_POCS_SWEEPS 8
+
+// OSQP-style ADMM inner QP solve (osqp.org/docs/solver). Indirect form, so the
+// system stays SPD and GLASS's Cholesky is used unmodified. Defaults follow
+// OSQP's: sigma 1e-6, rho 1, over-relaxation 1.6.
+// Fixed sweep count, MEASURED not assumed. Adding OSQP's primal/dual residual
+// termination made this ~8% SLOWER at both 1e-5/1e-4 and 1e-3/1e-2 tolerances
+// (sqp self-only 381 -> 412-419 ms, across four runs): the criteria never fire
+// inside 25 sweeps, so the check is pure overhead. That is itself the finding --
+// the QP is NOT solved to convergence here, and the POCS polish below is
+// load-bearing rather than cosmetic.
+//
+// TODO(task 8): if the subproblem needs to be solved properly, the lever is rho
+// (rho <- rho*sqrt(r_prim/r_dual)), which requires re-forming AND re-factoring M
+// since rho sits inside it. Raising PYROFFI_ADMM_ITERS alone would only pay if
+// convergence is close, and the residuals say it is not.
+#define PYROFFI_ADMM_ITERS  25
+#define PYROFFI_ADMM_SIGMA  1.0e-6f
+#define PYROFFI_ADMM_RHO    1.0f
+#define PYROFFI_ADMM_ALPHA  1.6f
+
 #define PYROFFI_SQP_THREAD_TPB 32
 #define PYROFFI_SQP_BLOCK_TPB  64
 
@@ -102,14 +135,20 @@ void sqp_ik_kernel(
     const float* __restrict__ world_capsules,
     const float* __restrict__ world_boxes,
     const float* __restrict__ world_halfspaces,
+    const float* __restrict__ self_sph_local,   // (K, 4) link-local (x,y,z,r)
+    const int*   __restrict__ self_link_start,  // (N + 1) CSR sphere runs
+    const int*   __restrict__ self_link_joint,  // (N)     posing joint per link
+    const int*   __restrict__ self_pair_i,      // (Ps)    active link pairs
+    const int*   __restrict__ self_pair_j,      // (Ps)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
     float*       __restrict__ out,
     float*       __restrict__ out_err,
+    int*         __restrict__ out_feasible,   // (n_problems, n_seeds) 1 = satisfies
     int   n_problems, int n_seeds, int n_joints, int n_act, int n_ee,
     int   n_robot_spheres, int n_world_spheres, int n_world_capsules,
-    int   n_world_boxes, int n_world_halfspaces,
+    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs,
     int   max_iter, int n_inner_iters,
     int   enable_collision,
     float collision_weight, float collision_margin,
@@ -200,8 +239,19 @@ void sqp_ik_kernel(
     for (int ee = 0; ee < n_ee; ee++)
         for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
 
-    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
-        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+    // Hoisted out of the merit lambda: the QP assembly below needs them too, so
+    // that collision enters the *step*, not only the accept/reject test.
+    const bool want_self  = n_self_pairs > 0;
+    const bool want_world = enable_collision && n_robot_spheres > 0;
+
+    auto collision_raw = [&](const float* cfg_eval, float* T_eval) {
+        // Self-collision is independent of world geometry: an arm folded into
+        // itself is invalid whether or not there are obstacles. Gating the whole
+        // penalty on `enable_collision` (which tracks *world* obstacles) skipped
+        // it entirely for obstacle-free problems -- the common case for plain
+        // reachability IK, and exactly where a folded solution is most likely to
+        // be returned unnoticed.
+        if (!want_world && !want_self) return 0.0f;
 
         fk_single(
             cfg_eval,
@@ -211,7 +261,10 @@ void sqp_ik_kernel(
             n_joints, n_act);
 
         float pen = 0.0f;
-        for (int i = 0; i < n_robot_spheres; i++) {
+        // `want_self` can be true with world collision off, so the world loop
+        // needs its own guard -- otherwise enabling self-collision would
+        // silently switch on world penalties the caller did not ask for.
+        for (int i = 0; want_world && i < n_robot_spheres; i++) {
             const int jidx = robot_sphere_joint_idx[i];
             if (jidx < 0 || jidx >= n_joints) continue;
 
@@ -262,10 +315,41 @@ void sqp_ik_kernel(
                 }
             }
         }
-        return collision_weight * pen;
+
+        // Self-collision. This solver checked the robot against the WORLD but
+        // never against itself, so a returned configuration could have the arm
+        // folded through its own links and still report collision-free. On the
+        // Panda, 6.5% of random in-limit configurations self-collide.
+        //
+        // Shares `self_collision_penalty` with the fused collision kernel so
+        // both evaluate identical geometry. `self_sph_local` travels with the
+        // tables because `link_start` indexes IT, not `robot_spheres_local`.
+        // n_self_pairs == 0 disables the whole thing, and that is the default --
+        // existing callers are unaffected until they pass a pair table, which
+        // must be SRDF-filtered (without an SRDF the spherized model treats
+        // adjacent links as permanently overlapping and rejects everything).
+        if (want_self) {
+            pen += self_collision_penalty(
+                T_eval, self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs, collision_margin);
+        }
+        return pen;
+    };
+
+    // Weighted merit term (unchanged behaviour for every existing call site).
+    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
+        return collision_weight * collision_raw(cfg_eval, T_eval);
+    };
+
+    // Constraint violation, independent of `collision_weight`. This is what makes
+    // the constraint HARD: acceptance below is lexicographic on it, so no choice
+    // of weight can trade a collision away against pose error.
+    auto constraint_violation = [&](const float* cfg_eval, float* T_eval) {
+        return collision_raw(cfg_eval, T_eval);
     };
 
     best_err += collision_penalty(cfg, T_world);
+    float best_viol = constraint_violation(cfg, T_world);
 
     float lam = lambda_init;
 
@@ -339,6 +423,86 @@ void sqp_ik_kernel(
             H_s[i*n_act + i] += (double)lam;
         }
 
+        // ── Collision constraints in the QP ─────────────────────────────
+        // Linearised rows kept for the HARD enforcement stage further down:
+        //     grad(d)^T p >= margin - d
+        // Capped, because each row costs MAX_ACT floats of thread-local storage
+        // and these kernels are register-bound. The cap holds the MOST VIOLATED
+        // constraints; anything beyond it still contributes its Gauss-Newton
+        // penalty term below, so excess constraints degrade to soft rather than
+        // vanishing. In practice the simultaneously-violated set is 1-2 pairs.
+        float coll_A[PYROFFI_MAX_COLL_CON][MAX_ACT];
+        float coll_b[PYROFFI_MAX_COLL_CON];
+        int   n_coll = 0;
+
+        // Keep `row` (already Jacobi-scaled) if it is among the worst violations.
+        auto record_constraint = [&](const float* row, float viol) {
+            int slot_i = n_coll;
+            if (n_coll < PYROFFI_MAX_COLL_CON) {
+                n_coll++;
+            } else {
+                int worst = -1; float smallest = viol;
+                for (int c = 0; c < PYROFFI_MAX_COLL_CON; c++)
+                    if (coll_b[c] < smallest) { smallest = coll_b[c]; worst = c; }
+                if (worst < 0) return;      // every stored row is more violated
+                slot_i = worst;
+            }
+            for (int a = 0; a < n_act; a++) coll_A[slot_i][a] = row[a];
+            coll_b[slot_i] = viol;
+        };
+
+        // Each violated constraint enters as a Gauss-Newton residual
+        //     c = sqrt(w) * (margin - d),  active only while d < margin
+        // with Jacobian row -sqrt(w) * dd/dq, contributing
+        //     H += w * g g^T,   g_s -= w * (margin - d) * g
+        // (g_s is +J^T fw here; the solve below negates it). Previously the
+        // penalty reached only the merit function, so the QP was built from the
+        // pose residual alone and the step could not leave a collision.
+        //
+        // NOTE: this is still a PENALTY, not a hard constraint. It gives the
+        // solver a descent direction; it does not guarantee feasibility. Proper
+        // hard constraints belong as linearised inequality rows
+        //     grad(d)^T p >= margin - d
+        // in the box-QP below, which currently projects onto joint-limit boxes
+        // only. That needs a general inequality active-set solve.
+        //
+        // Not group-strided, matching the H_s/g_s build above: these are
+        // thread-local and every lane must hold a complete copy.
+        if (want_self || want_world) {
+            auto qp_accumulate = [&](float* gg, float viol) {
+                for (int a = 0; a < n_act; a++) gg[a] /= col_scale[a];
+                // `gg` is now in the same scaled space as p_s, which is the space
+                // the hard-enforcement stage projects in.
+                record_constraint(gg, viol);
+                const double w = (double)collision_weight;
+                for (int i = 0; i < n_act; i++) {
+                    for (int j = 0; j < n_act; j++)
+                        H_s[i*n_act + j] += w * (double)gg[i] * (double)gg[j];
+                    g_s[i] -= w * (double)viol * (double)gg[i];
+                }
+            };
+
+            // Shared descriptions of the collision geometry; the sweep itself lives
+            // in _collision_cuda_helpers.cuh so LS and SQP cannot drift apart.
+            const RobotChainRefs chain_refs = {
+                s_twists, s_parent_idx, s_act_idx, s_mimic_mul, s_mimic_act_idx, n_joints };
+            const SelfCollisionRefs self_refs = {
+                self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs };
+            const WorldCollisionRefs world_refs = {
+                robot_spheres_local, robot_sphere_joint_idx, n_robot_spheres,
+                world_spheres, n_world_spheres, world_capsules, n_world_capsules,
+                world_boxes, n_world_boxes, world_halfspaces, n_world_halfspaces };
+
+            {
+                float g[MAX_ACT];
+                collision_gauss_newton_terms(
+                    T_world, chain_refs, self_refs, world_refs,
+                    want_self, want_world, n_act, collision_margin, g,
+                    [&](float* gg, float viol) { qp_accumulate(gg, viol); });
+            }
+        }
+
         // ── Box bounds in scaled space ──────────────────────────────────
         float lb_s[MAX_ACT], ub_s[MAX_ACT];
         for (int a = 0; a < n_act; a++) {
@@ -382,14 +546,56 @@ void sqp_ik_kernel(
         // clobbers rhs_g while a slow lane is still copying it into p_s.
         group_sync();
 
-        // ── Step 2: project to joint-limit box ──────────────────────────
+        // ── Step 2: project onto the feasible set ───────────────────────
+        // The joint-limit box AND the linearised collision half-spaces, by
+        // alternating projection (POCS). Projecting onto a half-space can push a
+        // joint out of its box and clamping to the box can re-violate a
+        // half-space, so the two projections alternate until both hold.
+        //
+        // This makes collision a HARD constraint ON THE SUBPROBLEM: the returned
+        // step satisfies every recorded linearised row. Two honest limits. First,
+        // the projection is Euclidean rather than in the H-metric, so the step is
+        // feasible but is not the exact constrained-QP minimiser -- SQP stays
+        // sound because the outer trust region and line search still work on the
+        // merit function. Second, feasibility is of the LINEARISATION; the true
+        // d(q + p) >= margin follows only as the outer iteration converges and the
+        // step shrinks, which is the standard SQP guarantee, not a per-step one.
+        //
+        // If the rows and the box have no common point the sweeps cannot satisfy
+        // everything; the iteration cap bounds the work and leaves the step at the
+        // last iterate, with the Gauss-Newton penalty still pulling in the right
+        // direction rather than the solver stalling.
+        auto project_feasible = [&](float* p) {
+            for (int sweep = 0; sweep < PYROFFI_COLL_POCS_SWEEPS; sweep++) {
+                bool feasible = true;
+                for (int c = 0; c < n_coll; c++) {
+                    float ap = 0.0f, nn = 0.0f;
+                    for (int a = 0; a < n_act; a++) {
+                        ap += coll_A[c][a] * p[a];
+                        nn += coll_A[c][a] * coll_A[c][a];
+                    }
+                    const float viol = coll_b[c] - ap;
+                    if (viol <= 1e-7f || nn < 1e-12f) continue;
+                    feasible = false;
+                    const float step = viol / nn;
+                    for (int a = 0; a < n_act; a++) p[a] += step * coll_A[c][a];
+                }
+                for (int a = 0; a < n_act; a++) p[a] = clampf(p[a], lb_s[a], ub_s[a]);
+                if (feasible) break;
+            }
+        };
+
         for (int a = 0; a < n_act; a++)
             p_s[a] = clampf(p_s[a], lb_s[a], ub_s[a]);
+        project_feasible(p_s);
 
         // ── Active-set refinement steps ─────────────────────────────────
         // Fix joints that hit their bounds, re-solve for free joints.
         // Converges in 1-2 steps; no-op when joints are not near limits.
-        for (int k = 0; k < n_inner_iters; k++) {
+        // Box-only refinement. With collision rows present the ADMM solve below
+        // replaces it: this loop convexifies bounds ALONE, and re-solving here
+        // would just undo the constrained step.
+        for (int k = 0; (n_coll == 0) && k < n_inner_iters; k++) {
             float active[MAX_ACT], p_bounded[MAX_ACT];
             for (int a = 0; a < n_act; a++) {
                 active[a]    = (p_s[a] <= lb_s[a] + 1e-8f || p_s[a] >= ub_s[a] - 1e-8f)
@@ -424,7 +630,127 @@ void sqp_ik_kernel(
                          ? p_bounded[a]
                          : clampf((float)rhs_g[a], lb_s[a], ub_s[a]);
             }
+            // The re-solve ignores the collision rows, so restore feasibility.
+            project_feasible(p_s);
             group_sync();   // p_s consumed before the next step rebuilds A_g
+        }
+
+        // ── Hard-constrained QP by ADMM (OSQP indirect form) ────────────
+        // Replaces the POCS projection with an actual solve of
+        //     min 1/2 p' H p + g' p   s.t.  l <= A p <= u
+        // with A = [I ; A_c]: joint-limit box rows plus one linearised collision
+        // row per active constraint, grad(d)' p >= margin - d (upper bound +inf).
+        //
+        // OSQP's INDIRECT form is what makes this fit the existing kernel:
+        //     (H + sigma*I + rho*A'A) p = sigma*p - g + A'(rho*z - y)
+        // is symmetric positive definite, so GLASS's Cholesky solves it as-is.
+        // The direct KKT form is quasi-definite and would need an LDL' that GLASS
+        // does not expose -- and GLASS is not to be modified. Because A = [I ; A_c],
+        // A'A = I + A_c'A_c, so the matrix never has to be formed explicitly.
+        //
+        // The matrix is constant across ADMM sweeps, so it is factored ONCE via
+        // tier_potrf and each sweep is a tier_potrs against that factor. Without
+        // the factor/solve split this would cost 25 Choleskys per SQP step.
+        if (n_coll > 0) {
+            const float sigma = PYROFFI_ADMM_SIGMA;
+            const float rho   = PYROFFI_ADMM_RHO;
+            const float alpha = PYROFFI_ADMM_ALPHA;
+
+            for (int idx = rank; idx < n_act * n_act; idx += size) {
+                const int i = idx / n_act, j = idx % n_act;
+                double m = H_s[i*n_act + j];
+                for (int c = 0; c < n_coll; c++)
+                    m += (double)rho * (double)coll_A[c][i] * (double)coll_A[c][j];
+                if (i == j) m += (double)sigma + (double)rho;
+                A_g[i*(int)N + j] = m;
+            }
+            for (int a = rank; a < n_act; a += size) {
+                if (!s_fixed_mask[a]) continue;
+                for (int j = 0; j < n_act; j++)
+                    A_g[a*(int)N + j] = A_g[j*(int)N + a] = 0.0;
+                A_g[a*(int)N + a] = 1.0;
+            }
+            // Identity-pad the tail. Matrix only -- the rhs is rebuilt per sweep.
+            for (int idx = rank; idx < (int)N * (int)N; idx += size) {
+                const int i = idx / (int)N, j = idx % (int)N;
+                if (i >= n_act || j >= n_act)
+                    A_g[i*(int)N + j] = (i == j) ? 1.0 : 0.0;
+            }
+            group_sync();
+
+            const bool factored = pyroffi::tier_potrf<TIER, double, N>(A_g, &sh_fail[slot]);
+            group_sync();
+
+            if (factored) {
+                float x[MAX_ACT], zb[MAX_ACT], yb[MAX_ACT];
+                float zc[PYROFFI_MAX_COLL_CON], yc[PYROFFI_MAX_COLL_CON];
+
+                // Warm start from the box-projected Newton step already in hand.
+                for (int a = 0; a < n_act; a++) {
+                    x[a]  = p_s[a];
+                    zb[a] = clampf(x[a], lb_s[a], ub_s[a]);
+                    yb[a] = 0.0f;
+                }
+                for (int c = 0; c < n_coll; c++) {
+                    float ax = 0.0f;
+                    for (int a = 0; a < n_act; a++) ax += coll_A[c][a] * x[a];
+                    zc[c] = fmaxf(ax, coll_b[c]);
+                    yc[c] = 0.0f;
+                }
+
+                for (int it = 0; it < PYROFFI_ADMM_ITERS; it++) {
+                    for (int a = rank; a < n_act; a += size) {
+                        double v = (double)sigma * (double)x[a] - g_s[a]
+                                 + ((double)rho * (double)zb[a] - (double)yb[a]);
+                        for (int c = 0; c < n_coll; c++)
+                            v += (double)coll_A[c][a]
+                               * ((double)rho * (double)zc[c] - (double)yc[c]);
+                        rhs_g[a] = s_fixed_mask[a] ? 0.0 : v;
+                    }
+                    for (int a = rank + n_act; a < (int)N; a += size) rhs_g[a] = 0.0;
+                    group_sync();
+
+                    pyroffi::tier_potrs<TIER, double, N>(A_g, rhs_g);
+                    group_sync();
+
+                    for (int a = 0; a < n_act; a++) x[a] = (float)rhs_g[a];
+                    group_sync();   // rhs_g is rebuilt in place next sweep
+
+                    // z/y updates with over-relaxation. Cheap and identical on
+                    // every lane, so they are done redundantly rather than
+                    // strided-and-broadcast.
+                    for (int a = 0; a < n_act; a++) {
+                        const float ax = alpha * x[a] + (1.0f - alpha) * zb[a];
+                        const float zn = clampf(ax + yb[a] / rho, lb_s[a], ub_s[a]);
+                        yb[a] += rho * (ax - zn);
+                        zb[a]  = zn;
+                    }
+                    for (int c = 0; c < n_coll; c++) {
+                        float ax = 0.0f;
+                        for (int a = 0; a < n_act; a++) ax += coll_A[c][a] * x[a];
+                        ax = alpha * ax + (1.0f - alpha) * zc[c];
+                        // Projection onto [b_c, +inf).
+                        const float zn = fmaxf(ax + yc[c] / rho, coll_b[c]);
+                        yc[c] += rho * (ax - zn);
+                        zc[c]  = zn;
+                    }
+
+                }
+                for (int a = 0; a < n_act; a++) p_s[a] = x[a];
+            }
+
+            // ADMM converges TO the feasible set without landing exactly on it,
+            // so finish with the exact projection. Cheap, and it is what lets the
+            // constraint be stated as satisfied rather than nearly satisfied.
+            //
+            // No ADMM-level infeasibility certificate is computed, deliberately.
+            // Feasibility is verified downstream on the ACTUAL nonlinear distances
+            // by `constraint_violation`, and that verdict is what reaches
+            // `out_feasible` and the filter. A certificate here would describe the
+            // linearised subproblem, which is not the thing callers need to trust;
+            // an infeasible subproblem simply yields a poor step that the filter
+            // then declines.
+            project_feasible(p_s);
         }
 
         // ── Unscale to original joint space ─────────────────────────────
@@ -501,8 +827,24 @@ void sqp_ik_kernel(
         }
 
         // ── Track all-time best ─────────────────────────────────────────
-        if (best_alpha_err < best_err) {
-            best_err = best_alpha_err;
+        // Filter acceptance: feasibility first, then pose error. A feasible
+        // iterate always beats an infeasible one however small the penalty
+        // weight; among infeasible ones the least-violating wins, which is what
+        // drives an infeasible seed toward the feasible set. Seeds are sampled
+        // at random and many START in collision, so a method that only preserves
+        // feasibility would never get off the ground -- this is the restoration
+        // phase, folded into the acceptance test.
+        const float trial_viol = constraint_violation(trial_cfg, T_world);
+        const bool  trial_feas = (trial_viol <= 0.0f);
+        const bool  best_feas  = (best_viol  <= 0.0f);
+        bool accept_trial;
+        if (trial_feas != best_feas)  accept_trial = trial_feas;
+        else if (trial_feas)          accept_trial = (best_alpha_err < best_err);
+        else                          accept_trial = (trial_viol < best_viol);
+
+        if (accept_trial) {
+            best_err  = best_alpha_err;
+            best_viol = trial_viol;
             for (int a = 0; a < n_act; a++) best_cfg[a] = trial_cfg[a];
         }
     }
@@ -512,7 +854,13 @@ void sqp_ik_kernel(
     // solved step), so the leader guard avoids a redundant same-value write race.
     if (leader) {
         for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
-        out_err[gs] = best_err;
+        // Feasibility travels as its own value rather than folded into the error.
+        // The host still has to order lexicographically -- an infeasible seed must
+        // lose to every feasible one regardless of pose error -- but it now does
+        // that against a flag it can also report, instead of against a magic
+        // constant baked into a metric callers may threshold on.
+        out_err[gs]      = best_err;
+        out_feasible[gs] = (best_viol > 0.0f) ? 0 : 1;
     }
 }
 
@@ -540,6 +888,11 @@ static ffi::Error SqpIkCudaImpl(
     ffi::Buffer<ffi::DataType::F32> world_capsules,
     ffi::Buffer<ffi::DataType::F32> world_boxes,
     ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::F32> self_sph_local,
+    ffi::Buffer<ffi::DataType::S32> self_link_start,
+    ffi::Buffer<ffi::DataType::S32> self_link_joint,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -554,7 +907,8 @@ static ffi::Error SqpIkCudaImpl(
     float   collision_weight,
     float   collision_margin,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out,
-    ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_err)
+    ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_err,
+    ffi::Result<ffi::Buffer<ffi::DataType::S32>> out_feasible)
 {
     const int n_problems = static_cast<int>(seeds.dimensions()[0]);
     const int n_seeds    = static_cast<int>(seeds.dimensions()[1]);
@@ -566,6 +920,7 @@ static ffi::Error SqpIkCudaImpl(
     const int n_world_capsules = static_cast<int>(world_capsules.dimensions()[0]);
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
     // N: the compile-time bucket holding n_act (identity-padded). 0 => past MAX_ACT's
     // ceiling, which _build_params.py should already have refused.
@@ -584,11 +939,15 @@ static ffi::Error SqpIkCudaImpl(
         robot_spheres_local.typed_data(), robot_sphere_joint_idx.typed_data(), \
         world_spheres.typed_data(), world_capsules.typed_data(),               \
         world_boxes.typed_data(), world_halfspaces.typed_data(),               \
+        self_sph_local.typed_data(), self_link_start.typed_data(),             \
+        self_link_joint.typed_data(), self_pair_i.typed_data(),                \
+        self_pair_j.typed_data(),                                              \
         lower.typed_data(), upper.typed_data(), fixed_mask.typed_data(),       \
         out->typed_data(), out_err->typed_data(),                              \
+        out_feasible->typed_data(),                                            \
         n_problems, n_seeds, n_joints, n_act, n_ee,                            \
         n_robot_spheres, n_world_spheres, n_world_capsules,                    \
-        n_world_boxes, n_world_halfspaces,                                     \
+        n_world_boxes, n_world_halfspaces, n_self_pairs,                       \
         static_cast<int>(max_iter), static_cast<int>(n_inner_iters),           \
         static_cast<int>(enable_collision),                                    \
         collision_weight, collision_margin,                                    \
@@ -627,6 +986,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_capsules
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_boxes
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // self_sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_link_joint
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask
@@ -642,4 +1006,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<float>("collision_margin")
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out cfgs
         .Ret<ffi::Buffer<ffi::DataType::F32>>()   // out errors
+        .Ret<ffi::Buffer<ffi::DataType::S32>>()   // out feasible (1 = satisfies)
 );

@@ -35,7 +35,12 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
-from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
+from ._ik_primitives import (
+    _ik_residual,
+    _LS_ALPHAS,
+    self_collision_table_arrays,
+    split_cuda_and_post_constraints,
+)
 from ._implicit_diff import differentiable_ik_solution
 from ..collision._cuda_collision import _extract_world_arrays
 
@@ -566,6 +571,17 @@ def ls_ik_solve(
 )
 def _ls_ik_solve_cuda_jit(
     robot:                Robot,
+    # Self-collision tables as TRACED arguments, deliberately not read from
+    # module state. A stash read at trace time gets baked into the first trace
+    # and silently reused: the first call (empty tables) was cached and every
+    # later call replayed it, so enabling self-collision changed nothing. As
+    # arguments their shapes are part of the jit signature, so an empty table
+    # and a populated one compile separately.
+    self_sph_local:       Array,
+    self_link_start:      Array,
+    self_link_joint:      Array,
+    self_pair_i:          Array,
+    self_pair_j:          Array,
     target_poses:         tuple,
     rng_key:              Array,
     previous_cfg:         Float[Array, "n_act"],
@@ -644,6 +660,11 @@ def _ls_ik_solve_cuda_jit(
         world_capsules = world_capsules,
         world_boxes = world_boxes,
         world_halfspaces = world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower          = lower,
         upper          = upper,
         fixed_mask     = fixed_joint_mask_int,
@@ -687,6 +708,7 @@ def _ls_ik_solve_cuda_jit(
     if len(constraint_fns) > 0:
         return cfgs[best_idx], constraint_errors[best_idx]
     return cfgs[best_idx], jnp.zeros(())
+
 
 
 def ls_ik_solve_cuda(
@@ -838,8 +860,15 @@ def ls_ik_solve_cuda(
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
+    _sc = self_collision_table_arrays(robot, collision_checker)
+
     winner, winner_coll_cost = _ls_ik_solve_cuda_jit(
         robot=robot,
+        self_sph_local=_sc[0],
+        self_link_start=_sc[1],
+        self_link_joint=_sc[2],
+        self_pair_i=_sc[3],
+        self_pair_j=_sc[4],
         target_poses=target_poses_t,
         rng_key=rng_key,
         previous_cfg=previous_cfg,
@@ -916,6 +945,13 @@ def ls_ik_solve_cuda(
 )
 def _ls_ik_solve_cuda_batch_jit(
     robot:                Robot,
+    # Traced, for the same reason as the single-problem path above: read from
+    # module state they would bake into the first trace.
+    self_sph_local:       Array,
+    self_link_start:      Array,
+    self_link_joint:      Array,
+    self_pair_i:          Array,
+    self_pair_j:          Array,
     target_poses_batch:   jaxlie.SE3,
     rng_key:              Array,
     previous_cfgs:        Float[Array, "n_problems n_act"],
@@ -995,6 +1031,11 @@ def _ls_ik_solve_cuda_batch_jit(
         world_capsules = world_capsules,
         world_boxes = world_boxes,
         world_halfspaces = world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower          = lower,
         upper          = upper,
         fixed_mask     = fixed_joint_mask_int,
@@ -1150,8 +1191,15 @@ def ls_ik_solve_cuda_batch(
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
+    _sc_b = self_collision_table_arrays(robot, collision_checker)
+
     winners = _ls_ik_solve_cuda_batch_jit(
         robot=robot,
+        self_sph_local=_sc_b[0],
+        self_link_start=_sc_b[1],
+        self_link_joint=_sc_b[2],
+        self_pair_i=_sc_b[3],
+        self_pair_j=_sc_b[4],
         target_poses_batch=target_poses,
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,

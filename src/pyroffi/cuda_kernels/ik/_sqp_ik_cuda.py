@@ -74,6 +74,28 @@ def _robot_buffers(
     )
 
 
+
+def _self_collision_buffers(sph_local, link_start, link_joint, pair_i, pair_j):
+    """Cast the self-collision tables, substituting empties when absent.
+
+    An empty pair array leaves ``n_self_pairs == 0``, which the kernel treats as
+    "self-collision disabled" -- so omitting these is both the default and a
+    no-op for existing callers.
+
+    ``sph_local`` travels with the tables rather than reusing the solver's
+    ``robot_spheres_local``: ``link_start`` indexes THIS buffer, and
+    ``robot_spheres_local`` drops links with no parent joint, so its offsets do
+    not line up.
+    """
+    if any(x is None for x in (sph_local, link_start, link_joint, pair_i, pair_j)):
+        return (jnp.zeros((0, 4), jnp.float32),
+                jnp.zeros((1,), jnp.int32), jnp.zeros((1,), jnp.int32),
+                jnp.zeros((0,), jnp.int32), jnp.zeros((0,), jnp.int32))
+    return (jnp.asarray(sph_local, jnp.float32),
+            jnp.asarray(link_start, jnp.int32), jnp.asarray(link_joint, jnp.int32),
+            jnp.asarray(pair_i, jnp.int32), jnp.asarray(pair_j, jnp.int32))
+
+
 def sqp_ik_cuda(
     seeds:          Float[Array, "n_problems n_seeds n_act"],
     twists:         Float[Array, "n_joints 6"],
@@ -107,6 +129,16 @@ def sqp_ik_cuda(
     enable_collision: bool,
     collision_weight: float,
     collision_margin: float,
+    # Self-collision tables, appended last so they stay optional. Omitting them
+    # leaves n_self_pairs == 0, which the kernel reads as "disabled", so
+    # existing callers keep exactly their previous behaviour. They must be
+    # SRDF-filtered: without an SRDF the spherized model treats adjacent links
+    # as permanently overlapping and every configuration would be rejected.
+    self_sph_local=None,
+    self_link_start=None,
+    self_link_joint=None,
+    self_pair_i=None,
+    self_pair_j=None,
 ) -> tuple[Float[Array, "n_problems n_seeds n_act"], Float[Array, "n_problems n_seeds"]]:
     """Run multi-seed SQP-IK on the GPU with multi-EE and box-constrained QP.
 
@@ -156,11 +188,15 @@ def sqp_ik_cuda(
     rb    = _robot_buffers(twists, parent_tf, parent_idx, act_idx,
                            mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
-    cfgs, errs = jax.ffi.ffi_call(
+    cfgs, errs, feasible = jax.ffi.ffi_call(
         "sqp_ik_cuda",
         (
             jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
             jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.float32),
+            # 1 where the returned configuration satisfies the collision
+            # constraint. Always 1 when no constraint is active, so callers can
+            # read it unconditionally.
+            jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.int32),
         ),
     )(
         seeds,
@@ -174,6 +210,8 @@ def sqp_ik_cuda(
         world_capsules.astype(jnp.float32),
         world_boxes.astype(jnp.float32),
         world_halfspaces.astype(jnp.float32),
+        *_self_collision_buffers(self_sph_local, self_link_start,
+                                 self_link_joint, self_pair_i, self_pair_j),
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),
@@ -188,4 +226,4 @@ def sqp_ik_cuda(
         collision_weight = np.float32(collision_weight),
         collision_margin = np.float32(collision_margin),
     )
-    return cfgs, errs
+    return cfgs, errs, feasible

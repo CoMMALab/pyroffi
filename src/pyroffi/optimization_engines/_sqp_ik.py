@@ -44,6 +44,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
+from ._ik_primitives import self_collision_table_arrays
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _prepare_ls_collision_buffers
 
@@ -439,6 +440,15 @@ def _sqp_ik_solve_cuda_jit(
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
+    self_sph_local:       Array,
+    self_link_start:      Array,
+    self_link_joint:      Array,
+    self_pair_i:          Array,
+    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -477,7 +487,7 @@ def _sqp_ik_solve_cuda_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
 
     # ── CUDA SQP kernel (all EEs simultaneously) ──────────────────────────
-    cfgs, errors = sqp_ik_cuda(
+    cfgs, errors, feasible = sqp_ik_cuda(
         seeds          = seeds[None],           # (1, n_seeds, n_act)
         twists         = robot.joints.twists,
         parent_tf      = robot.joints.parent_transforms,
@@ -496,6 +506,11 @@ def _sqp_ik_solve_cuda_jit(
         world_capsules = world_capsules,
         world_boxes = world_boxes,
         world_halfspaces = world_halfspaces,
+        self_sph_local = self_sph_local,
+        self_link_start = self_link_start,
+        self_link_joint = self_link_joint,
+        self_pair_i = self_pair_i,
+        self_pair_j = self_pair_j,
         lower          = lower,
         upper          = upper,
         fixed_mask     = fixed_joint_mask_int,
@@ -510,8 +525,9 @@ def _sqp_ik_solve_cuda_jit(
         collision_weight = collision_weight,
         collision_margin = collision_margin,
     )
-    cfgs   = cfgs[0]    # (n_seeds, n_act)
-    errors = errors[0]  # (n_seeds,)
+    cfgs     = cfgs[0]      # (n_seeds, n_act)
+    errors   = errors[0]    # (n_seeds,)
+    feasible = feasible[0]  # (n_seeds,)
 
     if len(constraint_fns) > 0:
         def constraint_penalty(cfg):
@@ -531,10 +547,32 @@ def _sqp_ik_solve_cuda_jit(
             + continuity_weight * jnp.sum((cfgs - previous_cfg) ** 2, axis=-1)
         )
 
-    best_idx = jnp.argmin(final_errors)
+    best_idx = _feasible_first_argmin(final_errors, feasible)
     if len(constraint_fns) > 0:
         return cfgs[best_idx], constraint_errors[best_idx]
     return cfgs[best_idx], jnp.zeros(())
+
+
+
+def _feasible_first_argmin(errors, feasible, axis=-1):
+    """Argmin over `errors` in which every feasible seed beats every infeasible one.
+
+    This is the host half of the hard constraint. The kernel can return a
+    feasible configuration and still have it discarded here if selection goes on
+    pose error alone, so feasibility has to dominate on this side too.
+
+    Masks with ``inf`` rather than a large finite sentinel: a finite constant has
+    to be chosen larger than any legitimate error, which is a guess that silently
+    fails for a badly scaled problem, and it corrupts the metric a caller may be
+    thresholding on. If NO seed is feasible the fallback returns the lowest-error
+    seed -- best effort, with `feasible` reported as 0 so the caller can tell --
+    rather than an arbitrary pick from an all-inf array.
+    """
+    feasible = feasible.astype(bool)
+    masked = jnp.where(feasible, errors, jnp.inf)
+    return jnp.where(jnp.any(feasible, axis=axis),
+                     jnp.argmin(masked, axis=axis),
+                     jnp.argmin(errors, axis=axis))
 
 
 def sqp_ik_solve_cuda(
@@ -670,6 +708,11 @@ def sqp_ik_solve_cuda(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
     winner, winner_coll_cost = _sqp_ik_solve_cuda_jit(
         robot=robot,
@@ -694,6 +737,11 @@ def sqp_ik_solve_cuda(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         enable_collision=bool(collision_free and collision_enabled),
         collision_weight=collision_weight,
         collision_margin=collision_margin,
@@ -801,6 +849,8 @@ def _make_pmapped_batch(
         robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
         robot_spheres_local, robot_sphere_joint_idx,
         world_spheres, world_capsules, world_boxes, world_halfspaces,
+        self_sph_local, self_link_start, self_link_joint,
+        self_pair_i, self_pair_j,
         constraint_weights, constraint_args,
     ):
         return _sqp_ik_solve_cuda_batch_jit(
@@ -826,6 +876,11 @@ def _make_pmapped_batch(
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
             enable_collision=enable_collision,
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -840,7 +895,7 @@ def _make_pmapped_batch(
     # than part of the lru_cache compilation key, which must stay hashable).
     return jax.pmap(
         _body,
-        in_axes=(0, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None),
+        in_axes=(0, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
     )
 
 
@@ -924,6 +979,15 @@ def _sqp_ik_solve_cuda_batch_jit(
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
+    self_sph_local:       Array,
+    self_link_start:      Array,
+    self_link_joint:      Array,
+    self_pair_i:          Array,
+    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -961,7 +1025,7 @@ def _sqp_ik_solve_cuda_batch_jit(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, n_seeds, n_act)
 
-    cfgs, errors = sqp_ik_cuda(
+    cfgs, errors, feasible = sqp_ik_cuda(
         seeds          = seeds,
         twists         = robot.joints.twists,
         parent_tf      = robot.joints.parent_transforms,
@@ -980,6 +1044,11 @@ def _sqp_ik_solve_cuda_batch_jit(
         world_capsules = world_capsules,
         world_boxes = world_boxes,
         world_halfspaces = world_halfspaces,
+        self_sph_local = self_sph_local,
+        self_link_start = self_link_start,
+        self_link_joint = self_link_joint,
+        self_pair_i = self_pair_i,
+        self_pair_j = self_pair_j,
         lower          = lower,
         upper          = upper,
         fixed_mask     = fixed_joint_mask_int,
@@ -1015,7 +1084,7 @@ def _sqp_ik_solve_cuda_batch_jit(
             + continuity_weight * jnp.sum((cfgs - previous_cfgs[:, None, :]) ** 2, axis=-1)
         )
 
-    best_idxs = jnp.argmin(final_errors, axis=1)
+    best_idxs = _feasible_first_argmin(final_errors, feasible, axis=1)
     return cfgs[jnp.arange(n_problems), best_idxs]
 
 
@@ -1117,6 +1186,11 @@ def sqp_ik_solve_cuda_batch(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
     enable_collision = bool(collision_free and collision_enabled)
     n_problems = previous_cfgs.shape[0]
@@ -1137,6 +1211,10 @@ def sqp_ik_solve_cuda_batch(
             robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
             robot_spheres_local, robot_sphere_joint_idx,
             world_spheres, world_capsules, world_boxes, world_halfspaces,
+            self_sph_local, self_link_start, self_link_joint,
+            self_pair_i, self_pair_j,
+        self_sph_local, self_link_start, self_link_joint,
+        self_pair_i, self_pair_j,
             cuda_constraint_weights, tuple(cuda_constraint_args),
         )
     else:
@@ -1163,6 +1241,11 @@ def sqp_ik_solve_cuda_batch(
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
             enable_collision=enable_collision,
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -1326,6 +1409,11 @@ def sqp_ik_solve_cuda_sequential(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     enable_collision = bool(collision_free and collision_enabled)
 
     lower = robot.joints.lower_limits
@@ -1380,6 +1468,11 @@ def sqp_ik_solve_cuda_sequential(
                 world_capsules=world_capsules,
                 world_boxes=world_boxes,
                 world_halfspaces=world_halfspaces,
+                self_sph_local=self_sph_local,
+                self_link_start=self_link_start,
+                self_link_joint=self_link_joint,
+                self_pair_i=self_pair_i,
+                self_pair_j=self_pair_j,
                 enable_collision=enable_collision,
                 collision_weight=collision_weight,
                 collision_margin=collision_margin,

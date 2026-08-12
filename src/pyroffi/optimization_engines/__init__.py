@@ -1,3 +1,47 @@
+"""IK and trajectory optimisation engines.
+
+Collision guarantees differ by CUDA IK solver
+---------------------------------------------
+
+The four CUDA IK solvers do NOT offer the same collision guarantee, and picking
+one for speed can silently give up the constraint. Both self-collision and world
+obstacles behave as described below.
+
+===========  ==========================  ==================================
+solver       guarantee                   depends on ``collision_weight``?
+===========  ==========================  ==================================
+``sqp_ik``   hard constraint             no
+``ls_ik``    soft penalty, correct grad  yes
+``hjcd_ik``  soft penalty, merit only    yes, strongly
+``mppi_ik``  soft penalty, merit only    yes, strongly
+===========  ==========================  ==================================
+
+**sqp_ik** solves a genuinely constrained QP: linearised rows
+``grad(d)^T p >= margin - d`` enter the subproblem (ADMM, OSQP's indirect form),
+and acceptance is lexicographic on feasibility before pose error. It returns
+collision-free configurations even at a negligible ``collision_weight``.
+
+**ls_ik** has correct collision gradients -- the term reaches the normal
+equations, so the solver steps *away* from a collision rather than merely
+declining to step further in -- but Levenberg-Marquardt has no constraint
+mechanism. Feasibility is bought with weight. The shipped default (1e4) clears
+self-collision on the Panda; a much smaller weight will not.
+
+**hjcd_ik** and **mppi_ik** carry the penalty in the merit function only: it
+ranks candidates and rejects steps but never enters a step direction. They need
+the largest weights and offer the weakest guarantee. ``hjcd_ik`` does well in
+practice because its penalty ranks coarse-phase seeds, which is a strong filter
+across many seeds -- but that is selection, not constraint satisfaction.
+
+Self-collision activates automatically when ``collision_checker`` is a
+``RobotCollisionSpherized``, which MUST have been built with an SRDF; without
+one the model treats adjacent links as permanently overlapping and every
+configuration is rejected.
+
+See ``tests/test_collision_constraints.py``, whose low-``collision_weight`` case
+is what distinguishes the hard row of this table from the soft ones.
+"""
+
 from ._hjcd_ik import hjcd_solve as hjcd_solve
 from ._quik_ik import (
     QuIKSolver as QuIKSolver,
@@ -49,3 +93,8 @@ from ._ls_trajopt_optimization import LsTrajOptConfig as LsTrajOptConfig
 from ._ls_trajopt_optimization import ls_trajopt as ls_trajopt
 from ._lbfgs_trajopt_optimization import LbfgsTrajOptConfig as LbfgsTrajOptConfig
 from ._lbfgs_trajopt_optimization import lbfgs_trajopt as lbfgs_trajopt
+from ..kinematics._analytic_ik import (
+    analytic_ik_solve as analytic_ik_solve,
+    analytic_ik_solve_batched as analytic_ik_solve_batched,
+    build_geometry as build_analytic_ik_geometry,
+)

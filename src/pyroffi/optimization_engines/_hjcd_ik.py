@@ -42,6 +42,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
+from ._ik_primitives import self_collision_table_arrays
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _prepare_ls_collision_buffers
 
@@ -687,6 +688,15 @@ def _hjcd_solve_cuda_jit(
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
+    self_sph_local:       Array,
+    self_link_start:      Array,
+    self_link_joint:      Array,
+    self_pair_i:          Array,
+    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -742,6 +752,11 @@ def _hjcd_solve_cuda_jit(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
@@ -796,6 +811,11 @@ def _hjcd_solve_cuda_jit(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
@@ -1007,6 +1027,11 @@ def hjcd_solve_cuda(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
     winner = _hjcd_solve_cuda_jit(
         robot=robot,
@@ -1033,6 +1058,11 @@ def hjcd_solve_cuda(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         enable_collision=bool(collision_free and collision_enabled),
         collision_weight=collision_weight,
         collision_margin=collision_margin,
@@ -1114,6 +1144,15 @@ def _hjcd_solve_cuda_batch_jit(
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
+    self_sph_local:       Array,
+    self_link_start:      Array,
+    self_link_joint:      Array,
+    self_pair_i:          Array,
+    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -1173,6 +1212,11 @@ def _hjcd_solve_cuda_batch_jit(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
@@ -1223,6 +1267,11 @@ def _hjcd_solve_cuda_batch_jit(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_joint_mask_int,
@@ -1379,6 +1428,11 @@ def hjcd_solve_cuda_batch(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
     winners = _hjcd_solve_cuda_batch_jit(
         robot=robot,
@@ -1405,6 +1459,11 @@ def hjcd_solve_cuda_batch(
         world_capsules=world_capsules,
         world_boxes=world_boxes,
         world_halfspaces=world_halfspaces,
+        self_sph_local=self_sph_local,
+        self_link_start=self_link_start,
+        self_link_joint=self_link_joint,
+        self_pair_i=self_pair_i,
+        self_pair_j=self_pair_j,
         enable_collision=bool(collision_free and collision_enabled),
         collision_weight=collision_weight,
         collision_margin=collision_margin,

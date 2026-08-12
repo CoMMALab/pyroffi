@@ -222,6 +222,57 @@ __device__ __forceinline__ void pad_tail_identity(int rank, int size, int n_act,
  * @tparam N     Compile-time bucket dimension.
  * @return false if `A` was not positive-definite (b zeroed), true otherwise.
  */
+/**
+ * Cholesky FACTOR only, in place: `A` becomes its factor L.
+ *
+ * Split out from `tier_posv` so a factorisation can be reused across many
+ * right-hand sides. That is what makes an ADMM inner solve affordable: the
+ * OSQP-style iteration below re-solves the SAME matrix every sweep, and
+ * re-factoring per sweep would cost a Cholesky per ADMM step.
+ *
+ * GLASS itself is untouched -- these are compositions of surfaces it already
+ * exposes (`potrf`, `potrs`, `trsv`) at each scope.
+ *
+ * @return false if `A` was not positive-definite.
+ */
+template <Tier TIER, typename T, uint32_t N>
+__device__ __forceinline__ bool tier_potrf(T* __restrict__ A, int* s_fail)
+{
+    if constexpr (TIER == Tier::Thread) {
+        int fail = 0;
+        glass::thread::potrf<T, N, /*CHECK=*/true>(A, &fail);
+        return fail == 0;
+    } else if constexpr (TIER == Tier::Warp) {
+        const uint32_t lane = (threadIdx.x + threadIdx.y*blockDim.x) & 31u;
+        if (lane == 0) *s_fail = 0;
+        __syncwarp();
+        glass::warp::potrf<T, N, /*CHECK=*/true>(A, s_fail);
+        __syncwarp();
+        return *s_fail == 0;
+    } else {
+        glass::potrf<T, N, /*CHECK=*/true>(A, s_fail);
+        __syncthreads();
+        return *s_fail == 0;
+    }
+}
+
+/** Solve `A x = b` from the factor produced by `tier_potrf` (LAPACK potrs).
+ *  Does NOT modify the factor, so it may be called repeatedly. */
+template <Tier TIER, typename T, uint32_t N>
+__device__ __forceinline__ void tier_potrs(const T* __restrict__ L, T* __restrict__ b)
+{
+    if constexpr (TIER == Tier::Thread) {
+        glass::thread::potrs<T, N>(L, b);
+    } else if constexpr (TIER == Tier::Warp) {
+        glass::warp::trsv<T, N, glass::FillMode::Lower, glass::Diag::NonUnit, /*TRANSPOSE=*/false>(L, b);
+        glass::warp::trsv<T, N, glass::FillMode::Lower, glass::Diag::NonUnit, /*TRANSPOSE=*/true >(L, b);
+        __syncwarp();
+    } else {
+        glass::potrs<T, N>(L, b);
+        __syncthreads();
+    }
+}
+
 template <Tier TIER, typename T, uint32_t N>
 __device__ __forceinline__ bool tier_posv(T* __restrict__ A, T* __restrict__ b, int* s_fail)
 {

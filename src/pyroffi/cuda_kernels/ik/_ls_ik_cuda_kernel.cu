@@ -117,6 +117,11 @@ void ls_ik_lm_kernel(
     const float* __restrict__ world_capsules,   // (Mc, 7)
     const float* __restrict__ world_boxes,      // (Mb, 15)
     const float* __restrict__ world_halfspaces, // (Mh, 6)
+    const float* __restrict__ self_sph_local,   // (K, 4) link-local (x,y,z,r)
+    const int*   __restrict__ self_link_start,  // (N + 1) CSR sphere runs
+    const int*   __restrict__ self_link_joint,  // (N)     posing joint per link
+    const int*   __restrict__ self_pair_i,      // (Ps)    active link pairs
+    const int*   __restrict__ self_pair_j,      // (Ps)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -124,6 +129,7 @@ void ls_ik_lm_kernel(
     float*       __restrict__ out_err,
     int   n_problems, int n_seeds, int n_joints, int n_act, int n_ee, int max_iter,
     int   n_robot_spheres, int n_world_spheres, int n_world_capsules, int n_world_boxes, int n_world_halfspaces,
+    int   n_self_pairs,
     int   enable_collision,
     float pos_weight, float ori_weight, float lambda_init,
     float eps_pos, float eps_ori,
@@ -219,8 +225,20 @@ void ls_ik_lm_kernel(
     for (int ee = 0; ee < n_ee; ee++)
         for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
 
+    // Hoisted out of the merit lambda: the normal-equation assembly below needs
+    // it too, so that self-collision enters the *step direction* and not only
+    // the accept/reject test.
+    const bool want_self  = n_self_pairs > 0;
+    const bool want_world = enable_collision && n_robot_spheres > 0;
+
     auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
-        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+        // Self-collision is independent of world geometry: an arm folded into
+        // itself is invalid whether or not there are obstacles. Gating the
+        // whole penalty on `enable_collision` (which tracks *world* obstacles)
+        // skipped it entirely for obstacle-free problems -- the common case for
+        // plain reachability IK, and exactly where a folded solution is most
+        // likely to be returned unnoticed.
+        if (!want_world && !want_self) return 0.0f;
 
         fk_single(
             cfg_eval,
@@ -230,7 +248,10 @@ void ls_ik_lm_kernel(
             n_joints, n_act);
 
         float pen = 0.0f;
-        for (int i = 0; i < n_robot_spheres; i++) {
+        // `want_self` can be true with world collision off, so the world loop
+        // needs its own guard -- otherwise enabling self-collision would
+        // silently switch on world penalties the caller did not ask for.
+        for (int i = 0; want_world && i < n_robot_spheres; i++) {
             const int jidx = robot_sphere_joint_idx[i];
             if (jidx < 0 || jidx >= n_joints) continue;
 
@@ -280,6 +301,23 @@ void ls_ik_lm_kernel(
                     pen += diff * diff;
                 }
             }
+        }
+
+        // Self-collision. This solver checked the robot against the WORLD but
+        // never against itself, so a returned configuration could have the arm
+        // folded through its own links and still report collision-free. On the
+        // Panda, 6.5% of random in-limit configurations self-collide.
+        //
+        // Shares `self_collision_penalty` with the fused collision kernel so
+        // both evaluate identical geometry. n_self_pairs == 0 disables it, and
+        // that is the default -- existing callers are unaffected until they
+        // pass a pair table. That table must be SRDF-filtered: without an SRDF
+        // the spherized model treats adjacent links as permanently overlapping
+        // and every configuration would be rejected.
+        if (want_self) {
+            pen += self_collision_penalty(
+                T_eval, self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs, collision_margin);
         }
         return collision_weight * pen;
     };
@@ -362,6 +400,61 @@ void ls_ik_lm_kernel(
             for (int k = 0; k < 6 * n_ee; k++)
                 rb += (double)J[k*n_act+i] * (double)fw[k];
             rhs_s[i] = -rb;
+        }
+
+        // ── Self-collision Gauss-Newton contribution ────────────────────
+        // Treat each violated pair as an extra least-squares residual
+        //     c_p = sqrt(w) * (margin - d_p),   active only while d_p < margin
+        // whose Jacobian row is -sqrt(w) * dd_p/dq. Folding it in gives
+        //     A   += w * g g^T
+        //     rhs += w * (margin - d_p) * g
+        // which steers `delta` toward increasing clearance. Previously the
+        // penalty reached only the merit function, so the step direction was
+        // computed from the pose residual alone and the solver could not move
+        // away from a self-collision -- only refuse to move further in.
+        //
+        // The rows are never materialised into J: each pair is reduced straight
+        // into A/rhs as a rank-1 update, so register use is one g[MAX_ACT] and
+        // J keeps its pose-only size.
+        //
+        // Striding matches the assembly loops above, so at the warp/block tiers
+        // the lane that wrote an entry is the lane that updates it. Every lane
+        // holds an identical J and recomputes an identical g, exactly as the
+        // base assembly already assumes.
+        // Fold one violated constraint into the normal equations as a rank-1
+        // update. `g` is dd/dq for the constraint and `viol` its violation
+        // (margin - d) > 0.
+        auto gn_accumulate = [&](float* gg, float viol) {
+            // J was Jacobi-scaled in place above; scale g the same way so the
+            // collision rows live in the same column space as the pose rows.
+            for (int a = 0; a < n_act; a++) gg[a] /= col_scale[a];
+
+            const double w = (double)collision_weight;
+            for (int idx = rank; idx < n_act * n_act; idx += size) {
+                const int i = idx / n_act, j = idx % n_act;
+                A_s[i*(int)N + j] += w * (double)gg[i] * (double)gg[j];
+            }
+            for (int i = rank; i < n_act; i += size)
+                rhs_s[i] += w * (double)viol * (double)gg[i];
+        };
+
+        // Shared descriptions of the collision geometry; the sweep itself lives
+        // in _collision_cuda_helpers.cuh so LS and SQP cannot drift apart.
+        const RobotChainRefs chain_refs = {
+            s_twists, s_parent_idx, s_act_idx, s_mimic_mul, s_mimic_act_idx, n_joints };
+        const SelfCollisionRefs self_refs = {
+            self_sph_local, self_link_start, self_link_joint,
+            self_pair_i, self_pair_j, n_self_pairs };
+        const WorldCollisionRefs world_refs = {
+            robot_spheres_local, robot_sphere_joint_idx, n_robot_spheres,
+            world_spheres, n_world_spheres, world_capsules, n_world_capsules,
+            world_boxes, n_world_boxes, world_halfspaces, n_world_halfspaces };
+        {
+            float g[MAX_ACT];
+            collision_gauss_newton_terms(
+                T_world, chain_refs, self_refs, world_refs,
+                want_self, want_world, n_act, collision_margin, g,
+                [&](float* gg, float viol) { gn_accumulate(gg, viol); });
         }
         group_sync();
 
@@ -529,6 +622,11 @@ static ffi::Error LsIkCudaImpl(
     ffi::Buffer<ffi::DataType::F32> world_capsules,
     ffi::Buffer<ffi::DataType::F32> world_boxes,
     ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::F32> self_sph_local,
+    ffi::Buffer<ffi::DataType::S32> self_link_start,
+    ffi::Buffer<ffi::DataType::S32> self_link_joint,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -554,6 +652,7 @@ static ffi::Error LsIkCudaImpl(
     const int n_world_capsules = static_cast<int>(world_capsules.dimensions()[0]);
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
     // ── Tier x N dispatch ────────────────────────────────────────────────
     // N: the compile-time bucket holding n_act (identity-padded). 0 => n_act is
@@ -578,12 +677,15 @@ static ffi::Error LsIkCudaImpl(
         robot_spheres_local.typed_data(), robot_sphere_joint_idx.typed_data(), \
         world_spheres.typed_data(), world_capsules.typed_data(),               \
         world_boxes.typed_data(), world_halfspaces.typed_data(),               \
+        self_sph_local.typed_data(),                                           \
+        self_link_start.typed_data(), self_link_joint.typed_data(),            \
+        self_pair_i.typed_data(), self_pair_j.typed_data(),                    \
         lower.typed_data(), upper.typed_data(), fixed_mask.typed_data(),       \
         out->typed_data(), out_err->typed_data(),                              \
         n_problems, n_seeds, n_joints, n_act, n_ee,                            \
         static_cast<int>(max_iter),                                            \
         n_robot_spheres, n_world_spheres, n_world_capsules, n_world_boxes,     \
-        n_world_halfspaces, static_cast<int>(enable_collision),                \
+        n_world_halfspaces, n_self_pairs, static_cast<int>(enable_collision),  \
         pos_weight, ori_weight, lambda_init, eps_pos, eps_ori,                 \
         collision_weight, collision_margin
 
@@ -620,6 +722,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_capsules
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_boxes
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // self_sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_link_joint
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask

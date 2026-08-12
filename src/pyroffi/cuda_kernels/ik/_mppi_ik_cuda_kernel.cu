@@ -61,6 +61,11 @@ void mppi_ik_kernel(
     const float*    __restrict__ world_capsules,
     const float*    __restrict__ world_boxes,
     const float*    __restrict__ world_halfspaces,
+    const float*    __restrict__ self_sph_local,   // (K, 4) link-local (x,y,z,r)
+    const int*      __restrict__ self_link_start,  // (N + 1) CSR sphere runs
+    const int*      __restrict__ self_link_joint,  // (N)     posing joint per link
+    const int*      __restrict__ self_pair_i,      // (Ps)    active link pairs
+    const int*      __restrict__ self_pair_j,      // (Ps)
     const float*    __restrict__ lower,
     const float*    __restrict__ upper,
     const int*      __restrict__ fixed_mask,
@@ -69,7 +74,7 @@ void mppi_ik_kernel(
     float*          __restrict__ out_err,
     int   n_problems, int n_seeds, int n_joints, int n_act, int n_ee,
     int   n_robot_spheres, int n_world_spheres, int n_world_capsules,
-    int   n_world_boxes, int n_world_halfspaces,
+    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs,
     int   n_particles, int n_mppi_iters, int n_lbfgs_iters, int m_lbfgs,
     int   enable_collision,
     float collision_weight, float collision_margin,
@@ -161,7 +166,15 @@ void mppi_ik_kernel(
         for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
 
     auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
-        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+        // Self-collision is independent of world geometry: an arm folded into
+        // itself is invalid whether or not there are obstacles. Gating the whole
+        // penalty on `enable_collision` (which tracks *world* obstacles) skipped
+        // it entirely for obstacle-free problems -- the common case for plain
+        // reachability IK, and exactly where a folded solution is most likely to
+        // be returned unnoticed.
+        const bool want_world = enable_collision && n_robot_spheres > 0;
+        const bool want_self  = n_self_pairs > 0;
+        if (!want_world && !want_self) return 0.0f;
 
         fk_single(
             cfg_eval,
@@ -171,7 +184,10 @@ void mppi_ik_kernel(
             n_joints, n_act);
 
         float pen = 0.0f;
-        for (int i = 0; i < n_robot_spheres; i++) {
+        // `want_self` can be true with world collision off, so the world loop
+        // needs its own guard -- otherwise enabling self-collision would
+        // silently switch on world penalties the caller did not ask for.
+        for (int i = 0; want_world && i < n_robot_spheres; i++) {
             const int jidx = robot_sphere_joint_idx[i];
             if (jidx < 0 || jidx >= n_joints) continue;
 
@@ -221,6 +237,24 @@ void mppi_ik_kernel(
                     pen += diff * diff;
                 }
             }
+        }
+
+        // Self-collision. This solver checked the robot against the WORLD but
+        // never against itself, so a returned configuration could have the arm
+        // folded through its own links and still report collision-free. On the
+        // Panda, 6.5% of random in-limit configurations self-collide.
+        //
+        // Shares `self_collision_penalty` with the fused collision kernel so
+        // both evaluate identical geometry. `self_sph_local` travels with the
+        // tables because `link_start` indexes IT, not `robot_spheres_local`.
+        // n_self_pairs == 0 disables the whole thing, and that is the default --
+        // existing callers are unaffected until they pass a pair table, which
+        // must be SRDF-filtered (without an SRDF the spherized model treats
+        // adjacent links as permanently overlapping and rejects everything).
+        if (want_self) {
+            pen += self_collision_penalty(
+                T_eval, self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs, collision_margin);
         }
         return collision_weight * pen;
     };
@@ -325,7 +359,9 @@ void mppi_ik_kernel(
                 all_conv = false; break;
             }
         }
-        if (all_conv && enable_collision) {
+        // Also gate on self-collision: with world collision off but self-collision
+        // on, a folded-but-on-target config would otherwise be declared converged.
+        if (all_conv && (enable_collision || n_self_pairs > 0)) {
             all_conv = collision_penalty(best_cfg, T_world) <= 1e-12f;
         }
         if (all_conv) goto write_output;
@@ -511,6 +547,11 @@ static ffi::Error MppiIkCudaImpl(
     ffi::Buffer<ffi::DataType::F32> world_capsules,
     ffi::Buffer<ffi::DataType::F32> world_boxes,
     ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::F32> self_sph_local,
+    ffi::Buffer<ffi::DataType::S32> self_link_start,
+    ffi::Buffer<ffi::DataType::S32> self_link_joint,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -541,6 +582,7 @@ static ffi::Error MppiIkCudaImpl(
     const int n_world_capsules = static_cast<int>(world_capsules.dimensions()[0]);
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
     constexpr int THREADS_MAX = 16;
     const int threads  = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
@@ -565,6 +607,11 @@ static ffi::Error MppiIkCudaImpl(
         world_capsules.typed_data(),
         world_boxes.typed_data(),
         world_halfspaces.typed_data(),
+        self_sph_local.typed_data(),
+        self_link_start.typed_data(),
+        self_link_joint.typed_data(),
+        self_pair_i.typed_data(),
+        self_pair_j.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -573,7 +620,7 @@ static ffi::Error MppiIkCudaImpl(
         out_err->typed_data(),
         n_problems, n_seeds, n_joints, n_act, n_ee,
         n_robot_spheres, n_world_spheres, n_world_capsules,
-        n_world_boxes, n_world_halfspaces,
+        n_world_boxes, n_world_halfspaces, n_self_pairs,
         static_cast<int>(n_particles),
         static_cast<int>(n_mppi_iters),
         static_cast<int>(n_lbfgs_iters),
@@ -613,6 +660,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_capsules
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_boxes
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()   // self_sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_link_joint
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()   // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()   // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()   // fixed_mask

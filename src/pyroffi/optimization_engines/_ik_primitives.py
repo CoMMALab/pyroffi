@@ -114,3 +114,60 @@ def _adaptive_weights(f: Float[Array, "6"]) -> Float[Array, "6"]:
     ori_err = jnp.linalg.norm(f[3:]) + 1e-8
     ori_scale = jnp.clip(pos_err / ori_err, 0.05, 1.0)
     return jnp.concatenate([jnp.ones(3), jnp.full(3, ori_scale)])
+
+
+# ---------------------------------------------------------------------------
+# Self-collision tables for the CUDA IK kernels
+# ---------------------------------------------------------------------------
+
+# Empty tables: the kernels read n_self_pairs == 0 as "self-collision disabled",
+# so these are also the default for callers that pass no checker.
+_EMPTY_SELF_TABLES = (
+    jnp.zeros((0, 4), jnp.float32),   # sph_local
+    jnp.zeros((1,), jnp.int32),       # link_start
+    jnp.zeros((1,), jnp.int32),       # link_joint
+    jnp.zeros((0,), jnp.int32),       # pair_i
+    jnp.zeros((0,), jnp.int32),       # pair_j
+)
+
+
+def self_collision_table_arrays(robot, collision_checker):
+    """Self-collision buffers for the CUDA IK kernels, empties when unavailable.
+
+    TODO(task 6): activation is implicit in the checker's TYPE, so passing a
+    collision_checker changes IK behaviour for every existing caller with no
+    opt-in and no way to disable it short of dropping the checker. Add an
+    explicit parameter (defaulting to current behaviour) and surface the SRDF
+    requirement at the API level, not just in this docstring.
+
+    Deliberately *not* a new user-facing argument. A caller that already passes
+    ``collision_checker`` has expressed intent to avoid collisions, and a
+    spherized model carries its own SRDF-filtered active-pair table -- so the
+    self-collision check comes along automatically rather than needing to be
+    requested separately. Anything else (capsule models, custom checkers) gets
+    empties, which the kernels read as "disabled".
+
+    ``sph_local`` travels with the tables because ``link_start`` indexes THIS
+    buffer. It is not interchangeable with a solver's ``robot_spheres_local``,
+    which drops links with no parent joint and so has different offsets.
+
+    Note the SRDF requirement: a spherized model built WITHOUT one reports
+    adjacent links as permanently overlapping, and every configuration would be
+    rejected. That is a property of the model, not of this code path.
+    """
+    from ..collision._robot_collision import RobotCollisionSpherized
+    from ..cuda_kernels.collision._fused_self_collision_ffi import static_arrays
+
+    if robot is None or not isinstance(collision_checker, RobotCollisionSpherized):
+        return _EMPTY_SELF_TABLES
+
+    # Deliberately unguarded: a checker that IS spherized but whose tables fail
+    # to build is a bug, and swallowing it here yields a silent no-op that looks
+    # exactly like "self-collision had no effect".
+    sph_local, link_start, link_joint, pair_i, pair_j = static_arrays(
+        robot, collision_checker)
+    return (jnp.asarray(sph_local, jnp.float32),
+            jnp.asarray(link_start, jnp.int32),
+            jnp.asarray(link_joint, jnp.int32),
+            jnp.asarray(pair_i, jnp.int32),
+            jnp.asarray(pair_j, jnp.int32))

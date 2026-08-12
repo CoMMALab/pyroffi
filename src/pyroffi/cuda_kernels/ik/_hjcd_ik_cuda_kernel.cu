@@ -109,6 +109,11 @@ void hjcd_ik_coarse_kernel(
     const float* __restrict__ world_capsules,
     const float* __restrict__ world_boxes,
     const float* __restrict__ world_halfspaces,
+    const float* __restrict__ self_sph_local,   // (K, 4) link-local (x,y,z,r)
+    const int*   __restrict__ self_link_start,  // (N + 1) CSR sphere runs
+    const int*   __restrict__ self_link_joint,  // (N)     posing joint per link
+    const int*   __restrict__ self_pair_i,      // (Ps)    active link pairs
+    const int*   __restrict__ self_pair_j,      // (Ps)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -116,7 +121,7 @@ void hjcd_ik_coarse_kernel(
     float*       __restrict__ out_err,
     int n_problems, int n_seeds, int n_joints, int n_act, int n_ee,
     int n_robot_spheres, int n_world_spheres, int n_world_capsules,
-    int n_world_boxes, int n_world_halfspaces,
+    int n_world_boxes, int n_world_halfspaces, int n_self_pairs,
     int k_max, int enable_collision, float collision_weight, float collision_margin)
 {
     // ── Shared memory: robot parameters loaded once per block ───────────────
@@ -234,7 +239,12 @@ void hjcd_ik_coarse_kernel(
     float final_err = 0.0f;
     for (int k = 0; k < 6 * n_ee; k++) final_err += r[k] * r[k];
 
-    if (enable_collision && n_robot_spheres > 0) {
+    // Self-collision is independent of world geometry, so it must not sit behind
+    // `enable_collision` (which tracks *world* obstacles); an obstacle-free
+    // problem is exactly where a folded solution slips through unnoticed.
+    const bool want_world_coarse = enable_collision && n_robot_spheres > 0;
+    const bool want_self_coarse  = n_self_pairs > 0;
+    if (want_world_coarse || want_self_coarse) {
         fk_single(
             cfg,
             s_twists, s_parent_tf, s_parent_idx, s_act_idx,
@@ -243,7 +253,8 @@ void hjcd_ik_coarse_kernel(
             n_joints, n_act);
 
         float pen = 0.0f;
-        for (int i = 0; i < n_robot_spheres; i++) {
+        // Own guard: self-collision alone must not switch on world penalties.
+        for (int i = 0; want_world_coarse && i < n_robot_spheres; i++) {
             const int jidx = robot_sphere_joint_idx[i];
             if (jidx < 0 || jidx >= n_joints) continue;
 
@@ -293,6 +304,11 @@ void hjcd_ik_coarse_kernel(
                     pen += diff * diff;
                 }
             }
+        }
+        if (want_self_coarse) {
+            pen += self_collision_penalty(
+                T_world, self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs, collision_margin);
         }
         final_err += collision_weight * pen;
     }
@@ -358,6 +374,11 @@ void hjcd_ik_lm_kernel(
     const float* __restrict__ world_capsules,
     const float* __restrict__ world_boxes,
     const float* __restrict__ world_halfspaces,
+    const float* __restrict__ self_sph_local,   // (K, 4) link-local (x,y,z,r)
+    const int*   __restrict__ self_link_start,  // (N + 1) CSR sphere runs
+    const int*   __restrict__ self_link_joint,  // (N)     posing joint per link
+    const int*   __restrict__ self_pair_i,      // (Ps)    active link pairs
+    const int*   __restrict__ self_pair_j,      // (Ps)
     const float* __restrict__ lower,
     const float* __restrict__ upper,
     const int*   __restrict__ fixed_mask,
@@ -366,7 +387,7 @@ void hjcd_ik_lm_kernel(
     int*         __restrict__ stop_flag,
     int n_problems, int n_seeds, int n_joints, int n_act, int n_ee, int max_iter,
     int n_robot_spheres, int n_world_spheres, int n_world_capsules,
-    int n_world_boxes, int n_world_halfspaces,
+    int n_world_boxes, int n_world_halfspaces, int n_self_pairs,
     float lambda_init, float limit_prior_weight, float kick_scale,
     float eps_pos, float eps_ori, int stall_patience,
     int enable_collision, float collision_weight, float collision_margin)
@@ -455,7 +476,11 @@ void hjcd_ik_lm_kernel(
     for (int k = 0; k < 6 * n_ee; k++) best_err += r[k] * r[k];
 
     auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
-        if (!enable_collision || n_robot_spheres <= 0) return 0.0f;
+        // See the coarse kernel above: self-collision is not gated on
+        // `enable_collision`, which tracks world obstacles only.
+        const bool want_world = enable_collision && n_robot_spheres > 0;
+        const bool want_self  = n_self_pairs > 0;
+        if (!want_world && !want_self) return 0.0f;
 
         fk_single(
             cfg_eval,
@@ -465,7 +490,8 @@ void hjcd_ik_lm_kernel(
             n_joints, n_act);
 
         float pen = 0.0f;
-        for (int i = 0; i < n_robot_spheres; i++) {
+        // Own guard: self-collision alone must not switch on world penalties.
+        for (int i = 0; want_world && i < n_robot_spheres; i++) {
             const int jidx = robot_sphere_joint_idx[i];
             if (jidx < 0 || jidx >= n_joints) continue;
 
@@ -515,6 +541,24 @@ void hjcd_ik_lm_kernel(
                     pen += diff * diff;
                 }
             }
+        }
+
+        // Self-collision. This solver checked the robot against the WORLD but
+        // never against itself, so a returned configuration could have the arm
+        // folded through its own links and still report collision-free. On the
+        // Panda, 6.5% of random in-limit configurations self-collide.
+        //
+        // Shares `self_collision_penalty` with the fused collision kernel so
+        // both evaluate identical geometry. `self_sph_local` travels with the
+        // tables because `link_start` indexes IT, not `robot_spheres_local`.
+        // n_self_pairs == 0 disables the whole thing, and that is the default --
+        // existing callers are unaffected until they pass a pair table, which
+        // must be SRDF-filtered (without an SRDF the spherized model treats
+        // adjacent links as permanently overlapping and rejects everything).
+        if (want_self) {
+            pen += self_collision_penalty(
+                T_eval, self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs, collision_margin);
         }
         return collision_weight * pen;
     };
@@ -798,6 +842,11 @@ static ffi::Error HjcdIkCoarseCudaImpl(
     ffi::Buffer<ffi::DataType::F32> world_capsules,
     ffi::Buffer<ffi::DataType::F32> world_boxes,
     ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::F32> self_sph_local,
+    ffi::Buffer<ffi::DataType::S32> self_link_start,
+    ffi::Buffer<ffi::DataType::S32> self_link_joint,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -818,6 +867,7 @@ static ffi::Error HjcdIkCoarseCudaImpl(
     const int n_world_capsules = static_cast<int>(world_capsules.dimensions()[0]);
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
     constexpr int THREADS_MAX = 128;
     const int threads  = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
@@ -842,6 +892,11 @@ static ffi::Error HjcdIkCoarseCudaImpl(
         world_capsules.typed_data(),
         world_boxes.typed_data(),
         world_halfspaces.typed_data(),
+        self_sph_local.typed_data(),
+        self_link_start.typed_data(),
+        self_link_joint.typed_data(),
+        self_pair_i.typed_data(),
+        self_pair_j.typed_data(),
         lower.typed_data(),
         upper.typed_data(),
         fixed_mask.typed_data(),
@@ -849,7 +904,7 @@ static ffi::Error HjcdIkCoarseCudaImpl(
         out_err->typed_data(),
         n_problems, n_seeds, n_joints, n_act, n_ee,
         n_robot_spheres, n_world_spheres, n_world_capsules,
-        n_world_boxes, n_world_halfspaces,
+        n_world_boxes, n_world_halfspaces, n_self_pairs,
         static_cast<int>(k_max),
         static_cast<int>(enable_collision),
         collision_weight,
@@ -882,6 +937,11 @@ static ffi::Error HjcdIkLmCudaImpl(
     ffi::Buffer<ffi::DataType::F32> world_capsules,
     ffi::Buffer<ffi::DataType::F32> world_boxes,
     ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::F32> self_sph_local,
+    ffi::Buffer<ffi::DataType::S32> self_link_start,
+    ffi::Buffer<ffi::DataType::S32> self_link_joint,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     ffi::Buffer<ffi::DataType::F32> lower,
     ffi::Buffer<ffi::DataType::F32> upper,
     ffi::Buffer<ffi::DataType::S32> fixed_mask,
@@ -909,6 +969,7 @@ static ffi::Error HjcdIkLmCudaImpl(
     const int n_world_capsules = static_cast<int>(world_capsules.dimensions()[0]);
     const int n_world_boxes = static_cast<int>(world_boxes.dimensions()[0]);
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
+    const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
     // N: the compile-time bucket holding n_act (identity-padded). 0 => past MAX_ACT's
     // ceiling, which _build_params.py should already have refused.
@@ -930,13 +991,17 @@ static ffi::Error HjcdIkLmCudaImpl(
         target_Ts.typed_data(), robot_spheres_local.typed_data(),              \
         robot_sphere_joint_idx.typed_data(), world_spheres.typed_data(),       \
         world_capsules.typed_data(), world_boxes.typed_data(),                 \
-        world_halfspaces.typed_data(), lower.typed_data(), upper.typed_data(), \
+        world_halfspaces.typed_data(),                                         \
+        self_sph_local.typed_data(), self_link_start.typed_data(),             \
+        self_link_joint.typed_data(), self_pair_i.typed_data(),                \
+        self_pair_j.typed_data(),                                              \
+        lower.typed_data(), upper.typed_data(),                                \
         fixed_mask.typed_data(), out->typed_data(), out_err->typed_data(),     \
         stop_flag->typed_data(),                                               \
         n_problems, n_seeds, n_joints, n_act, n_ee,                            \
         static_cast<int>(max_iter),                                            \
         n_robot_spheres, n_world_spheres, n_world_capsules,                    \
-        n_world_boxes, n_world_halfspaces,                                     \
+        n_world_boxes, n_world_halfspaces, n_self_pairs,                       \
         lambda_init, limit_prior_weight, kick_scale,                           \
         eps_pos, eps_ori,                                                      \
         static_cast<int>(stall_patience),                                      \
@@ -980,6 +1045,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_capsules
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_boxes
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // self_sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_link_joint
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // fixed_mask
@@ -1013,6 +1083,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_capsules
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_boxes
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // self_sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_link_joint
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_j
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // lower
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // upper
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // fixed_mask
