@@ -244,7 +244,11 @@ void sqp_ik_kernel(
     const bool want_self  = n_self_pairs > 0;
     const bool want_world = enable_collision && n_robot_spheres > 0;
 
-    auto collision_raw = [&](const float* cfg_eval, float* T_eval) {
+    // Raw (unweighted) violation for a config whose FK is ALREADY in `T_eval`.
+    // Every caller has just computed it; recomputing inside cost one redundant
+    // full FK per evaluation, and the merit is evaluated ~6x per iteration
+    // (head + one per line-search alpha) against ONE gradient sweep.
+    auto collision_raw_at = [&](float* T_eval) {
         // Self-collision is independent of world geometry: an arm folded into
         // itself is invalid whether or not there are obstacles. Gating the whole
         // penalty on `enable_collision` (which tracks *world* obstacles) skipped
@@ -252,13 +256,6 @@ void sqp_ik_kernel(
         // reachability IK, and exactly where a folded solution is most likely to
         // be returned unnoticed.
         if (!want_world && !want_self) return 0.0f;
-
-        fk_single(
-            cfg_eval,
-            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-            T_eval,
-            n_joints, n_act);
 
         float pen = 0.0f;
         // `want_self` can be true with world collision off, so the world loop
@@ -337,18 +334,30 @@ void sqp_ik_kernel(
     };
 
     // Weighted merit term (unchanged behaviour for every existing call site).
-    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
-        return collision_weight * collision_raw(cfg_eval, T_eval);
+    auto collision_penalty_at = [&](float* T_eval) {
+        return collision_weight * collision_raw_at(T_eval);
     };
 
     // Constraint violation, independent of `collision_weight`. This is what makes
     // the constraint HARD: acceptance below is lexicographic on it, so no choice
     // of weight can trade a collision away against pose error.
-    auto constraint_violation = [&](const float* cfg_eval, float* T_eval) {
-        return collision_raw(cfg_eval, T_eval);
+    auto constraint_violation_at = [&](float* T_eval) {
+        return collision_raw_at(T_eval);
     };
 
-    best_err += collision_penalty(cfg, T_world);
+    // For a config whose FK is NOT current (the trial accepted by the line
+    // search is re-derived from cfg + alpha*delta, so T_world holds the LAST
+    // alpha tried, not necessarily the winner).
+    auto constraint_violation = [&](const float* cfg_eval, float* T_eval) {
+        if (!want_world && !want_self) return 0.0f;
+        fk_single(cfg_eval,
+                  s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+                  s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+                  T_eval, n_joints, n_act);
+        return collision_raw_at(T_eval);
+    };
+
+    best_err += collision_penalty_at(T_world);   // FK from the Jacobian eval
     float best_viol = constraint_violation(cfg, T_world);
 
     float lam = lambda_init;
@@ -385,7 +394,7 @@ void sqp_ik_kernel(
 
         float curr_err = 0.0f;
         for (int k = 0; k < 6 * n_ee; k++) curr_err += fw[k] * fw[k];
-        curr_err += collision_penalty(cfg, T_world);
+        curr_err += collision_penalty_at(T_world);   // FK from the Jacobian eval
 
         // ── Jacobi column scaling ───────────────────────────────────────
         float col_scale[MAX_ACT];
@@ -804,7 +813,7 @@ void sqp_ik_kernel(
                     float rw = r_trial[ee*6+k] * W[k];
                     err_trial += rw * rw;
                 }
-            err_trial += collision_penalty(cfg_trial, T_world);
+            err_trial += collision_penalty_at(T_world);  // FK from the residual eval
             if (err_trial < best_alpha_err) {
                 best_alpha_err = err_trial;
                 best_alpha_idx = ai;

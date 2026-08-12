@@ -231,7 +231,19 @@ void ls_ik_lm_kernel(
     const bool want_self  = n_self_pairs > 0;
     const bool want_world = enable_collision && n_robot_spheres > 0;
 
-    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
+    // Merit term for a config whose FK is ALREADY in `T_eval`.
+    //
+    // Every caller here has just computed that FK -- the line search via
+    // compute_multi_ee_residual_only, the iteration head via
+    // compute_multi_ee_residual_and_jacobian -- and the old shape of this
+    // lambda recomputed it internally. That is one redundant full FK per merit
+    // evaluation, and the merit is evaluated ~6x per LM iteration (once at the
+    // head plus once per line-search alpha) against ONE gradient sweep.
+    //
+    // Measured: ablating the line-search merit entirely cut self-collision cost
+    // 250 -> 135 ms, so these evaluations dominate. Reusing the FK takes the
+    // same work out without changing a single result.
+    auto collision_penalty_at = [&](float* T_eval) {
         // Self-collision is independent of world geometry: an arm folded into
         // itself is invalid whether or not there are obstacles. Gating the
         // whole penalty on `enable_collision` (which tracks *world* obstacles)
@@ -239,13 +251,6 @@ void ls_ik_lm_kernel(
         // plain reachability IK, and exactly where a folded solution is most
         // likely to be returned unnoticed.
         if (!want_world && !want_self) return 0.0f;
-
-        fk_single(
-            cfg_eval,
-            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-            T_eval,
-            n_joints, n_act);
 
         float pen = 0.0f;
         // `want_self` can be true with world collision off, so the world loop
@@ -322,7 +327,20 @@ void ls_ik_lm_kernel(
         return collision_weight * pen;
     };
 
-    best_err += collision_penalty(cfg, T_world);
+    // Kept for callers whose FK is not already current; none remain in this
+    // kernel, but the two forms must not silently diverge.
+    auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
+        if (!want_world && !want_self) return 0.0f;
+        fk_single(cfg_eval,
+                  s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+                  s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+                  T_eval, n_joints, n_act);
+        return collision_penalty_at(T_eval);
+    };
+    (void)collision_penalty;
+
+    // T_world holds cfg's FK from the residual/Jacobian evaluation above.
+    best_err += collision_penalty_at(T_world);
 
     float lam = lambda_init;
 
@@ -358,7 +376,7 @@ void ls_ik_lm_kernel(
 
         float curr_err = 0.0f;
         for (int k = 0; k < 6 * n_ee; k++) curr_err += fw[k] * fw[k];
-        curr_err += collision_penalty(cfg, T_world);
+        curr_err += collision_penalty_at(T_world);   // FK from the Jacobian eval
 
         // ── Jacobi column scaling ───────────────────────────────────────
         float col_scale[MAX_ACT];
@@ -538,7 +556,7 @@ void ls_ik_lm_kernel(
                     float rw = r_trial[ee*6+k] * W[k];
                     err_trial += rw * rw;
                 }
-            err_trial += collision_penalty(cfg_trial, T_world);
+            err_trial += collision_penalty_at(T_world);  // FK from the residual eval
 
             if constexpr (TIER == pyroffi::Tier::Thread) {
                 // Sole owner of every trial — reduce in registers, as before.
