@@ -37,22 +37,18 @@ from pyroffi.collision import RobotCollisionSpherized, Sphere
 def _float32_regime():
     """Pin ``jax_enable_x64`` off for this module.
 
-    The CUDA IK kernels are float32/int32 at their FFI boundary and reject
-    64-bit operands outright (``expected S32 but got S64``). x64 is process-wide
-    global state that other test modules turn on -- ``test_subproblems`` at
-    module scope, ``pyroffi.toolbox`` sessions during a test -- so whether these
-    tests see 32- or 64-bit inputs depends on collection order, not on anything
-    they do. Declaring the regime is therefore part of the fixture, not a
-    workaround.
+    NOT a workaround for a broken path: the CUDA kernels accept both regimes
+    since the FFI dtype casts were centralised in ``cuda_kernels/_ffi_dtypes``.
+    This pins the regime because the ASSERTIONS are dtype-sensitive -- they count
+    how many of 32 solutions self-collide, and float32 vs float64 moves
+    borderline configurations across the threshold. x64 is process-wide global
+    state that other modules toggle (``test_subproblems`` at module scope,
+    ``pyroffi.toolbox`` during a test), so without this the counts would depend
+    on collection order.
 
-    That the kernels break under x64 at all is a real limitation and is tracked
-    separately; pinning here keeps THIS module testing collision constraints
-    rather than re-discovering the dtype issue.
-
-    Module-scoped and an explicit dependency of `panda`: the robot and its
-    buffers are built once per module, and if that happens while x64 is on they
-    are int64/float64 for good -- flipping the flag afterwards does not re-cast
-    arrays that already exist.
+    Module-scoped and an explicit dependency of ``panda``: the robot and its
+    buffers are built once per module, and flipping the flag afterwards does not
+    re-cast arrays that already exist.
     """
     import jax
 

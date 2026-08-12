@@ -26,6 +26,8 @@ from .._build_params import check_capacity
 from pathlib import Path
 
 import numpy as np
+
+from .._ffi_dtypes import robot_buffers
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -59,27 +61,6 @@ def _load_and_register() -> None:
         jax.ffi.register_ffi_target(name, capsule, platform="CUDA")
 
 
-def _robot_buffers(
-    twists:        Float[Array, "n_joints 6"],
-    parent_tf:     Float[Array, "n_joints 7"],
-    parent_idx:    Int[Array,   " n_joints"],
-    act_idx:       Int[Array,   " n_joints"],
-    mimic_mul:     Float[Array, " n_joints"],
-    mimic_off:     Float[Array, " n_joints"],
-    mimic_act_idx: Int[Array,   " n_joints"],
-    topo_inv:      Int[Array,   " n_joints"],
-) -> tuple:
-    """Cast robot-model arrays to the dtypes expected by the C++ kernel."""
-    return (
-        twists.astype(jnp.float32),
-        parent_tf.astype(jnp.float32),
-        parent_idx.astype(jnp.int32),
-        act_idx.astype(jnp.int32),
-        mimic_mul.astype(jnp.float32),
-        mimic_off.astype(jnp.float32),
-        mimic_act_idx.astype(jnp.int32),
-        topo_inv.astype(jnp.int32),
-    )
 
 
 
@@ -179,7 +160,7 @@ def hjcd_ik_coarse_cuda(
 
     n_problems, n_seeds, n_act = seeds.shape
     seeds = seeds.astype(jnp.float32)
-    rb = _robot_buffers(twists, parent_tf, parent_idx, act_idx,
+    rb = robot_buffers(twists, parent_tf, parent_idx, act_idx,
                         mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
     return jax.ffi.ffi_call(
@@ -295,7 +276,7 @@ def hjcd_ik_lm_cuda(
     n_problems, n_seeds, n_act = seeds.shape
     seeds = seeds.astype(jnp.float32)
     noise = noise.astype(jnp.float32)
-    rb = _robot_buffers(twists, parent_tf, parent_idx, act_idx,
+    rb = robot_buffers(twists, parent_tf, parent_idx, act_idx,
                         mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
     cfgs, errs, _stop = jax.ffi.ffi_call(

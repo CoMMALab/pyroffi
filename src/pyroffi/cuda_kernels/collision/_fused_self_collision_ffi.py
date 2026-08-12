@@ -24,6 +24,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .._ffi_dtypes import as_robot_buffers
+
 _LIB_NAME = "_fused_self_collision_lib.so"
 
 
@@ -111,7 +113,7 @@ def fused_self_collision(cfg, robot_buffers, static):
     )
     return call(
         cfg,
-        *[jnp.asarray(x) for x in robot_buffers],
+        *as_robot_buffers(robot_buffers),
         jnp.asarray(sph_local, jnp.float32),
         jnp.asarray(link_start, jnp.int32),
         jnp.asarray(link_joint, jnp.int32),
@@ -164,7 +166,7 @@ def fused_world_collision(cfg, robot_buffers, static, world):
     )
     return call(
         cfg,
-        *[jnp.asarray(x) for x in robot_buffers],
+        *as_robot_buffers(robot_buffers),
         jnp.asarray(sph_local, jnp.float32),
         jnp.asarray(link_start, jnp.int32),
         jnp.asarray(link_joint, jnp.int32),
