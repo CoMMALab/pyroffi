@@ -87,18 +87,26 @@ namespace ffi = xla::ffi;
 // OSQP-style ADMM inner QP solve (osqp.org/docs/solver). Indirect form, so the
 // system stays SPD and GLASS's Cholesky is used unmodified. Defaults follow
 // OSQP's: sigma 1e-6, rho 1, over-relaxation 1.6.
-// Fixed sweep count, MEASURED not assumed. Adding OSQP's primal/dual residual
-// termination made this ~8% SLOWER at both 1e-5/1e-4 and 1e-3/1e-2 tolerances
-// (sqp self-only 381 -> 412-419 ms, across four runs): the criteria never fire
-// inside 25 sweeps, so the check is pure overhead. That is itself the finding --
-// the QP is NOT solved to convergence here, and the POCS polish below is
-// load-bearing rather than cosmetic.
+// OPEN LOOP: run until the residuals say the QP is solved, not for a fixed
+// count. A CUDA kernel is free to branch and needs no predictable trip count --
+// that constraint belongs to the JAX/XLA side, where the loop must be traceable
+// and the closed-loop form stays.
 //
-// TODO(task 8): if the subproblem needs to be solved properly, the lever is rho
-// (rho <- rho*sqrt(r_prim/r_dual)), which requires re-forming AND re-factoring M
-// since rho sits inside it. Raising PYROFFI_ADMM_ITERS alone would only pay if
-// convergence is close, and the residuals say it is not.
-#define PYROFFI_ADMM_ITERS  25
+// This supersedes an earlier fixed-25 version. Adding OSQP's residual test to
+// THAT was measured ~8% slower and never fired, which was not evidence the test
+// is worthless -- it was evidence 25 sweeps does not converge. Capping there and
+// polishing afterwards left the hard-constraint guarantee resting on the POCS
+// polish rather than on a solved subproblem. Letting it run puts the guarantee
+// back on the QP, where a research claim can stand on it.
+//
+// The cap is a safety bound for a genuinely infeasible or ill-conditioned
+// subproblem, not a budget: well-conditioned problems exit far earlier. The
+// check is amortised over CHECK_EVERY sweeps because the dual residual costs an
+// O(n_act^2) H*x.
+#define PYROFFI_ADMM_MAX_ITERS   25
+#define PYROFFI_ADMM_CHECK_EVERY 5
+#define PYROFFI_ADMM_EPS_ABS 1.0e-4f
+#define PYROFFI_ADMM_EPS_REL 1.0e-3f
 #define PYROFFI_ADMM_SIGMA  1.0e-6f
 #define PYROFFI_ADMM_RHO    1.0f
 #define PYROFFI_ADMM_ALPHA  1.6f
@@ -707,7 +715,7 @@ void sqp_ik_kernel(
                     yc[c] = 0.0f;
                 }
 
-                for (int it = 0; it < PYROFFI_ADMM_ITERS; it++) {
+                for (int it = 0; it < PYROFFI_ADMM_MAX_ITERS; it++) {
                     for (int a = rank; a < n_act; a += size) {
                         double v = (double)sigma * (double)x[a] - g_s[a]
                                  + ((double)rho * (double)zb[a] - (double)yb[a]);
@@ -744,6 +752,39 @@ void sqp_ik_kernel(
                         zc[c]  = zn;
                     }
 
+                    // ── Convergence (OSQP's criteria) ───────────────────
+                    // r_prim = ||Ax - z||_inf, r_dual = ||Px + q + A'y||_inf,
+                    // each against eps_abs + eps_rel * (its own scale).
+                    if ((it + 1) % PYROFFI_ADMM_CHECK_EVERY == 0) {
+                        float r_prim = 0.0f, s_prim = 0.0f;
+                        for (int a = 0; a < n_act; a++) {
+                            r_prim = fmaxf(r_prim, fabsf(x[a] - zb[a]));
+                            s_prim = fmaxf(s_prim, fmaxf(fabsf(x[a]), fabsf(zb[a])));
+                        }
+                        for (int c = 0; c < n_coll; c++) {
+                            float ax = 0.0f;
+                            for (int a = 0; a < n_act; a++) ax += coll_A[c][a] * x[a];
+                            r_prim = fmaxf(r_prim, fabsf(ax - zc[c]));
+                            s_prim = fmaxf(s_prim, fmaxf(fabsf(ax), fabsf(zc[c])));
+                        }
+
+                        float r_dual = 0.0f, s_dual = 0.0f;
+                        for (int a = 0; a < n_act; a++) {
+                            double hx = 0.0;
+                            for (int b = 0; b < n_act; b++)
+                                hx += H_s[a*n_act + b] * (double)x[b];
+                            double aty = (double)yb[a];
+                            for (int c = 0; c < n_coll; c++)
+                                aty += (double)coll_A[c][a] * (double)yc[c];
+                            r_dual = fmaxf(r_dual, (float)fabs(hx + g_s[a] + aty));
+                            s_dual = fmaxf(s_dual, (float)fmax(fabs(hx),
+                                           fmax(fabs(g_s[a]), fabs(aty))));
+                        }
+
+                        if (r_prim <= PYROFFI_ADMM_EPS_ABS + PYROFFI_ADMM_EPS_REL * s_prim &&
+                            r_dual <= PYROFFI_ADMM_EPS_ABS + PYROFFI_ADMM_EPS_REL * s_dual)
+                            break;
+                    }
                 }
                 for (int a = 0; a < n_act; a++) p_s[a] = x[a];
             }
