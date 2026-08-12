@@ -442,6 +442,36 @@ void self_collision_sphere_kernel(
     float*       __restrict__ out_dist,
     int B, int S, int N, int P)
 {
+    // Compact the valid sphere slots per link ONCE per block, in shared memory.
+    //
+    // Padding slots (radius < 0) are a static property of the model -- a link
+    // with 4 spheres in an S=18 layout carries 14 dead slots at every
+    // configuration. The naive form iterates all S*S combinations per link pair
+    // and `continue`s on padding, which for the Panda is 18*18 = 324 iterations
+    // to evaluate ~20 real sphere pairs: roughly 16x wasted work, plus the
+    // branch divergence of skipping most of it.
+    //
+    // Compacting costs one cooperative pass over N*S radii and turns the inner
+    // loops into dense iteration over real spheres only. It is done from the
+    // b = blockIdx-derived batch element, but any batch element gives the same
+    // answer since the padding pattern is configuration-independent.
+    extern __shared__ int smem[];
+    int* s_count = smem;              // [N]
+    int* s_slot  = smem + N;          // [N * S]
+
+    for (int t = threadIdx.x; t < N; t += blockDim.x) s_count[t] = 0;
+    __syncthreads();
+
+    for (int t = threadIdx.x; t < N * S; t += blockDim.x) {
+        int link = t / S;
+        int slot = t % S;
+        if (sphere_radii[slot * N + link] >= 0.0f) {
+            int k = atomicAdd(&s_count[link], 1);
+            s_slot[link * S + k] = slot;
+        }
+    }
+    __syncthreads();
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= B * P) return;
 
@@ -450,20 +480,24 @@ void self_collision_sphere_kernel(
     int li = pair_i[p];
     int lj = pair_j[p];
 
+    const int ni = s_count[li];
+    const int nj = s_count[lj];
+
     float min_d = 1e9f;
-    for (int si = 0; si < S; si++) {
-        float ri = sphere_radii[(b*S + si)*N + li];
-        if (ri < 0.0f) continue;
-        float aix = sphere_centers[((b*S + si)*N + li)*3 + 0];
-        float aiy = sphere_centers[((b*S + si)*N + li)*3 + 1];
-        float aiz = sphere_centers[((b*S + si)*N + li)*3 + 2];
-        for (int sj = 0; sj < S; sj++) {
-            float rj = sphere_radii[(b*S + sj)*N + lj];
-            if (rj < 0.0f) continue;
-            float ajx = sphere_centers[((b*S + sj)*N + lj)*3 + 0];
-            float ajy = sphere_centers[((b*S + sj)*N + lj)*3 + 1];
-            float ajz = sphere_centers[((b*S + sj)*N + lj)*3 + 2];
-            min_d = fminf(min_d, sphere_sphere_dist(aix, aiy, aiz, ri, ajx, ajy, ajz, rj));
+    for (int a = 0; a < ni; a++) {
+        const int si = s_slot[li * S + a];
+        const float ri  = sphere_radii[(b*S + si)*N + li];
+        const float aix = sphere_centers[((b*S + si)*N + li)*3 + 0];
+        const float aiy = sphere_centers[((b*S + si)*N + li)*3 + 1];
+        const float aiz = sphere_centers[((b*S + si)*N + li)*3 + 2];
+        for (int c = 0; c < nj; c++) {
+            const int sj = s_slot[lj * S + c];
+            const float rj  = sphere_radii[(b*S + sj)*N + lj];
+            const float ajx = sphere_centers[((b*S + sj)*N + lj)*3 + 0];
+            const float ajy = sphere_centers[((b*S + sj)*N + lj)*3 + 1];
+            const float ajz = sphere_centers[((b*S + sj)*N + lj)*3 + 2];
+            min_d = fminf(min_d, sphere_sphere_dist(aix, aiy, aiz, ri,
+                                                    ajx, ajy, ajz, rj));
         }
     }
     out_dist[b*P + p] = min_d;
@@ -1083,7 +1117,7 @@ static ffi::Error CollisionSelfSphereImpl(
             if (e != cudaSuccess)
                 return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
 
-            self_collision_sphere_kernel<<<blocks, 256, 0, stream>>>(
+            self_collision_sphere_kernel<<<blocks, 256, (N + N*S)*sizeof(int), stream>>>(
                 centers, radii, pi, pj, od, B, S, N, P);
 
             e = cudaGetLastError();
@@ -1120,7 +1154,10 @@ static ffi::Error CollisionSelfSphereImpl(
             kp.func = reinterpret_cast<void*>(self_collision_sphere_kernel);
             kp.gridDim = dim3(static_cast<unsigned>(blocks), 1u, 1u);
             kp.blockDim = dim3(256u, 1u, 1u);
-            kp.sharedMemBytes = 0;
+            // MUST match the capture-time launch. The kernel compacts valid
+            // sphere slots into dynamic shared memory; replaying the graph with
+            // 0 bytes here would read out of bounds rather than fail loudly.
+            kp.sharedMemBytes = static_cast<unsigned>((N + N*S) * sizeof(int));
             kp.kernelParams = args;
             cudaError_t e = cudaGraphExecKernelNodeSetParams(cache.exec, cache.node, &kp);
             if (e != cudaSuccess)

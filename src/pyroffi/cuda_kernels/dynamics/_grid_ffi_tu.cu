@@ -122,16 +122,27 @@ ffi::Error CheckDims(int64_t batch, int64_t n, int64_t elems) {
   return ffi::Error::Success();
 }
 
+// Call-scoped device scratch, sourced from XLA's own allocator.
+//
+// These used to live on private `cudaMallocAsync`/`cudaFreeAsync` calls on
+// the XLA stream. That put them in a separate memory pool from JAX/XLA, so
+// with XLA preallocating the device up front the FFI mallocs competed for
+// the sliver XLA left behind and eventually OOM'd -- the same failure mode
+// already found and fixed for the collision kernels (see the comment above
+// `scratch_alloc_void` in _robogpu_collision_host.cu). Instead we draw them
+// from `ffi::ScratchAllocator`, which allocates stream-ordered from XLA's
+// device allocator and reclaims everything when the handler returns.
 struct ScratchBuffer {
   T* ptr = nullptr;
-  cudaStream_t stream = nullptr;
-  ~ScratchBuffer() {
-    if (ptr != nullptr) cudaFreeAsync(ptr, stream);
-  }
-  cudaError_t Alloc(size_t count, cudaStream_t s) {
-    stream = s;
-    return cudaMallocAsync(reinterpret_cast<void**>(&ptr), count * sizeof(T),
-                           s);
+  ffi::Error err = ffi::Error::Success();
+  ScratchBuffer(ffi::ScratchAllocator& scratch, size_t count) {
+    auto p = scratch.Allocate(count * sizeof(T), alignof(T));
+    if (!p.has_value()) {
+      err = ffi::Error(ffi::ErrorCode::kResourceExhausted,
+                       "scratch.Allocate(q_qd) failed");
+      return;
+    }
+    ptr = reinterpret_cast<T*>(*p);
   }
 };
 
@@ -142,16 +153,18 @@ struct ScratchBuffer {
 // several kernels never touch it at all).
 struct WorkspaceBuffer {
   unsigned char* ptr = nullptr;
-  cudaStream_t stream = nullptr;
-  ~WorkspaceBuffer() {
-    if (ptr != nullptr) cudaFreeAsync(ptr, stream);
-  }
-  cudaError_t Alloc(int64_t batch, cudaStream_t s) {
-    stream = s;
+  ffi::Error err = ffi::Error::Success();
+  WorkspaceBuffer(ffi::ScratchAllocator& scratch, int64_t batch) {
     const size_t bytes = grid::GRID_WORKSPACE_BYTES_PER_TIMESTEP<T>() *
                          GRID_WORKSPACE_SLOTS * static_cast<size_t>(batch);
-    if (bytes == 0) return cudaSuccess;
-    return cudaMallocAsync(reinterpret_cast<void**>(&ptr), bytes, s);
+    if (bytes == 0) return;
+    auto p = scratch.Allocate(bytes, alignof(std::max_align_t));
+    if (!p.has_value()) {
+      err = ffi::Error(ffi::ErrorCode::kResourceExhausted,
+                       "scratch.Allocate(workspace) failed");
+      return;
+    }
+    ptr = reinterpret_cast<unsigned char*>(*p);
   }
 };
 
@@ -253,7 +266,8 @@ __global__ void CrbaKernel(T* d_M, const T* d_q,
 // ---------------------------------------------------------------------------
 
 // Inverse dynamics: (q, qd, qdd) -> joint torques c.  All (B, n).
-ffi::Error GridIdImpl(cudaStream_t stream, float gravity,
+ffi::Error GridIdImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
+                      float gravity,
                       ffi::Buffer<ffi::DataType::F32> q,
                       ffi::Buffer<ffi::DataType::F32> qd,
                       ffi::Buffer<ffi::DataType::F32> qdd,
@@ -264,9 +278,8 @@ ffi::Error GridIdImpl(cudaStream_t stream, float gravity,
     return err;
   grid::robotModel<T>* model = GetRobotModel();
 
-  ScratchBuffer q_qd;
-  if (auto st = q_qd.Alloc(2 * kNq * batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(q_qd)");
+  ScratchBuffer q_qd(scratch, 2 * kNq * batch);
+  if (q_qd.err.failure()) return q_qd.err;
   Pack2Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd.ptr, q.typed_data(), qd.typed_data(), kNq, batch);
   grid::inverse_dynamics_kernel<T>
@@ -278,7 +291,8 @@ ffi::Error GridIdImpl(cudaStream_t stream, float gravity,
 }
 
 // Forward dynamics: (q, qd, u) -> joint accelerations qdd.  All (B, n).
-ffi::Error GridFdImpl(cudaStream_t stream, float gravity,
+ffi::Error GridFdImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
+                      float gravity,
                       ffi::Buffer<ffi::DataType::F32> q,
                       ffi::Buffer<ffi::DataType::F32> qd,
                       ffi::Buffer<ffi::DataType::F32> u,
@@ -289,14 +303,12 @@ ffi::Error GridFdImpl(cudaStream_t stream, float gravity,
     return err;
   grid::robotModel<T>* model = GetRobotModel();
 
-  ScratchBuffer q_qd_u;
-  if (auto st = q_qd_u.Alloc(3 * kNq * batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(q_qd_u)");
+  ScratchBuffer q_qd_u(scratch, 3 * kNq * batch);
+  if (q_qd_u.err.failure()) return q_qd_u.err;
   Pack3Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd_u.ptr, q.typed_data(), qd.typed_data(), u.typed_data(), kNq, batch);
-  WorkspaceBuffer ws;
-  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(workspace)");
+  WorkspaceBuffer ws(scratch, batch);
+  if (ws.err.failure()) return ws.err;
   grid::forward_dynamics_kernel<T>
       <<<GridDims(batch), ThreadDims(),
          grid::FORWARD_DYNAMICS_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
@@ -306,7 +318,7 @@ ffi::Error GridFdImpl(cudaStream_t stream, float gravity,
 }
 
 // Direct Minv: q -> inverse mass matrix, (B, n, n), SYMMETRIC_UPPER filled.
-ffi::Error GridMinvImpl(cudaStream_t stream,
+ffi::Error GridMinvImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
                         ffi::Buffer<ffi::DataType::F32> q,
                         ffi::Result<ffi::Buffer<ffi::DataType::F32>> minv) {
   const int64_t batch = q.dimensions()[0];
@@ -315,9 +327,8 @@ ffi::Error GridMinvImpl(cudaStream_t stream,
     return err;
   grid::robotModel<T>* model = GetRobotModel();
 
-  WorkspaceBuffer ws;
-  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(workspace)");
+  WorkspaceBuffer ws(scratch, batch);
+  if (ws.err.failure()) return ws.err;
   grid::minv_kernel<T>
       <<<GridDims(batch), ThreadDims(),
          grid::MINV_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
@@ -343,7 +354,8 @@ ffi::Error GridCrbaImpl(cudaStream_t stream,
 
 // Analytic inverse dynamics gradient: (q, qd, qdd) -> dc/d[q,qd],
 // (B, 2n, n) with column-major n x 2n per timestep ([dq block | dqd block]).
-ffi::Error GridIdGradImpl(cudaStream_t stream, float gravity,
+ffi::Error GridIdGradImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
+                          float gravity,
                           ffi::Buffer<ffi::DataType::F32> q,
                           ffi::Buffer<ffi::DataType::F32> qd,
                           ffi::Buffer<ffi::DataType::F32> qdd,
@@ -354,14 +366,12 @@ ffi::Error GridIdGradImpl(cudaStream_t stream, float gravity,
     return err;
   grid::robotModel<T>* model = GetRobotModel();
 
-  ScratchBuffer q_qd;
-  if (auto st = q_qd.Alloc(2 * kNq * batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(q_qd)");
+  ScratchBuffer q_qd(scratch, 2 * kNq * batch);
+  if (q_qd.err.failure()) return q_qd.err;
   Pack2Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd.ptr, q.typed_data(), qd.typed_data(), kNq, batch);
-  WorkspaceBuffer ws;
-  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(workspace)");
+  WorkspaceBuffer ws(scratch, batch);
+  if (ws.err.failure()) return ws.err;
   grid::inverse_dynamics_gradient_kernel<T>
       <<<GridDims(batch), ThreadDims(),
          grid::INVERSE_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>(),
@@ -373,7 +383,8 @@ ffi::Error GridIdGradImpl(cudaStream_t stream, float gravity,
 
 // Analytic forward dynamics gradient: (q, qd, u) -> dqdd/d[q,qd],
 // (B, 2n, n) with column-major n x 2n per timestep.
-ffi::Error GridFdGradImpl(cudaStream_t stream, float gravity,
+ffi::Error GridFdGradImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
+                          float gravity,
                           ffi::Buffer<ffi::DataType::F32> q,
                           ffi::Buffer<ffi::DataType::F32> qd,
                           ffi::Buffer<ffi::DataType::F32> u,
@@ -384,14 +395,12 @@ ffi::Error GridFdGradImpl(cudaStream_t stream, float gravity,
     return err;
   grid::robotModel<T>* model = GetRobotModel();
 
-  ScratchBuffer q_qd_u;
-  if (auto st = q_qd_u.Alloc(3 * kNq * batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(q_qd_u)");
+  ScratchBuffer q_qd_u(scratch, 3 * kNq * batch);
+  if (q_qd_u.err.failure()) return q_qd_u.err;
   Pack3Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
       q_qd_u.ptr, q.typed_data(), qd.typed_data(), u.typed_data(), kNq, batch);
-  WorkspaceBuffer ws;
-  if (auto st = ws.Alloc(batch, stream); st != cudaSuccess)
-    return CudaCheck(st, "cudaMallocAsync(workspace)");
+  WorkspaceBuffer ws(scratch, batch);
+  if (ws.err.failure()) return ws.err;
   grid::forward_dynamics_gradient_kernel<T>
       <<<GridDims(batch), ThreadDims(),
          grid::FORWARD_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>(),
@@ -422,6 +431,7 @@ extern "C" void GridSetInertiaParams(const float* h_params) {
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridIdFfi, GridIdImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Ctx<ffi::ScratchAllocator>()
                                   .Attr<float>("gravity")
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qd
@@ -431,6 +441,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GridIdFfi, GridIdImpl,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridFdFfi, GridFdImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Ctx<ffi::ScratchAllocator>()
                                   .Attr<float>("gravity")
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qd
@@ -440,6 +451,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GridFdFfi, GridFdImpl,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridMinvFfi, GridMinvImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Ctx<ffi::ScratchAllocator>()
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
                                   .Ret<ffi::Buffer<ffi::DataType::F32>>());
 
@@ -452,6 +464,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GridCrbaFfi, GridCrbaImpl,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridIdGradFfi, GridIdGradImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Ctx<ffi::ScratchAllocator>()
                                   .Attr<float>("gravity")
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qd
@@ -461,6 +474,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GridIdGradFfi, GridIdGradImpl,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GridFdGradFfi, GridFdGradImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Ctx<ffi::ScratchAllocator>()
                                   .Attr<float>("gravity")
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qd

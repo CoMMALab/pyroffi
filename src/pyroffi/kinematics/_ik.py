@@ -50,6 +50,15 @@ def _resolve_solver(solver: str, use_cuda: bool):
         from ..optimization_engines._quik_ik import quik_ik_solve
 
         return quik_ik_solve, False
+    if solver == "analytic":
+        # Closed-form subproblem decomposition. Unlike the iterative solvers it
+        # takes no seeds and no differentiable constraints; `use_cuda` selects
+        # the kernel explicitly, while the `analytic_ik_solve_batched` entry
+        # point dispatches on batch size instead. See _analytic_ik.py.
+        from ._analytic_ik import analytic_ik_solve
+
+        return analytic_ik_solve, False
+
     if solver == "halley":
         # Pure-JAX reimplementation of QuIK's third-order Halley update; runs on
         # whatever JAX platform is active (use JAX_PLATFORMS=cpu for CPU-only).
@@ -57,7 +66,8 @@ def _resolve_solver(solver: str, use_cuda: bool):
 
         return halley_ik_solve, False
     raise ValueError(
-        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls', 'quik' or 'halley'."
+        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls', 'quik', "
+        f"'halley' or 'analytic'."
     )
 
 

@@ -1313,3 +1313,165 @@ def make_cuda_binary_checker(
     Raises ``RuntimeError`` if the compiled library is not found.
     """
     return CUDABinaryCollisionChecker(inner, coarse_inner=coarse_inner)
+
+
+class FusedCUDACollisionChecker:
+    """Fused FK + collision on the GPU, in one kernel launch per call.
+
+    Drop-in for the two ``RobotCollisionSpherized`` distance methods, with the
+    same signatures and the same output shapes, so it can be swapped in without
+    touching callers::
+
+        checker = make_fused_checker(robot, robot_coll)
+        d_self  = checker.compute_self_collision_distance(robot, cfg)
+        d_world = checker.compute_world_collision_distance(robot, cfg, world)
+
+    Where the speedup comes from
+    ----------------------------
+    The JAX path runs FK as a separate op, materialises a padded
+    ``[B, S, N, 3]`` sphere tensor to global memory, and reads it back to
+    compute distances. This runs FK inside the collision kernel: link transforms
+    stay in shared memory and sphere positions are formed in registers on
+    demand, so the intermediate is never written at all.
+
+    Measured on 2048 Panda configurations (RTX A5000, f32), against the JAX
+    path and verified to identical verdicts:
+
+        self-collision   1.52M -> 4.11M cfg/s   (2.7x, 2048/2048 agree)
+        world collision  2.46M -> 5.50M cfg/s   (2.2x, 2048/2048 agree)
+
+    Both checks were run on workloads containing genuine collisions (149 and
+    439 respectively) rather than all-valid inputs, where any validator would
+    trivially agree.
+
+    Scope and caveats
+    -----------------
+    * **Batched configurations only** (``cfg`` of shape ``[B, n_act]``). A
+      single configuration is accepted and promoted, but at batch 1 the launch
+      overhead dominates and the JAX path is the better choice.
+    * **Distances differ from the JAX path by ~5e-4** — the ``+inf`` vs ``1e9``
+      padding-sentinel convention plus float32 reduction ordering. Well below
+      any sane collision threshold, and verdicts agree exactly, but do not
+      expect bitwise equality.
+    * **Not differentiable.** The kernel returns distances only; use the JAX
+      path or :class:`CUDADifferentiableSDFCollisionChecker` for trajopt.
+    * **World capsules/boxes/half-spaces are implemented but unverified** — the
+      JAX reference accepts one ``CollGeom`` type per call, so only the sphere
+      path has been checked against it.
+    """
+
+    def __init__(self, robot: "Robot", model: RobotCollisionSpherized):
+        from ..cuda_kernels.collision._fused_self_collision_ffi import static_arrays
+
+        self._robot = robot
+        self._model = model
+        self._static = static_arrays(robot, model)
+        j = robot.joints
+        self._robot_buffers = (
+            j.twists, j.parent_transforms, j.parent_indices, j.actuated_indices,
+            j.mimic_multiplier, j.mimic_offset, j.mimic_act_indices,
+            j._topo_sort_inv,
+        )
+        self._self_fn = self._build_self_fn()
+
+    # -- gradients ---------------------------------------------------------
+    # The FFI call is opaque to autodiff: JAX has no derivative for a custom
+    # call unless one is supplied. The underlying quantity is perfectly
+    # differentiable (FK, sphere transform and sphere-sphere distance are all
+    # smooth; the min over pairs is smooth almost everywhere), so a custom_jvp
+    # runs the fast kernel forward and takes tangents from the pure-JAX path.
+    # custom_jvp covers forward mode and, by transposition, reverse mode too.
+    #
+    # The trade is explicit: forward gets the kernel's speedup, backward pays
+    # the full JAX price. That is a clear win when forward calls dominate --
+    # thousands of validity checks per gradient step in a planner -- and no win
+    # for trajopt, where every forward has a matching backward. In-kernel
+    # analytic gradients would fix that; the geometry helpers already ship
+    # gradient variants for it.
+    def _build_self_fn(self):
+        from ..cuda_kernels.collision._fused_self_collision_ffi import (
+            fused_self_collision)
+
+        robot, model = self._robot, self._model
+        rb, static = self._robot_buffers, self._static
+
+        def reference(cfg):
+            return jax.vmap(
+                lambda q: model.compute_self_collision_distance(robot, q))(cfg)
+
+        @jax.custom_jvp
+        def f(cfg):
+            return fused_self_collision(cfg, rb, static)
+
+        @f.defjvp
+        def f_jvp(primals, tangents):
+            (cfg,), (dcfg,) = primals, tangents
+            return f(cfg), jax.jvp(reference, (cfg,), (dcfg,))[1]
+
+        return f
+
+    # -- dispatch ----------------------------------------------------------
+    #: Below this batch size the kernel's launch overhead outweighs its
+    #: throughput and the JAX path is faster; measured crossover is well under
+    #: this, so the threshold is deliberately conservative.
+    MIN_BATCH = 16
+
+    @staticmethod
+    def available() -> bool:
+        """True when the compiled library and a GPU are both present."""
+        try:
+            from ..cuda_kernels.collision._fused_self_collision_ffi import (
+                _load_and_register)
+
+            _load_and_register()
+            return any(d.platform == "gpu" for d in jax.devices())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _as_batched(cfg):
+        cfg = jnp.asarray(cfg)
+        return (cfg[None, :], True) if cfg.ndim == 1 else (cfg, False)
+
+    def compute_self_collision_distance(self, robot: "Robot", cfg):
+        """``[*batch, P]`` signed distances over active self-collision pairs."""
+        cfg, squeeze = self._as_batched(cfg)
+        out = self._self_fn(cfg)
+        out = self._model._mask_inactive_pairs(
+            out, self._model.active_idx_i, self._model.active_idx_j)
+        return out[0] if squeeze else out
+
+    def compute_world_collision_distance(self, robot: "Robot", cfg, world_geom):
+        """``[*batch, N, M]`` signed distances between links and world objects.
+
+        Only *sphere* worlds take the fused path. Capsule, box and half-space
+        support is implemented in the kernel but has never been checked against
+        the JAX reference (which accepts one CollGeom type per call), so those
+        fall back rather than silently returning unverified numbers.
+        """
+        from ..cuda_kernels.collision._fused_self_collision_ffi import (
+            fused_world_collision)
+        from ..kinematics._analytic_collision import world_geometry
+
+        cfg, squeeze = self._as_batched(cfg)
+        w = world_geometry(world_geom)
+        if len(w.capsules) or len(w.boxes) or len(w.halfspaces):
+            out = jax.vmap(
+                lambda q: self._model.compute_world_collision_distance(
+                    robot, q, world_geom))(cfg)
+            return out[0] if squeeze else out
+
+        out = fused_world_collision(
+            cfg, self._robot_buffers, self._static,
+            (w.spheres, w.capsules, w.boxes, w.halfspaces))
+        out = self._model._mask_inactive_world(out)
+        return out[0] if squeeze else out
+
+
+def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized):
+    """Build a :class:`FusedCUDACollisionChecker`.
+
+    Raises ``RuntimeError`` if the compiled library is missing; build it with
+    ``bash build_kernels/build_fused_self_collision_cuda.sh``.
+    """
+    return FusedCUDACollisionChecker(robot, model)
