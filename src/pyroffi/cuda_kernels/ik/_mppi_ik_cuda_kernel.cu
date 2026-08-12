@@ -165,6 +165,10 @@ void mppi_ik_kernel(
     for (int ee = 0; ee < n_ee; ee++)
         for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
 
+    // Hoisted out of the merit lambda: the L-BFGS gradient below needs them too.
+    const bool want_self  = n_self_pairs > 0;
+    const bool want_world = enable_collision && n_robot_spheres > 0;
+
     auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
         // Self-collision is independent of world geometry: an arm folded into
         // itself is invalid whether or not there are obstacles. Gating the whole
@@ -172,8 +176,6 @@ void mppi_ik_kernel(
         // it entirely for obstacle-free problems -- the common case for plain
         // reachability IK, and exactly where a folded solution is most likely to
         // be returned unnoticed.
-        const bool want_world = enable_collision && n_robot_spheres > 0;
-        const bool want_self  = n_self_pairs > 0;
         if (!want_world && !want_self) return 0.0f;
 
         fk_single(
@@ -397,6 +399,11 @@ void mppi_ik_kernel(
                         all_conv = false; break;
                     }
                 }
+                // Pose convergence alone is not convergence when a collision
+                // constraint is active: the arm can be exactly on target and
+                // folded through itself.
+                if (all_conv && (want_self || want_world))
+                    all_conv = collision_penalty(cfg, T_world) <= 1e-12f;
                 if (all_conv) break;
             }
 
@@ -413,6 +420,44 @@ void mppi_ik_kernel(
                 for (int k = 0; k < 6 * n_ee; k++)
                     acc += J[k * n_act + a] * W[k % 6] * fw[k];
                 g[a] = s_fixed_mask[a] ? 0.0f : acc;
+            }
+
+            // ── Collision term in the L-BFGS gradient ───────────────────
+            // Without this the two-loop recursion builds a direction from the
+            // pose residual alone: the penalty reaches the line-search merit at
+            // :408 but never the gradient, so L-BFGS cannot descend it. That
+            // matters beyond correctness -- MPPI + L-BFGS is the cuRobo analogue
+            // used for parity evaluation, and cuRobo DOES differentiate its
+            // collision cost, so leaving it out compares an undifferentiated
+            // penalty against a differentiated one.
+            //
+            // For P = w * sum(c^2) with c = margin - d, dP/dq = -2w*c*(dd/dq).
+            // `g` here is J^T fw, i.e. half the gradient of ||fw||^2, so the
+            // matching half-scaled term is -w * viol * dd/dq.
+            //
+            // The MPPI particle stage needs no equivalent: it is derivative-free
+            // and already scores collision through the particle cost at :304.
+            if (want_self || want_world) {
+                const RobotChainRefs chain_refs = {
+                    s_twists, s_parent_idx, s_act_idx, s_mimic_mul,
+                    s_mimic_act_idx, n_joints };
+                const SelfCollisionRefs self_refs = {
+                    self_sph_local, self_link_start, self_link_joint,
+                    self_pair_i, self_pair_j, n_self_pairs };
+                const WorldCollisionRefs world_refs = {
+                    robot_spheres_local, robot_sphere_joint_idx, n_robot_spheres,
+                    world_spheres, n_world_spheres, world_capsules, n_world_capsules,
+                    world_boxes, n_world_boxes, world_halfspaces, n_world_halfspaces };
+
+                float gc[MAX_ACT];
+                collision_gauss_newton_terms(
+                    T_world, chain_refs, self_refs, world_refs,
+                    want_self, want_world, n_act, collision_margin, gc,
+                    [&](float* gg, float viol) {
+                        for (int a = 0; a < n_act; a++)
+                            if (!s_fixed_mask[a])
+                                g[a] -= collision_weight * viol * gg[a];
+                    });
             }
 
             // ── Update L-BFGS history ───────────────────────────────────
