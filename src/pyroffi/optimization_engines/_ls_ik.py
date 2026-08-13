@@ -41,6 +41,7 @@ from ._ik_primitives import (
     self_collision_table_arrays,
     split_cuda_and_post_constraints,
 )
+from ._batching import dispatch_vmap_to_batched
 from ._implicit_diff import differentiable_ik_solution
 from ..collision._cuda_collision import _extract_world_arrays
 
@@ -862,16 +863,20 @@ def ls_ik_solve_cuda(
 
     _sc = self_collision_table_arrays(robot, collision_checker)
 
-    winner, winner_coll_cost = _ls_ik_solve_cuda_jit(
-        robot=robot,
-        self_sph_local=_sc[0],
-        self_link_start=_sc[1],
-        self_link_joint=_sc[2],
-        self_pair_i=_sc[3],
-        self_pair_j=_sc[4],
-        target_poses=target_poses_t,
-        rng_key=rng_key,
-        previous_cfg=previous_cfg,
+    # vmap over this solver folds the mapped axis into the kernel's PROBLEM axis
+    # and makes one launch, instead of serialising a kernel that already batches.
+    # See _batching.dispatch_vmap_to_batched.
+    def _single(target_wxyz_xyz, prev_cfg):
+        return _ls_ik_solve_cuda_jit(
+            robot=robot,
+            self_sph_local=_sc[0],
+            self_link_start=_sc[1],
+            self_link_joint=_sc[2],
+            self_pair_i=_sc[3],
+            self_pair_j=_sc[4],
+            target_poses=tuple(jaxlie.SE3(w) for w in target_wxyz_xyz),
+            rng_key=rng_key,
+            previous_cfg=prev_cfg,
         num_seeds=num_seeds,
         max_iter=max_iter,
         pos_weight=pos_weight,
@@ -897,6 +902,57 @@ def ls_ik_solve_cuda(
         constraint_args=cuda_constraint_args,
         constraint_weights=cuda_constraint_weights,
     )
+
+    def _batched(target_wxyz_xyz, prev_cfgs):
+        # The batched kernel handles ONE end-effector, so the multi-EE form of
+        # this solver cannot be folded into it. Falling back to a mapped single
+        # solve here would silently reintroduce the serialisation this exists to
+        # avoid, so it is refused loudly instead.
+        if len(target_link_indices) != 1:
+            raise NotImplementedError(
+                "vmap over ls_ik_solve_cuda is only supported for a single "
+                f"end-effector; got {len(target_link_indices)}. Call "
+                "ls_ik_solve_cuda_batch directly with a batched target instead.")
+        winners = _ls_ik_solve_cuda_batch_jit(
+            robot=robot,
+            self_sph_local=_sc[0],
+            self_link_start=_sc[1],
+            self_link_joint=_sc[2],
+            self_pair_i=_sc[3],
+            self_pair_j=_sc[4],
+            target_poses_batch=jaxlie.SE3(target_wxyz_xyz[:, 0]),
+            rng_key=rng_key,
+            previous_cfgs=prev_cfgs,
+        num_seeds=num_seeds,
+        max_iter=max_iter,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        continuity_weight=continuity_weight,
+        fixed_joint_mask_int=fixed_joint_mask_int,
+        ancestor_masks=ancestor_masks,
+        target_jnts=target_jnts,
+        robot_spheres_local=robot_spheres_local,
+        robot_sphere_joint_idx=robot_sphere_joint_idx,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        enable_collision=kernel_collision_enabled,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        target_link_indices=target_link_indices,
+        constraint_fns=cuda_constraint_fns,
+        constraint_args=cuda_constraint_args,
+        constraint_weights=cuda_constraint_weights,
+    )
+        return winners, jnp.zeros((winners.shape[0],))
+
+    _stacked_targets = jnp.stack([t.wxyz_xyz for t in target_poses_t])
+    winner, winner_coll_cost = dispatch_vmap_to_batched(_single, _batched)(
+        _stacked_targets, previous_cfg)
 
     # ── Post-CUDA JAX refinement with constraints only ────────────────────
     # Multi-EE is now handled in CUDA; only constraints require JAX refinement.
