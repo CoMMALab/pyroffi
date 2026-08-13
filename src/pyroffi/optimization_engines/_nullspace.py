@@ -22,21 +22,31 @@ difference between a projector that works and one that quietly lies:
 **The null space is usually tiny.** Its dimension is ``n_act - rank(J)``: for a
 7-DOF arm on a full 6-DOF pose task, exactly ONE. A single scalar constraint can
 generally be satisfied; two generally cannot, at any step size or iteration
-count. That is geometry, not a tuning failure, and `NullspaceResult.success`
-reports it rather than returning a configuration that silently satisfies neither.
+count. That is geometry, not a tuning failure, and `NullspaceResult` reports it.
 
 **The projector is only first-order.** ``P`` is exact for infinitesimal motion;
-a finite step drifts the pose. Each iteration therefore follows its null-space
-step with a task-space correction that pulls the residual back, and the loop
-verifies the pose is still within tolerance before accepting. Without that the
-"without losing the pose" guarantee decays silently over iterations.
+a finite step drifts the pose. Each null-space step is followed by an iterated
+task-space correction, and the pose is re-verified before the step is accepted.
+Without that the "without losing the pose" guarantee decays over iterations.
 
-**Projection can walk into an obstacle.** A configuration that arrived here
-collision-free (paths 1 and 2 guarantee that) can be projected straight into
-one, because the null-space direction knows only about the constraint. When a
-collision checker is supplied, a step that breaks collision-freedom is rejected
-and the step size backtracks -- so path 3 preserves what paths 1 and 2 bought
-rather than undoing it.
+**Projection can walk into an obstacle.** The null-space direction knows only
+about the constraint, so a collision-free start can be projected straight into
+contact. With a checker supplied, such a step is rejected.
+
+Batching
+--------
+This is BATCH-NATIVE: it operates on ``(B, n_act)`` throughout, and a single
+configuration is just ``B == 1``. It is deliberately not a ``vmap`` of a scalar
+implementation, because the collision checker it calls every iteration reaches
+an FFI declared ``vmap_method="sequential"`` -- vmapping around it would
+serialise B kernel launches per iteration, which is exactly the pathology the
+CUDA IK solvers were just fixed for. Operating on the batch directly means one
+collision call per iteration regardless of B.
+
+Control flow is closed-loop -- fixed trip count, masked updates, a parallel step
+ladder instead of a ``break`` -- because unlike the CUDA kernels this has to stay
+traceable for ``jit``. Converged elements are masked out rather than exited, so a
+batch costs the worst element's iteration count, not the sum.
 """
 
 from __future__ import annotations
@@ -53,32 +63,38 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._ik_primitives import _ik_residual
 
+#: Trial step scales evaluated in PARALLEL each iteration. Sequential
+#: backtracking needs data-dependent control flow; evaluating the whole ladder
+#: and selecting the best admissible rung is equivalent and traceable. Same
+#: idiom as the LM line search in the CUDA kernels.
+_STEP_LADDER = jnp.array([1.0, 0.5, 0.25, 0.1, 0.025, 0.005])
+
 
 class NullspaceResult(NamedTuple):
-    """Outcome of a projection.
+    """Outcome of a projection. Every field carries a leading batch axis.
 
     Attributes:
-        cfg: the projected configuration. On failure this is the best iterate
-            found, NOT a partially-applied step -- it is always pose-valid and,
-            when a checker was supplied, collision-free.
-        success: constraints satisfied to ``constraint_tol`` with the pose still
-            within ``pose_tol``.
-        constraint_violation: final ``max |c_i(q)|``.
-        pose_error: final ``max`` per-EE residual norm.
-        nullspace_dim: ``n_act - rank(J)`` at the returned configuration. Zero
-            means there was no freedom to move in and no constraint could have
-            been enforced whatever the settings.
-        start_collision_free: whether the INPUT configuration already satisfied
-            the collision check. False means nothing could be accepted no matter
-            the constraint, because every candidate is compared against a start
-            that was already in collision -- the failure is upstream, in the
-            solve that produced ``cfg``, not here. Reported separately because
-            it is otherwise indistinguishable from an over-constrained problem,
-            and the two have completely different fixes. ``True`` when no
-            checker was supplied.
+        cfg: ``(B, n_act)`` projected configurations. On failure this is the
+            best iterate found, NOT a partially-applied step -- always
+            pose-valid and, when a checker was supplied, collision-free.
+        success: constraints within ``constraint_tol``, pose within
+            ``pose_tol``, and the start was collision-free.
+        constraint_violation: final ``max_i |c_i(q)|`` per element.
+        pose_error: final ``max`` task residual per element. Compare it against
+            the input's -- the projector holds the pose it was GIVEN rather than
+            improving on it.
+        nullspace_dim: ``n_act - rank(J)`` per element. Zero means there was no
+            freedom to move in, so no constraint could have been enforced.
+        start_collision_free: whether the INPUT already passed the collision
+            check. False means nothing could be accepted whatever the
+            constraint, because every candidate is judged against a start
+            already in collision -- the failure is upstream, in the solve that
+            produced ``cfg``. Reported separately because it is otherwise
+            indistinguishable from an over-constrained problem and the two have
+            completely different fixes. ``True`` when no checker was supplied.
     """
 
-    cfg: Float[Array, "n_act"]
+    cfg: Float[Array, "b n_act"]
     success: Array
     constraint_violation: Array
     pose_error: Array
@@ -86,188 +102,196 @@ class NullspaceResult(NamedTuple):
     start_collision_free: Array
 
 
-def _task_residual_and_jacobian(cfg, robot, target_link_indices, target_poses):
-    """Stacked per-EE SE(3) residual and its Jacobian w.r.t. the configuration."""
-
-    def residual(q):
-        return jnp.concatenate([
-            _ik_residual(q, robot, int(li), tp)
-            for li, tp in zip(target_link_indices, target_poses)
-        ])
-
-    return residual(cfg), jax.jacobian(residual)(cfg)
+def _task_residual(cfg, robot, target_link_indices, target_poses, b):
+    """Stacked per-EE SE(3) residual for element ``b`` of the batch."""
+    return jnp.concatenate([
+        _ik_residual(cfg, robot, int(li), jax.tree.map(lambda x: x[b], tp))
+        for li, tp in zip(target_link_indices, target_poses)
+    ])
 
 
-def _constraint_residual_and_jacobian(cfg, robot, constraint_fns, constraint_args):
-    """Stacked constraint values and their Jacobian.
+def _constraint_residual(cfg, constraint_args, robot, constraint_fns):
+    """Stacked constraint values for ONE configuration.
 
-    Constraints are treated as equalities driven to zero. An inequality is
-    expressed the usual way, as a hinge that is already zero when satisfied, so
-    a feasible constraint contributes no gradient and does not fight the others.
+    Constraints are equalities driven to zero. An inequality is written as a
+    hinge that is already zero when satisfied, so a feasible constraint
+    contributes no gradient and does not fight the others.
     """
-
-    def residual(q):
-        return jnp.stack([
-            jnp.asarray(fn(q, robot, args)).reshape(())
-            for fn, args in zip(constraint_fns, constraint_args)
-        ])
-
-    return residual(cfg), jax.jacobian(residual)(cfg)
+    return jnp.stack([
+        jnp.asarray(fn(cfg, robot, args)).reshape(())
+        for fn, args in zip(constraint_fns, constraint_args)
+    ])
 
 
 def project_onto_constraints(
-    cfg: Float[Array, "n_act"],
+    cfg: Float[Array, "b n_act"],
     robot: Robot,
     target_link_indices: Sequence[int],
     target_poses: Sequence[jaxlie.SE3],
     constraint_fns: Sequence[Callable],
     constraint_args: Sequence = (),
     *,
-    max_iter: int = 25,
-    step_size: float = 1.0,
+    max_iter: int = 40,
     max_step_norm: float = 0.2,
     constraint_tol: float = 1e-4,
     pose_tol: float = 1e-4,
     damping: float = 1e-3,
     pose_restore_iters: int = 3,
+    batched_constraint_args: bool = False,
     collision_checker: Any | None = None,
     collision_world: Any | None = None,
     collision_margin: float = 0.0,
     lower: Float[Array, "n_act"] | None = None,
     upper: Float[Array, "n_act"] | None = None,
 ) -> NullspaceResult:
-    """Move ``cfg`` to satisfy ``constraint_fns`` while holding the pose.
+    """Move configurations to satisfy ``constraint_fns`` while holding their poses.
 
     Args:
-        cfg: starting configuration, normally the output of a CUDA IK solve.
-        constraint_fns: callables ``f(cfg, robot, args) -> scalar``, driven to
+        cfg: ``(B, n_act)`` or ``(n_act,)`` starting configurations, normally the
+            output of a CUDA IK solve. A single configuration is promoted to a
+            batch of one; the result keeps the leading axis.
+        target_poses: one :class:`jaxlie.SE3` per end-effector, each with a
+            leading batch axis matching ``cfg``.
+        constraint_fns: callables ``f(cfg, robot, args) -> scalar`` driven to
             zero. Use a hinge such as ``relu(d_min - d(q))`` for an inequality.
-        step_size: initial null-space step scale. Backtracked on any step that
-            worsens the constraint, breaks the pose tolerance, or (with a
-            checker) causes a collision.
-        collision_checker / collision_world: when given, every accepted step is
-            required to stay collision-free, so a path-1 or path-2 guarantee
-            survives projection.
+        batched_constraint_args: whether each entry of ``constraint_args``
+            carries a leading batch axis, i.e. every problem has its OWN
+            constraint target (a per-problem elbow height, a per-problem
+            clearance). Explicit rather than inferred from shapes, because a
+            shared arg that happens to have length B is indistinguishable from a
+            per-element one and guessing wrong is silent.
+        collision_checker / collision_world: when given, an accepted step must
+            remain collision-free, so a path-1 or path-2 guarantee survives.
 
     Returns:
-        A :class:`NullspaceResult`. Check ``success`` -- an over-constrained
-        problem returns the best pose-valid iterate with ``success=False``
-        rather than raising or silently drifting off the target.
+        A batched :class:`NullspaceResult`. On failure check
+        ``start_collision_free`` and ``nullspace_dim`` before tuning anything --
+        they separate "your input was already invalid" and "this arm has no
+        freedom left" from "the constraint is too tight".
     """
     if lower is None:
         lower = robot.joints.lower_limits
     if upper is None:
         upper = robot.joints.upper_limits
-    n_act = cfg.shape[-1]
+    lower, upper = jnp.asarray(lower), jnp.asarray(upper)
+
+    cfg = jnp.atleast_2d(jnp.asarray(cfg))
+    B, n_act = cfg.shape
     constraint_args = tuple(constraint_args) or tuple(() for _ in constraint_fns)
 
-    def collision_ok(q):
+    idx = jnp.arange(B)
+
+    def task_res(q, b):
+        return _task_residual(q, robot, target_link_indices, target_poses, b)
+
+    def con_res(q, args):
+        return _constraint_residual(q, args, robot, constraint_fns)
+
+    _arg_ax = 0 if batched_constraint_args else None
+    batched_task = jax.vmap(task_res)
+    batched_task_jac = jax.vmap(jax.jacobian(task_res, argnums=0))
+    batched_con = jax.vmap(con_res, in_axes=(0, _arg_ax))
+    batched_con_jac = jax.vmap(jax.jacobian(con_res, argnums=0), in_axes=(0, _arg_ax))
+
+    def collision_free(q):
+        """``(B,)`` bool -- ONE checker call for the whole batch, not B calls."""
         if collision_checker is None:
-            return True
-        q_b = jnp.asarray(q, jnp.float32)[None]
-        d_self = jnp.min(collision_checker.compute_self_collision_distance(robot, q_b))
-        ok = d_self >= collision_margin
+            return jnp.ones(q.shape[0], dtype=bool)
+        qf = jnp.asarray(q, jnp.float32)
+        ok = jnp.min(collision_checker.compute_self_collision_distance(robot, qf),
+                     axis=-1) >= collision_margin
         if collision_world is not None:
-            d_world = jnp.min(collision_checker.compute_world_collision_distance(
-                robot, q_b, collision_world))
-            ok = jnp.logical_and(ok, d_world >= collision_margin)
-        return bool(ok)
+            dw = collision_checker.compute_world_collision_distance(
+                robot, qf, collision_world).reshape(q.shape[0], -1)
+            ok = jnp.logical_and(ok, jnp.min(dw, axis=-1) >= collision_margin)
+        return ok
 
-    def violation(q):
-        c, _ = _constraint_residual_and_jacobian(q, robot, constraint_fns, constraint_args)
-        return float(jnp.max(jnp.abs(c)))
+    def restore_pose(q):
+        """Iterated task-space correction.
 
-    # Checked once, up front: a start that is already in collision rejects every
-    # candidate step and would otherwise look exactly like an infeasible
-    # constraint. Path 3 is meant to consume the output of path 1 or 2, both of
-    # which guarantee collision-freedom; a False here means that contract was
-    # broken before the projector was called.
-    start_free = collision_ok(cfg)
+        One Newton correction is itself linearised and leaves the second-order
+        error that rejects otherwise-good null-space steps. Iterating is far
+        cheaper than shrinking the step until the linearisation happens to hold.
+        """
+        for _ in range(pose_restore_iters):
+            r = batched_task(q, idx)
+            J = batched_task_jac(q, idx)
+            q = jnp.clip(q - jnp.einsum('bij,bj->bi', jnp.linalg.pinv(J), r),
+                         lower, upper)
+        return q
 
-    best = cfg
-    best_viol = violation(cfg)
-    step = step_size
+    start_free = collision_free(cfg)
 
-    for _ in range(max_iter):
-        if best_viol <= constraint_tol:
-            break
+    # Acceptance is judged against the pose you ARRIVED with, not an absolute
+    # bound. "Without losing the pose" means not degrading it; demanding an
+    # absolute pose_tol instead asks the projector to beat the solver that
+    # produced its input. A CUDA solve typically lands around 1e-3 on the log
+    # residual, so a fixed 1e-4 freezes almost every element -- no step can pass
+    # a test the starting point already fails, and the projector silently
+    # returns its input having done nothing.
+    start_perr = jnp.max(jnp.abs(batched_task(cfg, idx)), axis=-1)
+    pose_budget = jnp.maximum(pose_tol, start_perr)
 
-        r, J = _task_residual_and_jacobian(best, robot, target_link_indices, target_poses)
-        c, Jc = _constraint_residual_and_jacobian(
-            best, robot, constraint_fns, constraint_args)
+    def body(_, carry):
+        best, best_viol = carry
 
-        # P = I - J^+ J. Built from the pseudoinverse so a rank-deficient task
-        # Jacobian (a singular configuration) widens the null space rather than
-        # blowing up, which is the behaviour that keeps this usable near
-        # singularities instead of exactly where it is needed most.
-        J_pinv = jnp.linalg.pinv(J)
-        P = jnp.eye(n_act) - J_pinv @ J
+        J = batched_task_jac(best, idx)
+        c = batched_con(best, constraint_args)
+        Jc = batched_con_jac(best, constraint_args)
 
-        # Gauss-Newton step on the constraints, confined to the null space.
-        #
-        # Damping is RELATIVE to the projected constraint Jacobian, not an
-        # absolute floor. A constraint is often only weakly visible inside the
-        # null space -- on a 7-DOF arm holding a full pose, ||Jc P|| ~ 0.02 is
-        # typical -- so an absolute 1e-6 leaves the solve dividing by ~5e-4 and
-        # returns a step of several radians, which then fails every backtrack
-        # for overshooting the pose. Scaling with the problem keeps the step
-        # sane whatever the conditioning.
-        Jc_n = Jc @ P
-        scale = jnp.maximum(jnp.sum(Jc_n * Jc_n), 1e-12)
-        JJt = Jc_n @ Jc_n.T + damping * scale * jnp.eye(Jc_n.shape[0])
-        dq = -P @ (Jc_n.T @ jnp.linalg.solve(JJt, c))
+        eye = jnp.broadcast_to(jnp.eye(n_act), (B, n_act, n_act))
+        P = eye - jnp.einsum('bij,bjk->bik', jnp.linalg.pinv(J), J)
 
-        # Trust region. The pose is restored by a linearised correction below,
-        # whose error grows with the square of the step, so an unbounded step
-        # cannot be corrected back onto the pose no matter how it is scaled.
-        dq_norm = jnp.linalg.norm(dq)
-        dq = jnp.where(dq_norm > max_step_norm, dq * (max_step_norm / dq_norm), dq)
+        # Gauss-Newton on the constraints, confined to the null space. Damping
+        # is RELATIVE to the projected constraint Jacobian, not an absolute
+        # floor: a constraint is often only weakly visible in the null space
+        # (||Jc P|| ~ 0.02 on a 7-DOF arm), so an absolute 1e-6 leaves this
+        # dividing by ~5e-4 and returning a multi-radian step that fails every
+        # rung of the ladder for overshooting the pose.
+        Jc_n = jnp.einsum('bij,bjk->bik', Jc, P)
+        scale = jnp.maximum(jnp.sum(Jc_n * Jc_n, axis=(1, 2)), 1e-12)
+        JJt = (jnp.einsum('bij,bkj->bik', Jc_n, Jc_n)
+               + damping * scale[:, None, None] * jnp.eye(Jc_n.shape[1]))
+        dq = -jnp.einsum('bij,bj->bi', P,
+                         jnp.einsum('bji,bj->bi', Jc_n,
+                                    jnp.linalg.solve(JJt, c[..., None]).squeeze(-1)))
 
-        accepted = False
-        trial_step = step
-        for _ in range(8):                      # backtracking line search
-            q_try = jnp.clip(best + trial_step * dq, lower, upper)
+        # Trust region: the pose is restored by a linearised correction whose
+        # error grows with the square of the step, so an unbounded step cannot
+        # be corrected back onto the pose at any scale.
+        nrm = jnp.linalg.norm(dq, axis=-1, keepdims=True)
+        dq = jnp.where(nrm > max_step_norm, dq * (max_step_norm / (nrm + 1e-12)), dq)
 
-            # First-order projection drifts; pull the pose back before judging
-            # the step, so the comparison is against a pose-valid candidate.
-            # Iterated, because one Newton correction is itself linearised and
-            # leaves second-order error -- which is exactly the error that made
-            # otherwise-good steps fail the pose test.
-            for _ in range(pose_restore_iters):
-                r_try, J_try = _task_residual_and_jacobian(
-                    q_try, robot, target_link_indices, target_poses)
-                if float(jnp.max(jnp.abs(r_try))) <= pose_tol:
-                    break
-                q_try = jnp.clip(q_try - jnp.linalg.pinv(J_try) @ r_try, lower, upper)
+        def trial(alpha):
+            q = restore_pose(jnp.clip(best + alpha * dq, lower, upper))
+            viol = jnp.max(jnp.abs(batched_con(q, constraint_args)), axis=-1)
+            perr = jnp.max(jnp.abs(batched_task(q, idx)), axis=-1)
+            return q, viol, (perr <= pose_budget) & (viol < best_viol) & collision_free(q)
 
-            r_fix, _ = _task_residual_and_jacobian(
-                q_try, robot, target_link_indices, target_poses)
-            pose_err = float(jnp.max(jnp.abs(r_fix)))
-            viol_try = violation(q_try)
+        qs, viols, oks = jax.vmap(trial)(_STEP_LADDER)         # (S, B, ...)
 
-            if pose_err <= pose_tol and viol_try < best_viol and collision_ok(q_try):
-                best, best_viol = q_try, viol_try
-                step = min(step * 1.5, step_size)
-                accepted = True
-                break
-            trial_step *= 0.5
+        # First admissible rung wins, which is the largest step that works.
+        ranked = jnp.where(oks, jnp.arange(len(_STEP_LADDER))[:, None],
+                           len(_STEP_LADDER))
+        pick = jnp.argmin(ranked, axis=0)
+        any_ok = jnp.any(oks, axis=0)
 
-        if not accepted:
-            # No admissible step in the null space: either it is exhausted or
-            # the constraints conflict with the pose. Stop rather than drift.
-            break
+        # Converged or stuck elements are masked, not exited: a batch costs the
+        # worst element's iteration count rather than the sum.
+        take = any_ok & (best_viol > constraint_tol)
+        return (jnp.where(take[:, None], qs[pick, idx], best),
+                jnp.where(take, viols[pick, idx], best_viol))
 
-    r_fin, J_fin = _task_residual_and_jacobian(
-        best, robot, target_link_indices, target_poses)
-    pose_error = jnp.max(jnp.abs(r_fin))
-    ns_dim = n_act - jnp.linalg.matrix_rank(J_fin)
+    viol0 = jnp.max(jnp.abs(batched_con(cfg, constraint_args)), axis=-1)
+    best, best_viol = jax.lax.fori_loop(0, max_iter, body, (cfg, viol0))
+
+    pose_error = jnp.max(jnp.abs(batched_task(best, idx)), axis=-1)
+    ns_dim = n_act - jnp.linalg.matrix_rank(batched_task_jac(best, idx))
     return NullspaceResult(
         cfg=best,
-        success=jnp.logical_and(
-            jnp.logical_and(best_viol <= constraint_tol, pose_error <= pose_tol),
-            jnp.asarray(start_free)),
-        constraint_violation=jnp.asarray(best_viol),
+        success=(best_viol <= constraint_tol) & (pose_error <= pose_budget) & start_free,
+        constraint_violation=best_viol,
         pose_error=pose_error,
         nullspace_dim=ns_dim,
-        start_collision_free=jnp.asarray(start_free),
+        start_collision_free=start_free,
     )
