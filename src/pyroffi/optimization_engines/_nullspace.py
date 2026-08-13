@@ -183,6 +183,7 @@ def project_onto_constraints(
 
     cfg = jnp.atleast_2d(jnp.asarray(cfg))
     B, n_act = cfg.shape
+
     free_mask = (jnp.ones(n_act) if fixed_joint_mask is None
                  else 1.0 - jnp.asarray(fixed_joint_mask).astype(jnp.float32))
     constraint_args = tuple(constraint_args) or tuple(() for _ in constraint_fns)
@@ -229,6 +230,20 @@ def project_onto_constraints(
         return q
 
     start_free = collision_free(cfg)
+
+    if len(constraint_fns) == 0:
+        # Nothing to enforce. Returning the input IS the answer: this is a
+        # CONSTRAINT projector, not a pose refiner, and it deliberately does not
+        # improve a pose it was given. Callers wanting pose refinement want an
+        # LM refiner -- conflating the two is what let the old _ls_ik_single
+        # serve both roles and hid which one each call site depended on.
+        return NullspaceResult(
+            cfg=cfg, success=start_free,
+            constraint_violation=jnp.zeros(B),
+            pose_error=jnp.max(jnp.abs(batched_task(cfg, idx)), axis=-1),
+            nullspace_dim=jnp.zeros(B, jnp.int32),
+            start_collision_free=start_free,
+        )
 
     # Acceptance is judged against the pose you ARRIVED with, not an absolute
     # bound. "Without losing the pose" means not degrading it; an absolute bound

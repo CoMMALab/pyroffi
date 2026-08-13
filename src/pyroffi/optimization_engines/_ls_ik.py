@@ -520,10 +520,13 @@ def ls_ik_solve(
 
     # ── Multi-seed LM (parallel over seeds) ───────────────────────────────
     all_cfgs = jax.vmap(
-        lambda cfg: project_single(
+        lambda cfg: _ls_ik_single(
             cfg, robot, target_link_indices, target_poses,
-            constraint_fns, constraint_args,
-            lower=lower, upper=upper, fixed_joint_mask=fixed_joint_mask,
+            max_iter, lambda_init, pos_weight, ori_weight,
+            lower, upper, fixed_joint_mask,
+            constraint_fns=constraint_fns,
+            constraint_args=constraint_args,
+            constraint_weights=constraint_weights,
         )
     )(seeds)   # (num_seeds, n_act)
 

@@ -612,11 +612,13 @@ def hjcd_solve(
     lm_keys = jax.random.split(key_lm, top_k * repeats)
 
     refine_cfgs = jax.vmap(
-        lambda cfg, key: project_single(
+        lambda cfg, key: _lm_refine_single(
             cfg, robot, target_link_indices, target_poses,
-            constraint_fns, constraint_args,
-            max_iter=lm_max_iter,
-            lower=lower, upper=upper, fixed_joint_mask=fixed_joint_mask,
+            lm_max_iter, lambda_init, limit_prior_weight, kick_scale,
+            key, lower, upper, eps_pos, eps_ori, fixed_joint_mask,
+            constraint_fns=constraint_fns,
+            constraint_args=constraint_args,
+            constraint_weights=constraint_weights,
         )
     )(refine_seeds, lm_keys)                                   # (top_k*repeats, n_act)
 
