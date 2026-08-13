@@ -43,6 +43,7 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
 from ._ik_primitives import self_collision_table_arrays
+from ._batching import dispatch_vmap_to_batched
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _prepare_ls_collision_buffers
 
@@ -1033,44 +1034,101 @@ def hjcd_solve_cuda(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
-    winner = _hjcd_solve_cuda_jit(
-        robot=robot,
-        target_poses=target_poses_t,
-        rng_key=rng_key,
-        previous_cfg=previous_cfg,
-        num_seeds=num_seeds,
-        coarse_max_iter=coarse_max_iter,
-        lm_max_iter=lm_max_iter,
-        epsilon=epsilon,
-        nu=nu,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        lambda_init=lambda_init,
-        continuity_weight=continuity_weight,
-        limit_prior_weight=limit_prior_weight,
-        kick_scale=kick_scale,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
-    )
+        # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
+    # launch, rather than serialising a kernel that already batches.
+    def _single(tgt, prev):
+        return _hjcd_solve_cuda_jit(
+
+            robot=robot,
+                target_poses=tuple(jaxlie.SE3(w) for w in tgt),
+            rng_key=rng_key,
+                previous_cfg=prev,
+            num_seeds=num_seeds,
+            coarse_max_iter=coarse_max_iter,
+            lm_max_iter=lm_max_iter,
+            epsilon=epsilon,
+            nu=nu,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            lambda_init=lambda_init,
+            continuity_weight=continuity_weight,
+            limit_prior_weight=limit_prior_weight,
+            kick_scale=kick_scale,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        )
+
+    def _batched(tgt, prev):
+        # The batched kernel handles ONE end-effector, so the multi-EE form
+        # cannot fold into it. Falling back to a mapped single solve would
+        # silently reintroduce the serialisation this exists to avoid.
+        if len(target_link_indices) != 1:
+            raise NotImplementedError(
+                "vmap over this solver is only supported for a single "
+                f"end-effector; got {len(target_link_indices)}. Call the "
+                "*_solve_cuda_batch entry point with a batched target instead.")
+        winners = _hjcd_solve_cuda_batch_jit(
+
+            robot=robot,
+                target_poses_batch=jaxlie.SE3(tgt[:, 0]),
+            rng_key=rng_key,
+                previous_cfgs=prev,
+            num_seeds=num_seeds,
+            coarse_max_iter=coarse_max_iter,
+            lm_max_iter=lm_max_iter,
+            epsilon=epsilon,
+            nu=nu,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            lambda_init=lambda_init,
+            continuity_weight=continuity_weight,
+            limit_prior_weight=limit_prior_weight,
+            kick_scale=kick_scale,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        )
+        return winners
+
+    winner = dispatch_vmap_to_batched(_single, _batched)(
+        jnp.stack([t.wxyz_xyz for t in target_poses_t]), previous_cfg)
 
     # ── Post-CUDA JAX refinement with constraints only ─────────────────────
     # Multi-EE is now handled in CUDA; only constraints require JAX refinement.

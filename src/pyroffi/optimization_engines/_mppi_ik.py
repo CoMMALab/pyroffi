@@ -51,6 +51,7 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
+from ._batching import dispatch_vmap_to_batched
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
 from ._ik_primitives import self_collision_table_arrays
 from ._ls_ik import _ls_ik_single, _prepare_ls_collision_buffers
@@ -890,45 +891,103 @@ def mppi_ik_solve_cuda(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
-    winner, winner_coll_cost = _mppi_ik_solve_cuda_jit(
-        robot=robot,
-        target_poses=target_poses_t,
-        rng_key=rng_key,
-        previous_cfg=previous_cfg,
-        num_seeds=num_seeds,
-        n_particles=n_particles,
-        n_mppi_iters=n_mppi_iters,
-        n_lbfgs_iters=n_lbfgs_iters,
-        m_lbfgs=m_lbfgs,
-        pos_weight=pos_weight,
-        ori_weight=ori_weight,
-        sigma=sigma,
-        mppi_temperature=mppi_temperature,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        continuity_weight=continuity_weight,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
-    )
+        # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
+    # launch, rather than serialising a kernel that already batches.
+    def _single(tgt, prev):
+        return _mppi_ik_solve_cuda_jit(
+
+            robot=robot,
+                target_poses=tuple(jaxlie.SE3(w) for w in tgt),
+            rng_key=rng_key,
+                previous_cfg=prev,
+            num_seeds=num_seeds,
+            n_particles=n_particles,
+            n_mppi_iters=n_mppi_iters,
+            n_lbfgs_iters=n_lbfgs_iters,
+            m_lbfgs=m_lbfgs,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            sigma=sigma,
+            mppi_temperature=mppi_temperature,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        )
+
+    def _batched(tgt, prev):
+        # The batched kernel handles ONE end-effector, so the multi-EE form
+        # cannot fold into it. Falling back to a mapped single solve would
+        # silently reintroduce the serialisation this exists to avoid.
+        if len(target_link_indices) != 1:
+            raise NotImplementedError(
+                "vmap over this solver is only supported for a single "
+                f"end-effector; got {len(target_link_indices)}. Call the "
+                "*_solve_cuda_batch entry point with a batched target instead.")
+        winners = _mppi_ik_solve_cuda_batch_jit(
+
+            robot=robot,
+                target_poses_batch=jaxlie.SE3(tgt[:, 0]),
+            rng_key=rng_key,
+                previous_cfgs=prev,
+            num_seeds=num_seeds,
+            n_particles=n_particles,
+            n_mppi_iters=n_mppi_iters,
+            n_lbfgs_iters=n_lbfgs_iters,
+            m_lbfgs=m_lbfgs,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            sigma=sigma,
+            mppi_temperature=mppi_temperature,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        )
+        return winners, jnp.zeros((winners.shape[0],))
+
+    winner, winner_coll_cost = dispatch_vmap_to_batched(_single, _batched)(
+        jnp.stack([t.wxyz_xyz for t in target_poses_t]), previous_cfg)
 
     # ── Optional post-CUDA JAX constraint refinement ─────────────────────
     if bool(post_constraint_fns) and constraint_refine_iters > 0:
