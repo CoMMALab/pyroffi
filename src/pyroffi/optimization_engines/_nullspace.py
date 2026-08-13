@@ -134,7 +134,7 @@ def project_onto_constraints(
     max_iter: int = 40,
     max_step_norm: float = 0.2,
     constraint_tol: float = 1e-4,
-    pose_tol: float = 1e-4,
+    pose_tol: float = 1e-3,
     damping: float = 1e-3,
     pose_restore_iters: int = 3,
     batched_constraint_args: bool = False,
@@ -223,12 +223,17 @@ def project_onto_constraints(
     start_free = collision_free(cfg)
 
     # Acceptance is judged against the pose you ARRIVED with, not an absolute
-    # bound. "Without losing the pose" means not degrading it; demanding an
-    # absolute pose_tol instead asks the projector to beat the solver that
-    # produced its input. A CUDA solve typically lands around 1e-3 on the log
-    # residual, so a fixed 1e-4 freezes almost every element -- no step can pass
-    # a test the starting point already fails, and the projector silently
-    # returns its input having done nothing.
+    # bound. "Without losing the pose" means not degrading it; an absolute bound
+    # asks the projector to beat the solver that produced its input.
+    #
+    # The default pose_tol is 1e-3 and NOT tighter for a measured reason: the
+    # task-space correction below cannot drive the residual under roughly 2e-4
+    # in float32, whatever the step size -- that is the precision floor of the
+    # FK and log-map chain, not step-dependent drift (it does not shrink as the
+    # step shrinks). A 1e-4 tolerance therefore sits BELOW the achievable floor,
+    # every rung of the ladder fails it, and the projector silently returns its
+    # input having moved nothing. That failure is indistinguishable from an
+    # infeasible constraint, which is what makes it expensive.
     start_perr = jnp.max(jnp.abs(batched_task(cfg, idx)), axis=-1)
     pose_budget = jnp.maximum(pose_tol, start_perr)
 
