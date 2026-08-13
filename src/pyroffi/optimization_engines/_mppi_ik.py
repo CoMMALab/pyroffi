@@ -52,6 +52,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._batching import dispatch_vmap_to_batched
+from ._nullspace import project_single
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
 from ._ik_primitives import self_collision_table_arrays
 from ._ls_ik import _ls_ik_single, _prepare_ls_collision_buffers
@@ -996,14 +997,10 @@ def mppi_ik_solve_cuda(
             if fixed_joint_mask is not None
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
-        winner = _ls_ik_single(
+        winner = project_single(
             winner, robot, target_link_indices, target_poses_t,
-            constraint_refine_iters, 5e-3, pos_weight, ori_weight,
-            robot.joints.lower_limits, robot.joints.upper_limits,
-            fmask,
-            constraint_fns=post_constraint_fns,
-            constraint_args=post_constraint_args,
-            constraint_weights=post_constraint_weights,
+            post_constraint_fns, post_constraint_args,
+            max_iter=constraint_refine_iters, fixed_joint_mask=fmask,
         )
 
     return winner

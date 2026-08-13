@@ -80,6 +80,7 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
+from ._nullspace import project_single
 from ._ik_primitives import _ik_residual
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _ls_ik_single
@@ -373,10 +374,10 @@ def make_learned_ik_solve(
 
         # ── Stage 2: LM refinement ────────────────────────────────────────
         all_cfgs = jax.vmap(
-            lambda cfg: _ls_ik_single(
-                cfg, robot, target_link_indices, target_poses,
-                n_refine_iters, lambda_init, pos_weight, ori_weight,
-                lower, upper, fixed_joint_mask,
+            lambda cfg: project_single(
+                cfg, robot, target_link_indices, target_poses, (), (),
+                max_iter=n_refine_iters,
+                lower=lower, upper=upper, fixed_joint_mask=fixed_joint_mask,
             )
         )(seeds)
 

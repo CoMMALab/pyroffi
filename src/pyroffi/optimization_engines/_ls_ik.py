@@ -35,6 +35,7 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
+from ._nullspace import project_single
 from ._ik_primitives import (
     _ik_residual,
     _LS_ALPHAS,
@@ -519,13 +520,10 @@ def ls_ik_solve(
 
     # ── Multi-seed LM (parallel over seeds) ───────────────────────────────
     all_cfgs = jax.vmap(
-        lambda cfg: _ls_ik_single(
+        lambda cfg: project_single(
             cfg, robot, target_link_indices, target_poses,
-            max_iter, lambda_init, pos_weight, ori_weight,
-            lower, upper, fixed_joint_mask,
-            constraint_fns=constraint_fns,
-            constraint_args=constraint_args,
-            constraint_weights=constraint_weights,
+            constraint_fns, constraint_args,
+            lower=lower, upper=upper, fixed_joint_mask=fixed_joint_mask,
         )
     )(seeds)   # (num_seeds, n_act)
 
@@ -963,14 +961,10 @@ def ls_ik_solve_cuda(
             if fixed_joint_mask is not None
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
-        winner = _ls_ik_single(
+        winner = project_single(
             winner, robot, target_link_indices, target_poses_t,
-            constraint_refine_iters, lambda_init, pos_weight, ori_weight,
-            robot.joints.lower_limits, robot.joints.upper_limits,
-            fmask,
-            constraint_fns=post_constraint_fns,
-            constraint_args=post_constraint_args,
-            constraint_weights=post_constraint_weights,
+            post_constraint_fns, post_constraint_args,
+            max_iter=constraint_refine_iters, fixed_joint_mask=fmask,
         )
 
     return differentiable_ik_solution(
@@ -1300,14 +1294,12 @@ def ls_ik_solve_cuda_batch(
         # or multi-EE call.  Note: only single-EE is supported for the batch
         # path's post-CUDA refinement (multi-EE batch is handled by winner selection).
         winners = jax.vmap(
-            lambda cfg, wxyz_xyz: _ls_ik_single(
+            lambda cfg, wxyz_xyz: project_single(
                 cfg, robot, target_link_indices,
                 (jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),),
-                constraint_refine_iters, lambda_init, pos_weight, ori_weight,
-                lower, upper, fmask,
-                constraint_fns=post_constraint_fns,
-                constraint_args=post_constraint_args,
-                constraint_weights=post_constraint_weights,
+                post_constraint_fns, post_constraint_args,
+                max_iter=constraint_refine_iters,
+                lower=lower, upper=upper, fixed_joint_mask=fmask,
             )
         )(winners, target_poses.wxyz_xyz)
 

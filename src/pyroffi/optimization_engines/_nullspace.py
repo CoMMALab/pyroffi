@@ -143,6 +143,7 @@ def project_onto_constraints(
     collision_margin: float = 0.0,
     lower: Float[Array, "n_act"] | None = None,
     upper: Float[Array, "n_act"] | None = None,
+    fixed_joint_mask: Float[Array, "n_act"] | None = None,
 ) -> NullspaceResult:
     """Move configurations to satisfy ``constraint_fns`` while holding their poses.
 
@@ -162,6 +163,11 @@ def project_onto_constraints(
             per-element one and guessing wrong is silent.
         collision_checker / collision_world: when given, an accepted step must
             remain collision-free, so a path-1 or path-2 guarantee survives.
+        fixed_joint_mask: joints marked here are held exactly. Enforced by
+            zeroing the null-space step on those columns rather than by clamping
+            afterwards: clamping would let the pose-restoration correction move
+            a frozen joint and then snap it back, which silently breaks the pose
+            it had just restored.
 
     Returns:
         A batched :class:`NullspaceResult`. On failure check
@@ -177,6 +183,8 @@ def project_onto_constraints(
 
     cfg = jnp.atleast_2d(jnp.asarray(cfg))
     B, n_act = cfg.shape
+    free_mask = (jnp.ones(n_act) if fixed_joint_mask is None
+                 else 1.0 - jnp.asarray(fixed_joint_mask).astype(jnp.float32))
     constraint_args = tuple(constraint_args) or tuple(() for _ in constraint_fns)
 
     idx = jnp.arange(B)
@@ -216,8 +224,8 @@ def project_onto_constraints(
         for _ in range(pose_restore_iters):
             r = batched_task(q, idx)
             J = batched_task_jac(q, idx)
-            q = jnp.clip(q - jnp.einsum('bij,bj->bi', jnp.linalg.pinv(J), r),
-                         lower, upper)
+            corr = jnp.einsum('bij,bj->bi', jnp.linalg.pinv(J), r) * free_mask
+            q = jnp.clip(q - corr, lower, upper)
         return q
 
     start_free = collision_free(cfg)
@@ -264,6 +272,7 @@ def project_onto_constraints(
         # Trust region: the pose is restored by a linearised correction whose
         # error grows with the square of the step, so an unbounded step cannot
         # be corrected back onto the pose at any scale.
+        dq = dq * free_mask                      # frozen joints do not move
         nrm = jnp.linalg.norm(dq, axis=-1, keepdims=True)
         dq = jnp.where(nrm > max_step_norm, dq * (max_step_norm / (nrm + 1e-12)), dq)
 
@@ -300,3 +309,29 @@ def project_onto_constraints(
         nullspace_dim=ns_dim,
         start_collision_free=start_free,
     )
+
+
+def project_single(
+    cfg: Float[Array, "n_act"],
+    robot: Robot,
+    target_link_indices: Sequence[int],
+    target_poses: Sequence[jaxlie.SE3],
+    constraint_fns: Sequence[Callable],
+    constraint_args: Sequence = (),
+    **kwargs,
+) -> Float[Array, "n_act"]:
+    """One configuration in, one configuration out.
+
+    Adapter for the single-problem solvers, whose post-solve refinement handles
+    one configuration at a time. Adds and strips the batch axis the batched
+    implementation works in; returns the configuration only, so it is a drop-in
+    for the LM refiners it replaces. Callers that need to know WHETHER the
+    constraints were met should call :func:`project_onto_constraints` directly
+    and read ``success`` -- this wrapper deliberately cannot report failure, and
+    silently returning the best pose-valid iterate is the right behaviour only
+    where the caller already treats refinement as best-effort.
+    """
+    batched_targets = tuple(jax.tree.map(lambda x: x[None], tp) for tp in target_poses)
+    return project_onto_constraints(
+        jnp.asarray(cfg)[None], robot, target_link_indices, batched_targets,
+        constraint_fns, constraint_args, **kwargs).cfg[0]

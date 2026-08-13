@@ -41,6 +41,7 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
+from ._nullspace import project_single
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
 from ._ik_primitives import self_collision_table_arrays
 from ._batching import dispatch_vmap_to_batched
@@ -611,13 +612,11 @@ def hjcd_solve(
     lm_keys = jax.random.split(key_lm, top_k * repeats)
 
     refine_cfgs = jax.vmap(
-        lambda cfg, key: _lm_refine_single(
+        lambda cfg, key: project_single(
             cfg, robot, target_link_indices, target_poses,
-            lm_max_iter, lambda_init, limit_prior_weight, kick_scale,
-            key, lower, upper, eps_pos, eps_ori, fixed_joint_mask,
-            constraint_fns=constraint_fns,
-            constraint_args=constraint_args,
-            constraint_weights=constraint_weights,
+            constraint_fns, constraint_args,
+            max_iter=lm_max_iter,
+            lower=lower, upper=upper, fixed_joint_mask=fixed_joint_mask,
         )
     )(refine_seeds, lm_keys)                                   # (top_k*repeats, n_act)
 
@@ -1140,14 +1139,10 @@ def hjcd_solve_cuda(
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
         key_post = jax.random.PRNGKey(0)  # deterministic post-refinement key
-        winner = _lm_refine_single(
+        winner = project_single(
             winner, robot, target_link_indices, target_poses_t,
-            constraint_refine_iters, lambda_init, limit_prior_weight, kick_scale,
-            key_post, robot.joints.lower_limits, robot.joints.upper_limits,
-            eps_pos, eps_ori, fmask,
-            constraint_fns=post_constraint_fns,
-            constraint_args=post_constraint_args,
-            constraint_weights=post_constraint_weights,
+            post_constraint_fns, post_constraint_args,
+            max_iter=constraint_refine_iters, fixed_joint_mask=fmask,
         )
 
     return differentiable_ik_solution(
@@ -1543,14 +1538,12 @@ def hjcd_solve_cuda_batch(
         key_post = jax.random.PRNGKey(0)
 
         winners = jax.vmap(
-            lambda cfg, wxyz_xyz: _lm_refine_single(
+            lambda cfg, wxyz_xyz: project_single(
                 cfg, robot, target_link_indices,
                 (jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),),
-                constraint_refine_iters, lambda_init, limit_prior_weight, kick_scale,
-                key_post, lower, upper, eps_pos, eps_ori, fmask,
-                constraint_fns=post_constraint_fns,
-                constraint_args=post_constraint_args,
-                constraint_weights=post_constraint_weights,
+                post_constraint_fns, post_constraint_args,
+                max_iter=constraint_refine_iters,
+                lower=lower, upper=upper, fixed_joint_mask=fmask,
             )
         )(winners, target_poses.wxyz_xyz)
 
