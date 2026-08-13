@@ -389,6 +389,14 @@ void sqp_ik_kernel(
                     break;
                 }
             }
+            // Pose convergence is not convergence when a collision constraint is
+            // active: the arm can sit exactly on target and folded through
+            // itself, and exiting here would return that as a converged answer
+            // with the constraint never worked off. Open loop means running
+            // until everything being solved for has converged, not until the
+            // pose has.
+            if (all_conv && (want_self || want_world))
+                all_conv = collision_penalty_at(T_world) <= 1e-12f;
             if (all_conv) break;
         }
 

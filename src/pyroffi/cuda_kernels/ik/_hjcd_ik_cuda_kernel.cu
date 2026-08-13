@@ -475,11 +475,13 @@ void hjcd_ik_lm_kernel(
     float best_err = 0.0f;
     for (int k = 0; k < 6 * n_ee; k++) best_err += r[k] * r[k];
 
+    // Hoisted out of the merit lambda: the convergence test below needs them.
+    const bool want_self  = n_self_pairs > 0;
+    const bool want_world = enable_collision && n_robot_spheres > 0;
+
     auto collision_penalty = [&](const float* cfg_eval, float* T_eval) {
         // See the coarse kernel above: self-collision is not gated on
         // `enable_collision`, which tracks world obstacles only.
-        const bool want_world = enable_collision && n_robot_spheres > 0;
-        const bool want_self  = n_self_pairs > 0;
         if (!want_world && !want_self) return 0.0f;
 
         fk_single(
@@ -594,6 +596,12 @@ void hjcd_ik_lm_kernel(
                 float r_ori = norm3(r + ee*6 + 3);
                 if (r_pos >= eps_pos || r_ori >= eps_ori) { all_conv = false; break; }
             }
+            // Pose convergence is not convergence while a collision constraint
+            // is active: the arm can sit exactly on target and folded through
+            // itself. Open loop means running until everything being solved for
+            // has converged, not until the pose has.
+            if (all_conv && (want_self || want_world))
+                all_conv = collision_penalty(cfg, T_world) <= 1e-12f;
             if (all_conv) {
                 done = true;
                 atomicExch(stop_flag + p, 1);
