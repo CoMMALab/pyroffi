@@ -48,7 +48,24 @@ ladder instead of a ``break`` -- because unlike the CUDA kernels this has to sta
 traceable for ``jit``. Converged elements are masked out rather than exited, so a
 batch costs the worst element's iteration count, not the sum.
 
-Performance: JIT THIS
+Performance: HOIST YOUR CONSTRAINT FUNCTIONS
+--------------------------------------------
+The compiled inner solve is cached on the STATIC configuration, and
+``constraint_fns`` is part of that key -- by function IDENTITY, since a closure
+is what it is. Building the closure inside the call site therefore produces a
+fresh key every call and recompiles every call::
+
+    for batch in batches:                       # 5597 ms per call at B=64
+        project_onto_constraints(..., (make_constraint(elbow),), ...)
+
+    con = make_constraint(elbow)                # 585 ms per call at B=64
+    for batch in batches:
+        project_onto_constraints(..., (con,), ...)
+
+A 9.6x difference, and it looks like the solver being slow rather than like a
+cache miss. Define constraint callables once, outside the loop.
+
+Performance: the rest
 ---------------------
 Wrap calls in ``jax.jit``. Measured 6.8x at B=64 (4374 -> 643 ms) with
 byte-identical output.
