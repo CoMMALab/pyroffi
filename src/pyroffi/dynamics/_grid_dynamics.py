@@ -64,15 +64,22 @@ def _batchable(impl):
     def _rule(axis_size, in_batched, *args):
         # def_vmap moves each batched arg's mapped axis to front (axis 0);
         # broadcast any unbatched arg so every operand shares that leading axis.
-        # ``impl`` then runs once over the merged leading batch — a single
-        # kernel launch (not a Python loop). One vmap axis is folded per rule
-        # application; for many batch axes at once prefer a single leading
-        # batch dimension (reshape) over deeply-nested ``vmap``.
+        # The merged leading batch then runs in a single kernel launch (not a
+        # Python loop).
+        #
+        # Recurse into ``f`` rather than calling ``impl`` directly: under nested
+        # ``vmap`` the rule body is still inside the enclosing vmap trace, so
+        # calling ``impl`` would hand the raw ffi_call a second batch axis and
+        # raise ("vmap is only supported ... Got vmap_method=None"). Re-entering
+        # ``f`` folds one axis per nesting level until no vmap trace remains,
+        # at which point ``impl`` sees plain arrays with a single leading batch.
+        # Nested ``vmap`` therefore stays one fused launch, and callers do not
+        # have to flatten batch axes by hand.
         args = [
             a if b else jnp.broadcast_to(a, (axis_size, *jnp.shape(a)))
             for a, b in zip(args, in_batched)
         ]
-        out = impl(*args)
+        out = f(*args)
         return out, jax.tree_util.tree_map(lambda _: True, out)
 
     return f

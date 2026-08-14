@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from .._ffi_dtypes import robot_buffers
+from ...optimization_engines._batching import constant_wrt_autodiff
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -163,13 +164,10 @@ def ls_ik_cuda(
     rb    = robot_buffers(twists, parent_tf, parent_idx, act_idx,
                            mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
-    cfgs, errs = jax.ffi.ffi_call(
-        "ls_ik_cuda",
-        (
-            jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
-            jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.float32),
-        ),
-    )(
+    # Operands are positional ARGUMENTS of the wrapped call, not captures.
+    # jax.custom_jvp binds only what it is passed; closing over traced arrays
+    # instead fails with "No constant handler for type: DynamicJaxprTracer".
+    _ops = (
         seeds,
         *rb,
         target_jnts.astype(jnp.int32),
@@ -186,14 +184,27 @@ def ls_ik_cuda(
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),
-        max_iter    = int(max_iter),
-        pos_weight  = np.float32(pos_weight),
-        ori_weight  = np.float32(ori_weight),
-        lambda_init = np.float32(lambda_init),
-        eps_pos     = np.float32(eps_pos),
-        eps_ori     = np.float32(eps_ori),
-        enable_collision = int(bool(enable_collision)),
-        collision_weight = np.float32(collision_weight),
-        collision_margin = np.float32(collision_margin),
     )
+
+    def _run(*ops):
+        return jax.ffi.ffi_call(
+            "ls_ik_cuda",
+            (
+                jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
+                jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.float32),
+            ),
+        )(
+            *ops,
+            max_iter    = int(max_iter),
+            pos_weight  = np.float32(pos_weight),
+            ori_weight  = np.float32(ori_weight),
+            lambda_init = np.float32(lambda_init),
+            eps_pos     = np.float32(eps_pos),
+            eps_ori     = np.float32(eps_ori),
+            enable_collision = int(bool(enable_collision)),
+            collision_weight = np.float32(collision_weight),
+            collision_margin = np.float32(collision_margin),
+        )
+
+    cfgs, errs = constant_wrt_autodiff(_run)(*_ops)
     return cfgs, errs

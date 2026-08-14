@@ -30,6 +30,8 @@ import numpy as np
 from .._ffi_dtypes import robot_buffers
 import jax
 import jax.numpy as jnp
+
+from ...optimization_engines._batching import constant_wrt_autodiff
 from jax import Array
 from jaxtyping import Float, Int
 
@@ -163,13 +165,8 @@ def hjcd_ik_coarse_cuda(
     rb = robot_buffers(twists, parent_tf, parent_idx, act_idx,
                         mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
-    return jax.ffi.ffi_call(
-        "hjcd_ik_coarse_cuda",
-        (
-            jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
-            jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),
-        ),
-    )(
+    # Operands positional; see constant_wrt_autodiff.
+    _ops = (
         seeds,
         *rb,
         target_jnts.astype(jnp.int32),
@@ -186,11 +183,24 @@ def hjcd_ik_coarse_cuda(
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),
-        k_max=int(k_max),
-        enable_collision=int(bool(enable_collision)),
-        collision_weight=np.float32(collision_weight),
-        collision_margin=np.float32(collision_margin),
     )
+
+    def _run(*ops):
+        return jax.ffi.ffi_call(
+            "hjcd_ik_coarse_cuda",
+            (
+                jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
+                jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),
+            ),
+        )(
+            *ops,
+            k_max=int(k_max),
+            enable_collision=int(bool(enable_collision)),
+            collision_weight=np.float32(collision_weight),
+            collision_margin=np.float32(collision_margin),
+        )
+
+    return constant_wrt_autodiff(_run)(*_ops)
 
 
 def hjcd_ik_lm_cuda(
@@ -279,14 +289,10 @@ def hjcd_ik_lm_cuda(
     rb = robot_buffers(twists, parent_tf, parent_idx, act_idx,
                         mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
-    cfgs, errs, _stop = jax.ffi.ffi_call(
-        "hjcd_ik_lm_cuda",
-        (
-            jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
-            jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),
-            jax.ShapeDtypeStruct((n_problems,), jnp.int32),
-        ),
-    )(
+    # Operands are positional ARGUMENTS, not captures: jax.custom_jvp binds
+    # only what it is passed, and closing over traced arrays fails with
+    # "No constant handler for type: DynamicJaxprTracer".
+    _ops = (
         seeds,
         noise,
         *rb,
@@ -304,15 +310,29 @@ def hjcd_ik_lm_cuda(
         lower.astype(jnp.float32),
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),
-        max_iter=int(max_iter),
-        stall_patience=int(stall_patience),
-        lambda_init=np.float32(lambda_init),
-        limit_prior_weight=np.float32(limit_prior_weight),
-        kick_scale=np.float32(kick_scale),
-        eps_pos=np.float32(eps_pos),
-        eps_ori=np.float32(eps_ori),
-        enable_collision=int(bool(enable_collision)),
-        collision_weight=np.float32(collision_weight),
-        collision_margin=np.float32(collision_margin),
     )
+
+    def _run(*ops):
+        return jax.ffi.ffi_call(
+            "hjcd_ik_lm_cuda",
+            (
+                jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
+                jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),
+                jax.ShapeDtypeStruct((n_problems,), jnp.int32),
+            ),
+        )(
+            *ops,
+            max_iter=int(max_iter),
+            stall_patience=int(stall_patience),
+            lambda_init=np.float32(lambda_init),
+            limit_prior_weight=np.float32(limit_prior_weight),
+            kick_scale=np.float32(kick_scale),
+            eps_pos=np.float32(eps_pos),
+            eps_ori=np.float32(eps_ori),
+            enable_collision=int(bool(enable_collision)),
+            collision_weight=np.float32(collision_weight),
+            collision_margin=np.float32(collision_margin),
+        )
+
+    cfgs, errs, _stop = constant_wrt_autodiff(_run)(*_ops)
     return cfgs, errs

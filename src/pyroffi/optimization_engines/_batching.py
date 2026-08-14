@@ -228,3 +228,51 @@ def sharded_batch_call(
 
     return run_sharded(pmapped, targets, rng_key, previous_cfgs, n_devices,
                        *(broadcast[n] for n in names))
+
+
+def constant_wrt_autodiff(fn: Callable) -> Callable:
+    """Declare an FFI-backed solve to have ZERO derivative w.r.t. its inputs.
+
+    The CUDA kernels have no JVP rule, so ``jax.grad`` through one raises
+    "The FFI call to `ls_ik_cuda` cannot be differentiated" AT THE CALL SITE --
+    before any downstream ``stop_gradient`` is reached. Detaching the output
+    therefore does not help: the tangent is demanded where the kernel is
+    invoked, not where its result is used.
+
+    Declaring zero here is not an approximation. The gradient of an IK solve is
+    supplied by the implicit-function rule applied to the optimality condition
+    at the returned configuration (see ``_implicit_diff``), never by
+    differentiating the solver's iterations -- which is unstable even when it is
+    possible. So the kernel genuinely is a constant as far as autodiff is
+    concerned, and saying so is what lets the real rule attach downstream.
+
+    Why the single-problem paths appeared to work already: their FFI call sits
+    inside the ``custom_vmap`` from :func:`dispatch_vmap_to_batched`, which
+    shields it incidentally. The batched paths have no such wrapper, so the same
+    solver was differentiable one way and not the other -- a difference nothing
+    in the API hinted at.
+    """
+    @jax.custom_jvp
+    def wrapped(*operands):
+        return fn(*operands)
+
+    @wrapped.defjvp
+    def _zero_jvp(primals, _tangents):
+        out = wrapped(*primals)
+        return out, jax.tree.map(_zero_tangent, out)
+
+    return wrapped
+
+
+def _zero_tangent(x):
+    """A zero tangent of the type JAX requires for ``x``.
+
+    Integer outputs -- a feasibility flag, a stop flag -- have no tangent space,
+    and JAX represents that with the ``float0`` dtype rather than an array of
+    integer zeros. Returning ``zeros_like`` for those fails with "Custom JVP
+    rule must produce primal and tangent outputs with corresponding shapes and
+    dtypes", which names the symptom and not the rule.
+    """
+    if jnp.issubdtype(jnp.result_type(x), jnp.inexact):
+        return jnp.zeros_like(x)
+    return jnp.zeros(jnp.shape(x), dtype=jax.dtypes.float0)

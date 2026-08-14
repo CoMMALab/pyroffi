@@ -134,6 +134,14 @@ def differentiable_ik_solution_batch(
     ``stop_gradient``-ed inside, so the kernel is never differentiated through;
     only the optimality condition at the returned configuration is.
     """
+    # stop_gradient OUTSIDE the vmap, not inside it. Applied within the mapped
+    # function it is too late: JAX must still form the batched INPUT tangent to
+    # enter the vmap, and that tangent comes from the FFI, so the kernel's JVP
+    # is demanded before the cut is ever reached. Detaching first means the
+    # solver output enters as a constant and the FFI is never differentiated --
+    # which is why the single-problem path, where the cut sits directly on the
+    # solver output, worked all along.
+    q_stars = jax.lax.stop_gradient(q_stars)
     return jax.vmap(
         lambda q, t: differentiable_ik_solution(
             q, robot, target_link_indices, jaxlie.SE3(t))

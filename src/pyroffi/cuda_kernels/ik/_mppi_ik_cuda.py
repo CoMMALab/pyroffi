@@ -24,6 +24,8 @@ import numpy as np
 from .._ffi_dtypes import robot_buffers
 import jax
 import jax.numpy as jnp
+
+from ...optimization_engines._batching import constant_wrt_autodiff
 from jax import Array
 from jaxtyping import Float, Int
 
@@ -181,13 +183,10 @@ def mppi_ik_cuda(
     rb    = robot_buffers(twists, parent_tf, parent_idx, act_idx,
                            mimic_mul, mimic_off, mimic_act_idx, topo_inv)
 
-    cfgs, errs = jax.ffi.ffi_call(
-        "mppi_ik_cuda",
-        (
-            jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
-            jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.float32),
-        ),
-    )(
+    # Operands are positional ARGUMENTS, not captures: jax.custom_jvp binds
+    # only what it is passed, and closing over traced arrays fails with
+    # "No constant handler for type: DynamicJaxprTracer".
+    _ops = (
         seeds,
         *rb,
         target_jnts.astype(jnp.int32),
@@ -205,18 +204,31 @@ def mppi_ik_cuda(
         upper.astype(jnp.float32),
         fixed_mask.astype(jnp.int32),
         rng_seed.astype(jnp.int32),
-        n_particles      = int(n_particles),
-        n_mppi_iters     = int(n_mppi_iters),
-        n_lbfgs_iters    = int(n_lbfgs_iters),
-        m_lbfgs          = int(m_lbfgs),
-        sigma            = np.float32(sigma),
-        mppi_temperature = np.float32(mppi_temperature),
-        pos_weight       = np.float32(pos_weight),
-        ori_weight       = np.float32(ori_weight),
-        eps_pos          = np.float32(eps_pos),
-        eps_ori          = np.float32(eps_ori),
-        enable_collision = int(bool(enable_collision)),
-        collision_weight = np.float32(collision_weight),
-        collision_margin = np.float32(collision_margin),
     )
+
+    def _run(*ops):
+        return jax.ffi.ffi_call(
+            "mppi_ik_cuda",
+            (
+                jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
+                jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.float32),
+            ),
+        )(
+            *ops,
+            n_particles      = int(n_particles),
+            n_mppi_iters     = int(n_mppi_iters),
+            n_lbfgs_iters    = int(n_lbfgs_iters),
+            m_lbfgs          = int(m_lbfgs),
+            sigma            = np.float32(sigma),
+            mppi_temperature = np.float32(mppi_temperature),
+            pos_weight       = np.float32(pos_weight),
+            ori_weight       = np.float32(ori_weight),
+            eps_pos          = np.float32(eps_pos),
+            eps_ori          = np.float32(eps_ori),
+            enable_collision = int(bool(enable_collision)),
+            collision_weight = np.float32(collision_weight),
+            collision_margin = np.float32(collision_margin),
+        )
+
+    cfgs, errs = constant_wrt_autodiff(_run)(*_ops)
     return cfgs, errs

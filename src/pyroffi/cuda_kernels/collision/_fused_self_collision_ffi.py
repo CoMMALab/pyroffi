@@ -94,7 +94,11 @@ def fused_self_collision(cfg, robot_buffers, static):
             from :func:`static_arrays`.
 
     Returns:
-        ``[B, P]`` signed distances per active link pair.
+        ``(dist[B, P], min_z[B])`` — signed distances per active link pair, and
+        the lowest point reached by any sphere. ``min_z`` rides along because
+        the kernel has already placed every sphere; computing it caller-side
+        means a second FK, which measured more expensive than this entire
+        kernel. Compare it against a floor height for a clearance test.
     """
     _load_and_register()
 
@@ -108,7 +112,8 @@ def fused_self_collision(cfg, robot_buffers, static):
 
     call = jax.ffi.ffi_call(
         "fused_self_collision",
-        jax.ShapeDtypeStruct((B, P), jnp.float32),
+        (jax.ShapeDtypeStruct((B, P), jnp.float32),
+         jax.ShapeDtypeStruct((B,), jnp.float32)),
         vmap_method="sequential",
     )
     return call(

@@ -72,6 +72,14 @@ namespace ffi = xla::ffi;
  * link_start    [N + 1]  CSR offsets into the per-link sphere runs
  * pair_i/pair_j [P]      active self-collision link pairs
  * out           [B, P]   minimum signed distance per pair
+ * min_z         [B]      lowest point on any sphere, min over K of (z - r)
+ *
+ * ``min_z`` exists so a floor-clearance test does not need a second FK. The
+ * caller's alternative is a separate FK pass in JAX purely to place spheres and
+ * reduce their lowest point, which measured 3.47 ms against this kernel's total
+ * 1.93 ms at B=61440 -- the redundant FK cost more than the collision check it
+ * accompanied. Here the transforms are already in shared memory and every
+ * sphere is already being walked, so the extra reduction is close to free.
  */
 static __global__ __launch_bounds__(64, 4)
 void fused_self_collision_kernel(
@@ -90,6 +98,7 @@ void fused_self_collision_kernel(
     const int*   __restrict__ pair_i,
     const int*   __restrict__ pair_j,
     float*       __restrict__ out,
+    float*       __restrict__ min_z,
     int B, int n_joints, int n_act, int N_links, int P)
 {
     // Link transforms for this thread's configuration, wxyz_xyz per link.
@@ -118,6 +127,22 @@ void fused_self_collision_kernel(
     for (int p = 0; p < P; ++p)
         out[(size_t)b * P + p] = self_collision_pair_dist(
             T, sph_local, link_start, link_joint, pair_i[p], pair_j[p]);
+
+    // --- Lowest sphere point, from the transforms already in shared memory.
+    // Links with no spheres contribute nothing (their CSR run is empty), and a
+    // model with no spheres at all leaves +inf, which no floor test rejects.
+    const float IDENTITY_TF_S[7] = {1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    float lowest = INFINITY;
+    for (int n = 0; n < N_links; ++n) {
+        const int jn = link_joint[n];
+        const float* Tn = (jn >= 0) ? T + (size_t)jn * 7 : IDENTITY_TF_S;
+        for (int a = link_start[n]; a < link_start[n + 1]; ++a) {
+            float c[3];
+            apply_se3_point(Tn, sph_local + (size_t)a * 4, c);
+            lowest = fminf(lowest, c[2] - sph_local[(size_t)a * 4 + 3]);
+        }
+    }
+    min_z[b] = lowest;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +257,8 @@ static ffi::Error FusedSelfCollisionImpl(
     ffi::Buffer<ffi::DataType::S32> link_joint,
     ffi::Buffer<ffi::DataType::S32> pair_i,
     ffi::Buffer<ffi::DataType::S32> pair_j,
-    ffi::Result<ffi::Buffer<ffi::DataType::F32>> out)
+    ffi::Result<ffi::Buffer<ffi::DataType::F32>> out,
+    ffi::Result<ffi::Buffer<ffi::DataType::F32>> min_z)
 {
     const auto d = cfg.dimensions();
     if (d.size() != 2)
@@ -265,7 +291,8 @@ static ffi::Error FusedSelfCollisionImpl(
         topo_inv.typed_data(), sph_local.typed_data(),
         link_start.typed_data(), link_joint.typed_data(),
         pair_i.typed_data(), pair_j.typed_data(),
-        out->typed_data(), B, n_joints, n_act, N_links, P);
+        out->typed_data(), min_z->typed_data(),
+        B, n_joints, n_act, N_links, P);
 
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess)
@@ -291,7 +318,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // link_joint
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // pair_i
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // pair_j
-        .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out
+        .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out   [B, P]
+        .Ret<ffi::Buffer<ffi::DataType::F32>>()  // min_z [B]
 );
 
 // ---------------------------------------------------------------------------
