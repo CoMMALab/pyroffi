@@ -870,7 +870,7 @@ def hjcd_solve_cuda(
     target_poses: jaxlie.SE3 | tuple,
     rng_key: Array,
     previous_cfg: Float[Array, "n_act"],
-    num_seeds: int = 1024,
+    num_seeds: int = 1024   # NOTE: the batch entry point defaults to 32 -- see below,
     coarse_max_iter: int = 20,
     lm_max_iter: int = 40,
     epsilon: float = 0.02,
@@ -964,6 +964,14 @@ def hjcd_solve_cuda(
 
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
+    
+    .. warning::
+        ``num_seeds`` defaults to **1024** here but to **32** in
+        :func:`hjcd_solve_cuda_batch`. Every other solver in the suite uses 32
+        on both. Comparing the two entry points at their defaults therefore
+        compares 1024 seeds against 32 and makes the batch path look ~5pp worse
+        on pose success -- which is a seed-count difference, not a batch defect.
+        Pass ``num_seeds`` explicitly whenever you compare them.
     """
     # Detached for the kernel; the live `robot` reaches the implicit rule,
     # which is what carries dq*/dtheta. See detached_robot.
@@ -1440,6 +1448,10 @@ def hjcd_solve_cuda_batch(
 
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
+    
+    .. warning::
+        ``num_seeds`` defaults to **32** here but to **1024** in
+        :func:`hjcd_solve_cuda`. See the note there before comparing the two.
     """
     # Detached for the kernel; the live `robot` reaches the implicit rule,
     # which is what carries dq*/dtheta. See detached_robot.
