@@ -44,7 +44,7 @@ from .._robot import Robot
 from ._nullspace import project_single
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
 from ._ik_primitives import self_collision_table_arrays
-from ._batching import dispatch_vmap_to_batched
+from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _prepare_ls_collision_buffers
 
@@ -1489,43 +1489,49 @@ def hjcd_solve_cuda_batch(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
-    winners = _hjcd_solve_cuda_batch_jit(
-        robot=robot,
-        target_poses_batch=target_poses,
+    winners = sharded_batch_call(
+        _hjcd_solve_cuda_batch_jit,
+        targets=target_poses,
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
-        num_seeds=num_seeds,
-        coarse_max_iter=coarse_max_iter,
-        lm_max_iter=lm_max_iter,
-        epsilon=epsilon,
-        nu=nu,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        lambda_init=lambda_init,
-        continuity_weight=continuity_weight,
-        limit_prior_weight=limit_prior_weight,
-        kick_scale=kick_scale,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
+        broadcast=dict(
+            robot=robot,
+            epsilon=epsilon,
+            nu=nu,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            ancestor_masks=ancestor_masks,
+            target_jnts=target_jnts,
+            robot_spheres_local=robot_spheres_local,
+            robot_sphere_joint_idx=robot_sphere_joint_idx,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            self_sph_local=self_sph_local,
+            self_link_start=self_link_start,
+            self_link_joint=self_link_joint,
+            self_pair_i=self_pair_i,
+            self_pair_j=self_pair_j,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        ),
+        static=dict(
+            num_seeds=num_seeds,
+            coarse_max_iter=coarse_max_iter,
+            lm_max_iter=lm_max_iter,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            lambda_init=lambda_init,
+            limit_prior_weight=limit_prior_weight,
+            kick_scale=kick_scale,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+        ),
+        env_var='PYROFFI_HJCD_IK_PMAP_MIN',
     )
 
     # ── Post-CUDA JAX refinement with all EEs + constraints (vmapped over batch)

@@ -168,3 +168,58 @@ def run_sharded(
 
     winners = pmapped(keys, prev_sh, wxyz_sh, *broadcast_args)
     return winners.reshape(n_devices * per_device, n_act)[:n_problems]
+
+
+#: Cached pmapped bodies, keyed on the batch-jit and its STATIC configuration.
+_SHARD_CACHE: dict = {}
+
+
+def sharded_batch_call(
+    batch_jit: Callable,
+    *,
+    targets: jaxlie.SE3,
+    rng_key: Array,
+    previous_cfgs: Float[Array, "n_problems n_act"],
+    broadcast: dict,
+    static: dict,
+    env_var: str | None = None,
+):
+    """Run a batched solver, sharded across local GPUs when that pays.
+
+    Falls through to a plain call when sharding is not worth it, so callers do
+    not branch: one call site, and `sharding_enabled` decides.
+
+    The split between ``broadcast`` and ``static`` is the part that must be got
+    right. ``broadcast`` holds ARRAYS -- robot model, collision buffers, per-EE
+    masks, constraint weights and args -- and they are passed as pmap arguments
+    with ``in_axes=None``. It is tempting to close over them instead, which
+    reads more simply, but pmap traces once and a closed-over concrete array
+    becomes a compile-time CONSTANT: change the world geometry between calls and
+    the sharded path would keep solving against the old obstacles, silently.
+    ``static`` holds only hashable configuration, which is safe to close over
+    and is what keys the cache.
+
+    That is the same hazard that made the projector's first compiled cache
+    return stale answers, and the same one that makes ``robot`` a broadcast
+    argument here rather than a captured one.
+    """
+    n_devices = jax.local_device_count()
+    n_problems = previous_cfgs.shape[0]
+
+    if not sharding_enabled(n_problems, n_devices, env_var):
+        return batch_jit(target_poses_batch=targets, rng_key=rng_key,
+                         previous_cfgs=previous_cfgs, **broadcast, **static)
+
+    names = tuple(broadcast)
+    key = (batch_jit, names, tuple(sorted(static.items(), key=lambda kv: kv[0])))
+    pmapped = _SHARD_CACHE.get(key)
+    if pmapped is None:
+        def _body(rng, prev, target_wxyz, *values):
+            return batch_jit(
+                target_poses_batch=jaxlie.SE3(target_wxyz),
+                rng_key=rng, previous_cfgs=prev,
+                **dict(zip(names, values)), **static)
+        pmapped = _SHARD_CACHE[key] = make_sharded_pmap(_body, len(names))
+
+    return run_sharded(pmapped, targets, rng_key, previous_cfgs, n_devices,
+                       *(broadcast[n] for n in names))
