@@ -312,7 +312,8 @@ def analytic_ik_solve_cuda_batch(
             _robot_k, ee, _tgt_k, prev, num_seeds, err_tol,
             collision_checker, collision_world, respect_limits)
 
-    return differentiable_ik_solution_batch(q, robot, (ee,), target_poses)
+    return differentiable_ik_solution_batch(q, robot, (ee,), target_poses,
+                                           cfg_ref=prev)
 
 
 def _collision_arrays(checker):

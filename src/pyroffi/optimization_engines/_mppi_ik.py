@@ -1348,5 +1348,5 @@ def mppi_ik_solve_cuda_batch(
         env_var='PYROFFI_MPPI_IK_PMAP_MIN',
     )
     return differentiable_ik_solution_batch(
-        winners, robot, target_link_indices, target_poses
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs
     )

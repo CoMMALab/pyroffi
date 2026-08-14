@@ -1579,5 +1579,5 @@ def hjcd_solve_cuda_batch(
         )(winners, target_poses.wxyz_xyz)
 
     return differentiable_ik_solution_batch(
-        winners, robot, target_link_indices, target_poses
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs
     )

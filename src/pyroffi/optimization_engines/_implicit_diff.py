@@ -30,6 +30,8 @@ wrapped.
 
 from __future__ import annotations
 
+import os as _os
+
 from collections.abc import Sequence
 
 import jax
@@ -248,11 +250,47 @@ def _active_constraint_grads(q_star, robot, checker, world, margin):
     return jnp.where(active[:, None], J, 0.0)
 
 
+#: Canonicalise batched solutions by default, making their derivatives EXACT.
+#:
+#: Without this the returned q* is whatever point of the self-motion manifold
+#: the solver's seed and iteration path happened to reach, and no closed-form
+#: rule can differentiate that -- the old gradient was ~80% wrong against finite
+#: differences on a panda. Canonicalising pins q* to the manifold point nearest
+#: cfg_ref, which makes it a function of (target, cfg_ref) alone.
+#:
+#: Cost is fine: MEASURED at ~43 ms flat on one A5000 (1.6x the solve at B=64,
+#: 1.16x at B=256, 0.48x at B=1024 -- it stops mattering as the batch grows).
+#:
+#: OFF by default anyway, because canonicalisation is BLIND TO OBSTACLES. The
+#: null-space walk holds the end-effector pose but knows nothing about
+#: collision, so it slides straight into geometry the solver had avoided.
+#: MEASURED on the cuRobo parity set (256 problems, panda + a 0.24 m box):
+#:
+#:                  BOTH    pose    free   self-coll  world-coll
+#:     mppi  off    96.9%   96.9%  100.0%     0.0%        0.0%
+#:     mppi  on     92.2%  100.0%   92.2%     1.6%        6.2%
+#:
+#: Pose IMPROVES (canonicalisation Newton-refines onto the manifold, and it
+#: lifted hjcd from 92.2% to 100%), but collision-freeness -- the property that
+#: distinguishes this suite from cuRobo, which self-collides on 2.3% -- is lost.
+#: Trading a hard guarantee for a correct gradient is not a trade to make
+#: silently.
+#:
+#: Enable with PYROFFI_CANONICAL_IK=1 when you need exact derivatives and are
+#: not relying on the collision guarantee. Making this the default requires a
+#: collision-aware canonicaliser: the canonical problem must carry the
+#: collision constraints too -- min ||q - q_ref||^2 s.t. r = 0 AND the collision
+#: rows -- with the KKT rule extended to the active set.
+CANONICAL_BY_DEFAULT = _os.environ.get("PYROFFI_CANONICAL_IK", "0") != "0"
+
+
 def differentiable_ik_solution_batch(
     q_stars: Float[Array, "n_problems n_act"],
     robot: Robot,
     target_link_indices: int | Sequence[int],
     target_poses,
+    cfg_ref: Float[Array, "n_problems n_act"] | None = None,
+    canonical: bool | None = None,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched :func:`differentiable_ik_solution`.
 
@@ -275,6 +313,14 @@ def differentiable_ik_solution_batch(
     # which is why the single-problem path, where the cut sits directly on the
     # solver output, worked all along.
     q_stars = jax.lax.stop_gradient(q_stars)
+
+    # Canonicalise first when we have a reference to canonicalise TOWARD. This
+    # replaces the whole rule below: the KKT sensitivity of the well-posed
+    # problem is exact, where differentiating r = 0 alone is not.
+    if (CANONICAL_BY_DEFAULT if canonical is None else canonical) and cfg_ref is not None:
+        from ._canonical_ik import canonical_ik
+        return canonical_ik(q_stars, jax.lax.stop_gradient(cfg_ref), robot,
+                            target_link_indices, target_poses)
 
     # ONE kernel launch for the whole batch's task Jacobians, instead of a
     # per-element jax.jacobian inside the vmap. This is the GRiD arrangement:
