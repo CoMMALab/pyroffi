@@ -105,20 +105,25 @@ def dispatch_vmap_to_batched(single_call: Callable, batched_call: Callable) -> C
 PMAP_MIN_PROBLEMS_DEFAULT = 512
 
 
-def sharding_enabled(n_problems: int, n_devices: int, env_var: str | None = None) -> bool:
+def sharding_enabled(n_problems: int, n_devices: int, env_var: str | None = None,
+                     min_problems: int | None = None) -> bool:
     """Shard only when it actually helps: >1 GPU and a compute-bound batch.
 
     A small batch spends more time padding, splitting and gathering than it
     saves by dividing the solve, so the threshold is a real cutoff rather than
     caution. `env_var` names an override so a solver whose per-problem cost
-    differs can be tuned without touching this.
+    differs can be tuned without touching this, and `min_problems` sets a
+    per-solver default for one whose crossover is simply elsewhere: a fast
+    solver amortises the fixed pmap cost over far more problems before sharding
+    pays, so a single global number cannot serve all of them.
     """
     if n_devices <= 1:
         return False
-    min_problems = PMAP_MIN_PROBLEMS_DEFAULT
+    if min_problems is None:
+        min_problems = PMAP_MIN_PROBLEMS_DEFAULT
     if env_var is not None:
         try:
-            min_problems = int(_os.environ.get(env_var, PMAP_MIN_PROBLEMS_DEFAULT))
+            min_problems = int(_os.environ.get(env_var, min_problems))
         except ValueError:
             pass
     return n_problems >= max(n_devices, min_problems)

@@ -92,6 +92,10 @@ from ._ls_ik import ls_ik_solve as ls_ik_solve
 from ._ls_ik import ls_ik_solve_cuda as ls_ik_solve_cuda
 from ._sqp_ik import sqp_ik_solve as sqp_ik_solve
 from ._sqp_ik import sqp_ik_solve_cuda as sqp_ik_solve_cuda
+from ._analytic_ik import (
+    analytic_ik_solve_cuda as analytic_ik_solve_cuda,
+    analytic_ik_solve_cuda_batch as analytic_ik_solve_cuda_batch,
+)
 from ._nullspace import (
     NullspaceResult as NullspaceResult,
     project_onto_constraints as project_onto_constraints,
