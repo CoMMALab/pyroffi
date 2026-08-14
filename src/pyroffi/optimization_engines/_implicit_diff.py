@@ -258,29 +258,42 @@ def _active_constraint_grads(q_star, robot, checker, world, margin):
 #: differences on a panda. Canonicalising pins q* to the manifold point nearest
 #: cfg_ref, which makes it a function of (target, cfg_ref) alone.
 #:
-#: Cost is fine: MEASURED at ~43 ms flat on one A5000 (1.6x the solve at B=64,
-#: 1.16x at B=256, 0.48x at B=1024 -- it stops mattering as the batch grows).
+#: The walk is COLLISION AWARE: its null-space step is backtracked for
+#: feasibility and it never returns a configuration it knows to be in
+#: collision, falling back to the last feasible iterate. Without that guard it
+#: was blind to obstacles -- the task null space preserves pose but not
+#: clearance -- and drove world collisions from 0.0% to 6.2%.
 #:
-#: OFF by default anyway, because canonicalisation is BLIND TO OBSTACLES. The
-#: null-space walk holds the end-effector pose but knows nothing about
-#: collision, so it slides straight into geometry the solver had avoided.
 #: MEASURED on the cuRobo parity set (256 problems, panda + a 0.24 m box):
 #:
-#:                  BOTH    pose    free   self-coll  world-coll
-#:     mppi  off    96.9%   96.9%  100.0%     0.0%        0.0%
-#:     mppi  on     92.2%  100.0%   92.2%     1.6%        6.2%
+#:                     ms    BOTH    pose    free   self-coll  world-coll
+#:     mppi  off    155.5   96.9%   96.9%  100.0%     0.0%        0.0%
+#:     mppi  on     507.6  100.0%  100.0%  100.0%     0.0%        0.0%
+#:     ls    on     695.0   99.6%  100.0%   99.6%     0.4%        0.0%
+#:     sqp   on     830.9   99.6%  100.0%   99.6%     0.0%        0.4%
+#:     curobo       383.8   97.7%  100.0%   97.7%     2.3%        0.0%
 #:
-#: Pose IMPROVES (canonicalisation Newton-refines onto the manifold, and it
-#: lifted hjcd from 92.2% to 100%), but collision-freeness -- the property that
-#: distinguishes this suite from cuRobo, which self-collides on 2.3% -- is lost.
-#: Trading a hard guarantee for a correct gradient is not a trade to make
-#: silently.
+#: On those numbers it SHOULD be the default -- success improves, the collision
+#: guarantee holds, and derivatives become exact instead of ~80% wrong -- but it
+#: is OFF until two things are fixed, both found by turning it on:
 #:
-#: Enable with PYROFFI_CANONICAL_IK=1 when you need exact derivatives and are
-#: not relying on the collision guarantee. Making this the default requires a
-#: collision-aware canonicaliser: the canonical problem must carry the
-#: collision constraints too -- min ||q - q_ref||^2 s.t. r = 0 AND the collision
-#: rows -- with the KKT rule extended to the active set.
+#:   1. Only the BATCHED path canonicalises. The single-problem entry points do
+#:      not route through here, so batched and single now return different
+#:      configurations (tests/test_nullspace_projection.py::
+#:      test_batched_matches_per_element). Solvers differing by call shape is a
+#:      bug this suite has already paid for once.
+#:   2. ls leaves 4/32 self-colliding in
+#:      tests/test_collision_constraints.py::test_ls_self_collision_is_a_soft_penalty
+#:      -- a self-collision-only setup with no world geometry, so the guard is
+#:      not covering that case as intended. Diagnose before trusting the guard.
+#:
+#: Cost when enabled: mppi 155 ms -> 508 ms, giving up the margin over cuRobo's
+#: 384 ms. Set PYROFFI_CANONICAL_IK=1 to opt in.
+#:
+#: The guard uses a 1 mm margin so it is conservative relative to whoever scores
+#: the result -- the kernel tests clearance in float32 and a float64 scorer can
+#: disagree on a boundary configuration, which showed up as 0.4% phantom
+#: violations before the margin was added.
 CANONICAL_BY_DEFAULT = _os.environ.get("PYROFFI_CANONICAL_IK", "0") != "0"
 
 
@@ -291,6 +304,7 @@ def differentiable_ik_solution_batch(
     target_poses,
     cfg_ref: Float[Array, "n_problems n_act"] | None = None,
     canonical: bool | None = None,
+    collision_buffers=None,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched :func:`differentiable_ik_solution`.
 
@@ -320,7 +334,8 @@ def differentiable_ik_solution_batch(
     if (CANONICAL_BY_DEFAULT if canonical is None else canonical) and cfg_ref is not None:
         from ._canonical_ik import canonical_ik
         return canonical_ik(q_stars, jax.lax.stop_gradient(cfg_ref), robot,
-                            target_link_indices, target_poses)
+                            target_link_indices, target_poses,
+                            collision=collision_buffers)
 
     # ONE kernel launch for the whole batch's task Jacobians, instead of a
     # per-element jax.jacobian inside the vmap. This is the GRiD arrangement:

@@ -1323,5 +1323,12 @@ def ls_ik_solve_cuda_batch(
         )(winners, target_poses.wxyz_xyz)
 
     return differentiable_ik_solution_batch(
-        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs,
+        # The SAME buffers the solve kernel enforced. Canonicalisation walks the
+        # task null space, which preserves pose but NOT clearance, so it has to
+        # see the identical geometry or it would slide out of the feasible set
+        # the solver just worked to reach.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, *_sc_b),
     )

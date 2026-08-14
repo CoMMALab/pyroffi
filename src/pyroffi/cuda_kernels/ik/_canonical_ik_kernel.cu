@@ -41,6 +41,7 @@
  */
 
 #include "_ik_cuda_helpers.cuh"
+#include "_collision_cuda_helpers.cuh"
 
 #include <xla/ffi/api/ffi.h>
 #include <cuda_runtime.h>
@@ -97,8 +98,21 @@ __global__ void canonical_ik_kernel(
     const int*   __restrict__ target_jnts,
     const int*   __restrict__ ancestor_masks,
     const float* __restrict__ target_Ts,   // (n_problems, n_ee, 7)
+    const float* __restrict__ robot_spheres_local,
+    const int*   __restrict__ robot_sphere_joint_idx,
+    const float* __restrict__ world_spheres,
+    const float* __restrict__ world_capsules,
+    const float* __restrict__ world_boxes,
+    const float* __restrict__ world_halfspaces,
+    const float* __restrict__ self_sph_local,
+    const int*   __restrict__ self_link_start,
+    const int*   __restrict__ self_link_joint,
+    const int*   __restrict__ self_pair_i,
+    const int*   __restrict__ self_pair_j,
+    int n_robot_spheres, int n_world_spheres, int n_world_capsules,
+    int n_world_boxes, int n_world_halfspaces, int n_self_pairs,
     int n_problems, int n_joints, int n_act, int n_ee,
-    int max_iters, float step, float tol, float damping,
+    int max_iters, float step, float tol, float damping, float collision_margin,
     float* __restrict__ out_q,             // (n_problems, n_act)
     int*   __restrict__ out_iters)         // (n_problems,)
 {
@@ -116,6 +130,51 @@ __global__ void canonical_ik_kernel(
         q[a]    = cfgs[(size_t)p * n_act + a];
         qref[a] = cfg_refs[(size_t)p * n_act + a];
     }
+
+    // Minimum signed clearance over every active constraint, margin included.
+    // Feasible is >= 0. This is the SAME geometry the IK solvers enforce, so a
+    // configuration this call accepts is one they would also call collision
+    // free -- the two cannot drift apart into disagreeing about feasibility.
+    auto min_clearance = [&](const float* Tw) -> float {
+        float best = 1e9f;
+        if (n_self_pairs > 0) {
+            best = fminf(best, self_collision_min_dist(
+                Tw, self_sph_local, self_link_start, self_link_joint,
+                self_pair_i, self_pair_j, n_self_pairs) - collision_margin);
+        }
+        for (int i = 0; i < n_robot_spheres; i++) {
+            const int jidx = robot_sphere_joint_idx[i];
+            if (jidx < 0 || jidx >= n_joints) continue;
+            const float* sp = robot_spheres_local + i * 4;
+            const float local_p[3] = {sp[0], sp[1], sp[2]};
+            float c[3];
+            apply_se3_point(Tw + (size_t)jidx * 7, local_p, c);
+            const float rr = sp[3];
+            for (int k = 0; k < n_world_spheres; k++)
+                best = fminf(best, world_prim_dist(c, rr, kWorldSphere, world_spheres + k * 4) - collision_margin);
+            for (int k = 0; k < n_world_capsules; k++)
+                best = fminf(best, world_prim_dist(c, rr, kWorldCapsule, world_capsules + k * 7) - collision_margin);
+            for (int k = 0; k < n_world_boxes; k++)
+                best = fminf(best, world_prim_dist(c, rr, kWorldBox, world_boxes + k * 15) - collision_margin);
+            for (int k = 0; k < n_world_halfspaces; k++)
+                best = fminf(best, world_prim_dist(c, rr, kWorldHalfspace, world_halfspaces + k * 6) - collision_margin);
+        }
+        return best;
+    };
+
+    const bool guard = (n_self_pairs > 0) || (n_robot_spheres > 0 &&
+        (n_world_spheres + n_world_capsules + n_world_boxes + n_world_halfspaces) > 0);
+
+    float q_try[MAX_ACT], T_try[MAX_JOINTS * 7];
+
+    // Last iterate known to be feasible, so canonicalisation can never hand
+    // back something WORSE than what it was given. The null-space step is
+    // backtracked for feasibility, but the pose term is not -- it must be free
+    // to restore r = 0 -- so a problem that starts infeasible, or one whose
+    // pose correction crosses an obstacle, could otherwise drift out of the
+    // feasible set the solver had reached.
+    float q_feas[MAX_ACT];
+    bool have_feas = false;
 
     int used = max_iters;
     for (int it = 0; it < max_iters; it++) {
@@ -155,23 +214,76 @@ __global__ void canonical_ik_kernel(
         }
         canon_chol_solve(G, Jw, m);
 
-        float step_sq = 0.0f;
+        float dp_v[MAX_ACT], dn_v[MAX_ACT];
         for (int a = 0; a < n_act; a++) {
             float dp = 0.0f, dn = 0.0f;
             for (int i = 0; i < m; i++) {
                 dp -= J[i * n_act + a] * y[i];
                 dn -= J[i * n_act + a] * Jw[i];
             }
-            dn += w[a];
-            const float d = dp + step * dn;
+            dn_v[a] = dn + w[a];
+            dp_v[a] = dp;
+        }
+
+        // COLLISION-AWARE STEP. The walk moves only in the task null space, so
+        // the end-effector pose is preserved exactly -- but the null space of
+        // the POSE constraint is not the null space of the COLLISION
+        // constraints. Self-motion swings the elbow and wrist, which is exactly
+        // what clearance depends on, so an unguarded walk slides into geometry
+        // the solver had avoided (measured: world collisions 0.0% -> 6.2% on
+        // the cuRobo parity set).
+        //
+        // The null-space component is therefore backtracked until it keeps the
+        // configuration feasible. The pose term is never scaled -- giving up
+        // pose to gain clearance is the solver's job, not this one's -- and if
+        // no fraction is admissible the null-space move is simply dropped for
+        // this iteration, leaving q where it already was: feasible.
+        float scale = 1.0f;
+        if (guard) {
+            for (int t = 0; t < 6; t++) {
+                for (int a = 0; a < n_act; a++)
+                    q_try[a] = q[a] + dp_v[a] + step * scale * dn_v[a];
+                fk_single(q_try, twists, parent_tf, parent_idx, act_idx,
+                          mimic_mul, mimic_off, mimic_act_idx, topo_inv,
+                          T_try, n_joints, n_act);
+                if (min_clearance(T_try) >= 0.0f) break;
+                scale *= 0.5f;
+                if (t == 5) scale = 0.0f;
+            }
+        }
+
+        float step_sq = 0.0f;
+        for (int a = 0; a < n_act; a++) {
+            const float d = dp_v[a] + step * scale * dn_v[a];
             q[a] += d;
             step_sq += d * d;
+        }
+
+        if (guard) {
+            fk_single(q, twists, parent_tf, parent_idx, act_idx,
+                      mimic_mul, mimic_off, mimic_act_idx, topo_inv,
+                      T_try, n_joints, n_act);
+            if (min_clearance(T_try) >= 0.0f) {
+                for (int a = 0; a < n_act; a++) q_feas[a] = q[a];
+                have_feas = true;
+            }
         }
 
         // Early exit. The JAX version ran a FIXED count and so both wasted work
         // on easy problems and silently failed to converge on hard ones at large
         // batch (|r| degraded to 1.8e-2 at B=1024).
         if (step_sq < tol * tol) { used = it + 1; break; }
+    }
+
+    // Return the walked point only if it is feasible; otherwise the last
+    // feasible one seen. Never a configuration this kernel knows is in
+    // collision -- that would trade the suite's hard guarantee for a gradient.
+    if (guard && have_feas) {
+        fk_single(q, twists, parent_tf, parent_idx, act_idx,
+                  mimic_mul, mimic_off, mimic_act_idx, topo_inv,
+                  T_try, n_joints, n_act);
+        if (min_clearance(T_try) < 0.0f)
+            for (int a = 0; a < n_act; a++) q[a] = q_feas[a];
     }
 
     for (int a = 0; a < n_act; a++) out_q[(size_t)p * n_act + a] = q[a];
@@ -197,10 +309,22 @@ static ffi::Error CanonicalIkImpl(
     ffi::Buffer<ffi::DataType::S32> target_jnts,
     ffi::Buffer<ffi::DataType::S32> ancestor_masks,
     ffi::Buffer<ffi::DataType::F32> target_Ts,
+    ffi::Buffer<ffi::DataType::F32> robot_spheres_local,
+    ffi::Buffer<ffi::DataType::S32> robot_sphere_joint_idx,
+    ffi::Buffer<ffi::DataType::F32> world_spheres,
+    ffi::Buffer<ffi::DataType::F32> world_capsules,
+    ffi::Buffer<ffi::DataType::F32> world_boxes,
+    ffi::Buffer<ffi::DataType::F32> world_halfspaces,
+    ffi::Buffer<ffi::DataType::F32> self_sph_local,
+    ffi::Buffer<ffi::DataType::S32> self_link_start,
+    ffi::Buffer<ffi::DataType::S32> self_link_joint,
+    ffi::Buffer<ffi::DataType::S32> self_pair_i,
+    ffi::Buffer<ffi::DataType::S32> self_pair_j,
     int64_t max_iters,
     float   step,
     float   tol,
     float   damping,
+    float   collision_margin,
     ffi::Result<ffi::Buffer<ffi::DataType::F32>> out_q,
     ffi::Result<ffi::Buffer<ffi::DataType::S32>> out_iters)
 {
@@ -225,8 +349,20 @@ static ffi::Error CanonicalIkImpl(
         mimic_act_idx.typed_data(), topo_inv.typed_data(),
         target_jnts.typed_data(), ancestor_masks.typed_data(),
         target_Ts.typed_data(),
+        robot_spheres_local.typed_data(), robot_sphere_joint_idx.typed_data(),
+        world_spheres.typed_data(), world_capsules.typed_data(),
+        world_boxes.typed_data(), world_halfspaces.typed_data(),
+        self_sph_local.typed_data(), self_link_start.typed_data(),
+        self_link_joint.typed_data(), self_pair_i.typed_data(),
+        self_pair_j.typed_data(),
+        static_cast<int>(robot_spheres_local.dimensions()[0]),
+        static_cast<int>(world_spheres.dimensions()[0]),
+        static_cast<int>(world_capsules.dimensions()[0]),
+        static_cast<int>(world_boxes.dimensions()[0]),
+        static_cast<int>(world_halfspaces.dimensions()[0]),
+        static_cast<int>(self_pair_i.dimensions()[0]),
         n_problems, n_joints, n_act, n_ee,
-        static_cast<int>(max_iters), step, tol, damping,
+        static_cast<int>(max_iters), step, tol, damping, collision_margin,
         out_q->typed_data(), out_iters->typed_data());
 
     cudaError_t e = cudaGetLastError();
@@ -252,9 +388,21 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // target_jnts
         .Arg<ffi::Buffer<ffi::DataType::S32>>()  // ancestor_masks
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // target_Ts
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // robot_spheres_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // robot_sphere_joint_idx
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_spheres
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_capsules
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_boxes
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world_halfspaces
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // self_sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_link_joint
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_i
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // self_pair_j
         .Attr<int64_t>("max_iters")
         .Attr<float>("step")
         .Attr<float>("tol")
         .Attr<float>("damping")
+        .Attr<float>("collision_margin")
         .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out_q
         .Ret<ffi::Buffer<ffi::DataType::S32>>()); // out_iters

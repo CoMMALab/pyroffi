@@ -1579,5 +1579,11 @@ def hjcd_solve_cuda_batch(
         )(winners, target_poses.wxyz_xyz)
 
     return differentiable_ik_solution_batch(
-        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs,
+        # The SAME buffers the solve kernel enforced -- canonicalisation walks
+        # the task null space, which preserves pose but NOT clearance.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, self_sph_local, self_link_start,
+                           self_link_joint, self_pair_i, self_pair_j),
     )

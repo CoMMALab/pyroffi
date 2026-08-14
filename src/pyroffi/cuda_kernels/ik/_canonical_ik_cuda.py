@@ -58,12 +58,22 @@ def canonicalize_cuda(
     target_jnts,
     ancestor_masks,
     target_Ts,
+    collision=None,
     max_iters: int = 400,
     step: float = 0.05,
     tol: float = 1e-5,
     damping: float = 1e-9,
+    collision_margin: float = 1e-3,
 ):
     """``(q_canon, iters_used)``, both with a leading problem axis.
+
+    ``collision_margin`` defaults to 1 mm rather than 0 so the guard is
+    CONSERVATIVE relative to whoever scores the result. The kernel tests
+    clearance in float32; a scorer using the JAX collision model at float64 can
+    disagree on a configuration sitting exactly on the boundary, and that
+    disagreement showed up as 0.4% self / 0.4% world violations that the guard
+    believed it had avoided. A margin wider than the discrepancy removes the
+    whole class.
 
     ``tol`` is on the STEP norm and defaults to 1e-5, not something tighter:
     the kernel is float32, so a smaller threshold is unreachable and the loop
@@ -81,6 +91,11 @@ def canonicalize_cuda(
     n_problems, n_act = cfgs.shape
     n_ee = int(np.shape(target_jnts)[0])
 
+    # Empty buffers read as "no constraint of this kind", matching how the IK
+    # solve kernels disable collision, so an unguarded call costs nothing.
+    if collision is None:
+        collision = empty_collision_buffers()
+
     ops = (
         cfgs,
         jnp.asarray(cfg_refs, jnp.float32),
@@ -88,6 +103,7 @@ def canonicalize_cuda(
         jnp.asarray(target_jnts, jnp.int32),
         jnp.asarray(ancestor_masks, jnp.int32),
         jnp.asarray(target_Ts, jnp.float32).reshape(n_problems, n_ee, 7),
+        *collision,
     )
 
     return jax.ffi.ffi_call(
@@ -102,4 +118,22 @@ def canonicalize_cuda(
         step=np.float32(step),
         tol=np.float32(tol),
         damping=np.float32(damping),
+        collision_margin=np.float32(collision_margin),
+    )
+
+
+def empty_collision_buffers():
+    """The 11 collision buffers, all empty: the kernel then skips the guard."""
+    return (
+        jnp.zeros((0, 4), jnp.float32),   # robot_spheres_local
+        jnp.zeros((0,), jnp.int32),       # robot_sphere_joint_idx
+        jnp.zeros((0, 4), jnp.float32),   # world_spheres
+        jnp.zeros((0, 7), jnp.float32),   # world_capsules
+        jnp.zeros((0, 15), jnp.float32),  # world_boxes
+        jnp.zeros((0, 6), jnp.float32),   # world_halfspaces
+        jnp.zeros((0, 4), jnp.float32),   # self_sph_local
+        jnp.zeros((1,), jnp.int32),       # self_link_start
+        jnp.zeros((1,), jnp.int32),       # self_link_joint
+        jnp.zeros((0,), jnp.int32),       # self_pair_i
+        jnp.zeros((0,), jnp.int32),       # self_pair_j
     )

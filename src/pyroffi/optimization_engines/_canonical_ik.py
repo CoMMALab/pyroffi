@@ -88,7 +88,7 @@ CANON_POLISH = 0
 
 def canonicalize_batch(cfgs, cfg_refs, robot, link_idx, target_wxyz_xyz,
                        iters: int = CANON_ITERS, step: float = CANON_STEP,
-                       polish: int = CANON_POLISH):
+                       polish: int = CANON_POLISH, collision=None):
     """Batched canonicalisation: CUDA for the walk, JAX float64 for the finish.
 
     The pure-JAX loop is kept as a fallback and as the reference the kernel is
@@ -108,7 +108,8 @@ def canonicalize_batch(cfgs, cfg_refs, robot, link_idx, target_wxyz_xyz,
                        j.mimic_act_indices, j._topo_sort_inv)
             tj, am = _ancestor_tables(robot, link_idx)
             q, _iters = _cuda.canonicalize_cuda(
-                cfgs, cfg_refs, buffers, tj, am, targets, iters, step)
+                cfgs, cfg_refs, buffers, tj, am, targets,
+                collision=collision, max_iters=iters, step=step)
             q = jnp.asarray(q, cfgs.dtype)
         except Exception:
             q = None
@@ -229,7 +230,7 @@ def _normalize(link_idx):
 
 def canonical_ik(cfgs, cfgs_ref, robot, target_link_indices, target_poses,
                  unrolled: bool = False, iters: int = CANON_ITERS,
-                 step: float = CANON_STEP):
+                 step: float = CANON_STEP, collision=None):
     """Batched canonical IK with exact derivatives.
 
     Args:
@@ -253,7 +254,8 @@ def canonical_ik(cfgs, cfgs_ref, robot, target_link_indices, target_poses,
     # First-order path: the KKT rule only needs q_canon as a CONSTANT, so the
     # walk can run in CUDA without affecting the derivative's exactness at all.
     q_canon = jax.lax.stop_gradient(
-        canonicalize_batch(cfgs, cfgs_ref, robot, link_idx, wxyz, iters, step))
+        canonicalize_batch(cfgs, cfgs_ref, robot, link_idx, wxyz, iters, step,
+                           collision=collision))
     return jax.vmap(
         lambda q, qr, t: _attach_kkt_rule(q, qr, robot, link_idx, t)
     )(q_canon, cfgs_ref, wxyz)
