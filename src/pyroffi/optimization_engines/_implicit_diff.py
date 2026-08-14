@@ -61,6 +61,9 @@ def differentiable_ik_solution(
     robot: Robot,
     target_link_indices: int | Sequence[int],
     target_poses,
+    collision_checker=None,
+    collision_world=None,
+    collision_margin: float = 0.0,
 ) -> Float[Array, "n_act"]:
     """Attach an implicit-diff gradient w.r.t. the target pose(s) to an IK solution.
 
@@ -78,6 +81,8 @@ def differentiable_ik_solution(
         ``jax.jvp`` / ``jax.grad`` w.r.t. ``target_poses`` give ``dq*/dt``.
     """
     link_idx, target_T = _normalize_targets(target_link_indices, target_poses)
+    constraint_grads = _active_constraint_grads(
+        q_star, robot, collision_checker, collision_world, collision_margin)
     # Cut the solver's own dependence on the inputs: the gradient is supplied
     # entirely by the implicit rule below, not by unrolling the solver.
     q_star = jax.lax.stop_gradient(q_star)
@@ -137,9 +142,63 @@ def differentiable_ik_solution(
                                (robot_,), (drobot,))
             rhs = rhs + Jr_dr
         dq = -(J_q_pinv @ rhs)
+
+        # A solution held OFF-TARGET by an active collision constraint does not
+        # satisfy r(q*, t) = 0, so the rule above -- which differentiates exactly
+        # that condition -- is describing a stationarity that does not hold, and
+        # returns a confidently wrong gradient. Restricting the tangent to the
+        # null space of the ACTIVE constraint gradients is the correction: the
+        # perturbed solution has to keep those constraints satisfied, so it can
+        # only move in directions they cannot see.
+        #
+        # This is the same projector as IK path 3, applied to the tangent rather
+        # than to a configuration. It is not the full KKT sensitivity (that would
+        # solve the bordered system for the multipliers too), but it is right to
+        # first order in the constrained directions and is strictly better than
+        # ignoring the constraint, which is what happened before.
+        if constraint_grads is not None:
+            G = constraint_grads                              # (n_active, n_act)
+            GGt = G @ G.T + 1e-9 * jnp.eye(G.shape[0])
+            dq = dq - G.T @ jnp.linalg.solve(GGt, G @ dq)
         return q_s, dq.astype(out_dtype)
 
     return _ik_layer(target_T, q_star, robot)
+
+
+def _active_constraint_grads(q_star, robot, checker, world, margin):
+    """Gradients of the collision constraints ACTIVE at ``q_star``, or None.
+
+    Only constraints at their boundary restrict the tangent; an inactive one
+    leaves the solution free in that direction and must not be projected out, or
+    the gradient is over-constrained and wrong in the other direction.
+
+    Returns ``None`` when nothing is active, which is the common case and keeps
+    the unconstrained rule exactly as it was.
+    """
+    if checker is None:
+        return None
+    q = jnp.asarray(q_star, jnp.float32)[None]
+
+    def dists(qq):
+        d = [jnp.min(checker.compute_self_collision_distance(robot, qq), axis=-1)]
+        if world is not None:
+            d.append(jnp.min(
+                checker.compute_world_collision_distance(robot, qq, world
+                                                         ).reshape(qq.shape[0], -1), axis=-1))
+        return jnp.concatenate(d)
+
+    try:
+        d0 = dists(q)
+        J = jax.jacobian(lambda x: dists(x[None]))(jnp.asarray(q_star, jnp.float32))
+    except Exception:
+        # A checker that cannot be differentiated cannot constrain the tangent;
+        # say so by returning None rather than silently projecting with garbage.
+        return None
+
+    active = d0 <= margin + 1e-6
+    if not bool(jnp.any(active)):
+        return None
+    return jnp.where(active[:, None], J, 0.0)
 
 
 def differentiable_ik_solution_batch(
