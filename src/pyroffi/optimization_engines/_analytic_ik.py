@@ -59,7 +59,11 @@ from ..cuda_kernels.ik._analytic_ik_cuda import (
 )
 from ..kinematics._analytic_ik import build_geometry, default_err_tol, default_q7_samples
 from ._batching import make_sharded_pmap, run_sharded, sharding_enabled
-from ._implicit_diff import detached_robot, differentiable_ik_solution
+from ._implicit_diff import (
+    detached_robot,
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 
 #: Geometry blobs keyed on (robot identity, end-effector link). Building one
 #: walks the URDF and packs 95 float64s; it depends only on the kinematic chain,
@@ -86,12 +90,41 @@ def _require_x64() -> None:
 
 
 def _geometry_for(robot: Robot, ee_link_index: int):
-    key = (id(robot), int(ee_link_index))
+    """Geometry blob for this chain, cached on a key that survives tracing.
+
+    Keyed on the LINK NAMES rather than ``id(robot)``. Under ``jax.grad`` with
+    respect to robot parameters the model arrives as tracers, a fresh object per
+    call, so an identity key misses every time -- and rebuilding is not merely
+    slow but impossible: ``build_geometry`` runs ``detect()``, a discrete
+    structural classification (which axes are concurrent), on numpy arrays. It
+    raises TracerArrayConversionError on a traced robot.
+
+    Reusing the blob under differentiation is CORRECT, not a shortcut. The
+    kernel only has to produce q*; the gradient comes from the implicit rule
+    evaluated on the pure-JAX residual with the LIVE parameters. The solver's
+    internal copy of the geometry never needs to track the perturbation -- the
+    same reason `detached_robot` exists for the iterative solvers.
+
+    Structure is not differentiable anyway: perturbing a twist does not change
+    which axes intersect, and if it did, the closed-form solution would not
+    apply at all.
+    """
+    key = (tuple(robot.links.names), int(ee_link_index))
     entry = _GEOM_CACHE.get(key)
-    if entry is None:
+    if entry is not None:
+        return entry
+    try:
         geom = build_geometry(robot, robot.links.names[int(ee_link_index)])
-        entry = _GEOM_CACHE[key] = (pack_geometry(geom), geom, robot)
-    return entry[0], entry[1]
+    except Exception as exc:                       # tracer, or a bad chain
+        raise RuntimeError(
+            "analytic IK could not build its geometry. Under jax.grad with "
+            "respect to robot parameters the model is traced and the structural "
+            "analysis cannot run on it, so the blob must already be cached: "
+            "call the solver once outside the differentiated function with the "
+            "same robot to warm it."
+        ) from exc
+    entry = _GEOM_CACHE[key] = (pack_geometry(geom), geom)
+    return entry
 
 
 def _as_matrix(target_poses: jaxlie.SE3) -> Array:
@@ -131,16 +164,19 @@ def analytic_ik_solve_cuda(
     solve addresses ONE chain, and quietly ignoring the rest would return a
     confident answer to a different question.
     """
-    # Detached for the kernel; the live `robot` reaches the implicit rule,
-    # which is what carries dq*/dtheta. See detached_robot.
-    _robot_k = detached_robot(robot)
     _require_x64()
     ee = _single_ee(target_link_indices)
     del rng_key                       # deterministic; see module docstring
 
-    targets = jax.tree.map(lambda x: x[None] if x.ndim == 1 else x, target_poses)
+    # Detached for the kernel; the LIVE robot and target reach the implicit rule
+    # below, which is what carries the gradient. Nothing with a live tangent may
+    # cross the FFI boundary or linearisation fails.
+    _robot_k = detached_robot(robot)
+    _tgt_k = jax.tree.map(jax.lax.stop_gradient, target_poses)
+
+    targets = jax.tree.map(lambda x: x[None] if x.ndim == 1 else x, _tgt_k)
     prev = None if previous_cfg is None else jnp.asarray(previous_cfg).reshape(1, -1)
-    q, _err, _found, _clr = _solve(robot, ee, targets, prev, num_seeds, err_tol,
+    q, _err, _found, _clr = _solve(_robot_k, ee, targets, prev, num_seeds, err_tol,
                                    collision_checker, collision_world, respect_limits)
     return differentiable_ik_solution(q[0], robot, (ee,), target_poses)
 
@@ -165,10 +201,14 @@ def analytic_ik_solve_cuda_batch(
     """
     # Detached for the kernel; the live `robot` reaches the implicit rule,
     # which is what carries dq*/dtheta. See detached_robot.
-    _robot_k = detached_robot(robot)
     _require_x64()
     ee = _single_ee(target_link_indices)
     del rng_key
+
+    # Detached for the kernel; the LIVE robot and target reach the implicit rule
+    # below, which is what carries the gradient.
+    _robot_k = detached_robot(robot)
+    _tgt_k = jax.tree.map(jax.lax.stop_gradient, target_poses)
 
     n_problems = target_poses.wxyz_xyz.shape[0]
     n_act = robot.joints.num_actuated_joints
@@ -218,10 +258,10 @@ def analytic_ik_solve_cuda_batch(
                         n_devices, geom_blob, q7, sph_home, sph_joint, pairs, *world)
     else:
         q, _err, _found, _clr = _solve(
-            robot, ee, target_poses, prev, num_seeds, err_tol,
+            _robot_k, ee, _tgt_k, prev, num_seeds, err_tol,
             collision_checker, collision_world, respect_limits)
 
-    return differentiable_ik_solution(q, robot, (ee,), target_poses)
+    return differentiable_ik_solution_batch(q, robot, (ee,), target_poses)
 
 
 def _collision_arrays(checker):

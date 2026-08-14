@@ -21,6 +21,8 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+
+from ...optimization_engines._batching import constant_wrt_autodiff
 import numpy as np
 
 _LIB_NAME = "_analytic_ik_cuda_lib.so"
@@ -164,27 +166,41 @@ def _analytic_ik_cuda_raw(
     world = _empty_world() if world_spheres is None else world_spheres
     w_sph, w_cap, w_box, w_hs = world
 
-    call = jax.ffi.ffi_call(
-        "analytic_ik_cuda",
-        (
-            jax.ShapeDtypeStruct((batch, 7), jnp.float32),
-            jax.ShapeDtypeStruct((batch,), jnp.float32),
-            jax.ShapeDtypeStruct((batch,), jnp.int32),
-            jax.ShapeDtypeStruct((batch,), jnp.float32),
-        ),
-        vmap_method="sequential",
-    )
-    q, err, found, clearance = call(
+    # Zero-derivative by declaration; the implicit rule supplies the real
+    # gradient. Operands positional -- see constant_wrt_autodiff.
+    # Every ARRAY is an operand, in the handler's declared order. The three
+    # collision buffers belong here, not in the keyword block: they are written
+    # with `dtype=` rather than `.astype()`, and an earlier split that keyed on
+    # the presence of "=" misfiled them as attributes. The FFI then rejected the
+    # call with "bad operands at: 5, 6, 7, 9, 10, 11" -- positions, not names,
+    # which is why it read as a dtype problem rather than a missing-argument one.
+    _ops = (
         geom_blob, targets, q7_samples, prev,
         jnp.asarray(sph_home, dtype=jnp.float64),
         jnp.asarray(sph_joint, dtype=jnp.int32),
         jnp.asarray(pairs, dtype=jnp.int32).reshape(-1, 2),
         w_sph, w_cap, w_box, w_hs,
-        respect_limits=np.int64(bool(respect_limits)),
-        use_prev=np.int64(bool(use_prev)),
-        err_tol=np.float32(err_tol),
-        margin=np.float32(margin),
     )
+
+    def _run(*ops):
+        return jax.ffi.ffi_call(
+            "analytic_ik_cuda",
+            (
+                jax.ShapeDtypeStruct((batch, 7), jnp.float32),
+                jax.ShapeDtypeStruct((batch,), jnp.float32),
+                jax.ShapeDtypeStruct((batch,), jnp.int32),
+                jax.ShapeDtypeStruct((batch,), jnp.float32),
+            ),
+            vmap_method="sequential",
+        )(
+            *ops,
+            respect_limits=np.int64(bool(respect_limits)),
+            use_prev=np.int64(bool(use_prev)),
+            err_tol=np.float32(err_tol),
+            margin=np.float32(margin),
+        )
+
+    q, err, found, clearance = constant_wrt_autodiff(_run)(*_ops)
     return q, err, found.astype(bool), clearance
 
 
