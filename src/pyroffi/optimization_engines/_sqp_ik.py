@@ -45,7 +45,12 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
 from ._ik_primitives import self_collision_table_arrays
-from ._batching import dispatch_vmap_to_batched
+from ._batching import (
+    dispatch_vmap_to_batched,
+    make_sharded_pmap,
+    run_sharded,
+    sharding_enabled,
+)
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _prepare_ls_collision_buffers
 
@@ -856,24 +861,6 @@ from functools import lru_cache as _lru_cache
 _PMAP_MIN_PROBLEMS_DEFAULT = 256
 
 
-def _sharding_enabled(n_problems: int, n_devices: int) -> bool:
-    """Shard only when it actually helps: >1 GPU and a compute-bound batch.
-
-    For small batches the per-call dispatch overhead dominates and pmap is a net
-    loss, so we require ``n_problems`` above a threshold (tunable via env).  Set
-    ``PYROFFI_SQP_IK_NO_PMAP=1`` to force the single-GPU path regardless.
-    """
-    if _os.environ.get("PYROFFI_SQP_IK_NO_PMAP", "").lower() in ("1", "true", "yes"):
-        return False
-    if n_devices <= 1:
-        return False
-    try:
-        min_problems = int(_os.environ.get("PYROFFI_SQP_IK_PMAP_MIN", _PMAP_MIN_PROBLEMS_DEFAULT))
-    except ValueError:
-        min_problems = _PMAP_MIN_PROBLEMS_DEFAULT
-    return n_problems >= max(n_devices, min_problems)
-
-
 @_lru_cache(maxsize=None)
 def _make_pmapped_batch(
     num_seeds:           int,
@@ -949,50 +936,12 @@ def _make_pmapped_batch(
     # Mapped: rng_key, previous_cfgs, target_wxyz.  Broadcast (None): everything else
     # (including constraint_args — array data, so a runtime broadcast arg rather
     # than part of the lru_cache compilation key, which must stay hashable).
-    return jax.pmap(
-        _body,
-        in_axes=(0, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
-    )
+    # Mapped: rng_key, previous_cfgs, target_wxyz. Broadcast: the remaining
+    # 17 -- robot model, collision buffers, per-EE masks, constraint
+    # weights. Those describe the robot and the world rather than the problem,
+    # so replicating them is correct and splitting them would be a bug.
+    return make_sharded_pmap(_body, 17)
 
-
-def _run_batch_sharded(
-    pmapped: Callable,
-    target_poses_batch: jaxlie.SE3,
-    rng_key: Array,
-    previous_cfgs: Float[Array, "n_problems n_act"],
-    n_devices: int,
-    *broadcast_args,
-) -> Float[Array, "n_problems n_act"]:
-    """Split the problem axis across ``n_devices`` GPUs via a cached pmap.
-
-    Pads the problem axis up to a multiple of ``n_devices`` (repeating the last
-    target — winners for the padding are discarded), reshapes the per-problem
-    arrays to ``(n_devices, per_device, ...)``, runs the cached pmapped solver,
-    then flattens and trims the result back to ``n_problems``.
-    """
-    n_problems, n_act = previous_cfgs.shape
-    pad = (-n_problems) % n_devices
-
-    wxyz_xyz = target_poses_batch.wxyz_xyz  # (n_problems, 7)
-    if pad:
-        prev_pad = jnp.broadcast_to(previous_cfgs[-1:], (pad, n_act))
-        wxyz_pad = jnp.broadcast_to(wxyz_xyz[-1:], (pad, wxyz_xyz.shape[-1]))
-        previous_cfgs = jnp.concatenate([previous_cfgs, prev_pad], axis=0)
-        wxyz_xyz = jnp.concatenate([wxyz_xyz, wxyz_pad], axis=0)
-
-    per_device = (n_problems + pad) // n_devices
-    prev_sh = previous_cfgs.reshape(n_devices, per_device, n_act)
-    wxyz_sh = wxyz_xyz.reshape(n_devices, per_device, wxyz_xyz.shape[-1])
-    keys = jax.random.split(rng_key, n_devices)  # (n_devices, 2)
-
-    winners = pmapped(keys, prev_sh, wxyz_sh, *broadcast_args)  # (n_devices, per_device, n_act)
-    winners = winners.reshape(n_devices * per_device, n_act)
-    return winners[:n_problems]
-
-
-# ---------------------------------------------------------------------------
-# Public entry point — CUDA batched
-# ---------------------------------------------------------------------------
 
 @functools.partial(
     jax.jit,
@@ -1252,7 +1201,7 @@ def sqp_ik_solve_cuda_batch(
     n_problems = previous_cfgs.shape[0]
     n_devices = jax.local_device_count()
 
-    if _sharding_enabled(n_problems, n_devices):
+    if sharding_enabled(n_problems, n_devices, 'PYROFFI_SQP_IK_PMAP_MIN'):
         # Split the problem axis across all local GPUs (embarrassingly parallel).
         # The pmapped executable is cached per static signature so the per-waypoint
         # solve loop reuses one compilation instead of re-tracing every call.
@@ -1262,15 +1211,13 @@ def sqp_ik_solve_cuda_batch(
             enable_collision, collision_weight, collision_margin,
             tuple(target_link_indices), tuple(cuda_constraint_fns),
         )
-        winners = _run_batch_sharded(
+        winners = run_sharded(
             pmapped, target_poses, rng_key, previous_cfgs, n_devices,
             robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
             robot_spheres_local, robot_sphere_joint_idx,
             world_spheres, world_capsules, world_boxes, world_halfspaces,
             self_sph_local, self_link_start, self_link_joint,
             self_pair_i, self_pair_j,
-        self_sph_local, self_link_start, self_link_joint,
-        self_pair_i, self_pair_j,
             cuda_constraint_weights, tuple(cuda_constraint_args),
         )
     else:
