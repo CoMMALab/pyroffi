@@ -47,6 +47,28 @@ Control flow is closed-loop -- fixed trip count, masked updates, a parallel step
 ladder instead of a ``break`` -- because unlike the CUDA kernels this has to stay
 traceable for ``jit``. Converged elements are masked out rather than exited, so a
 batch costs the worst element's iteration count, not the sum.
+
+Performance: JIT THIS
+---------------------
+Wrap calls in ``jax.jit``. Measured 6.8x at B=64 (4374 -> 643 ms) with
+byte-identical output.
+
+The cost is DISPATCH-BOUND, not compute-bound, which is not the obvious guess.
+Runtime is nearly flat in batch size -- 4.4 s at B=16 against 5.2 s at B=256 --
+the signature of per-operation overhead rather than per-element work. The loop
+is ``max_iter x pose_restore_iters`` deep, roughly 120 sequential steps of small
+operations, and paying dispatch on each dominates everything else.
+
+That is also why the obvious optimisations are NOT applied here: replacing
+``pinv`` with a damped least-squares solve, or shrinking the step ladder, both
+cut per-element FLOPs, which the measurement says is not where the time goes.
+
+Compiling internally was tried and REVERTED: caching the executable across calls
+bakes the first call's ``cfg``, targets and ``constraint_args`` in as closure
+constants, so later calls with new inputs get the first call's answer. Making
+that safe means threading every varying array through as an explicit argument
+rather than closing over it -- worth doing, but it is a restructure, not a
+wrapper.
 """
 
 from __future__ import annotations
@@ -62,6 +84,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _ik_residual
+
 
 #: Trial step scales evaluated in PARALLEL each iteration. Sequential
 #: backtracking needs data-dependent control flow; evaluating the whole ladder
