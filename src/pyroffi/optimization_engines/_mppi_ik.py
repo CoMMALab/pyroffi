@@ -843,6 +843,13 @@ def mppi_ik_solve_cuda(
     if isinstance(target_poses, jaxlie.SE3):
         target_poses = (target_poses,)
     target_poses_t = tuple(target_poses)
+    # The solver (CUDA FFI + post-refinement) consumes ``target_poses_t``; detach
+    # it so no tangent crosses the FFI boundary. Without this the kernel's output
+    # is UNKNOWN during linearisation and the pose gradient fails with
+    # "Linearization failed to produce known values for all output primals" --
+    # the same cut detached_robot makes for the model. The LIVE ``target_poses``
+    # still reaches the implicit rule below, which is what carries dq*/dt.
+    target_poses_t = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses_t)
 
     n_act = robot.joints.num_actuated_joints
 
