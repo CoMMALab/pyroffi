@@ -67,6 +67,10 @@ def differentiable_ik_solution(
     collision_world=None,
     collision_margin: float = 0.0,
     task_jacobian: Float[Array, "n_res n_act"] | None = None,
+    cfg_ref: Float[Array, "n_act"] | None = None,
+    canonical: bool | None = None,
+    collision_buffers=None,
+    canonical_margin: float = 0.0,
 ) -> Float[Array, "n_act"]:
     """Attach an implicit-diff gradient w.r.t. the target pose(s) to an IK solution.
 
@@ -84,6 +88,22 @@ def differentiable_ik_solution(
         ``jax.jvp`` / ``jax.grad`` w.r.t. ``target_poses`` give ``dq*/dt``.
     """
     link_idx, target_T = _normalize_targets(target_link_indices, target_poses)
+
+    # The SINGLE-problem path canonicalises through exactly the same code as the
+    # batched one, with a length-1 batch axis. Routing only the batched path was
+    # a real defect: batched and single solves returned different configurations
+    # (caught by test_batched_matches_per_element), and this suite has already
+    # paid once for a solver that behaved differently depending on call shape.
+    if (CANONICAL_BY_DEFAULT if canonical is None else canonical) and cfg_ref is not None:
+        from ._canonical_ik import canonical_ik
+        return canonical_ik(
+            jax.lax.stop_gradient(q_star)[None],
+            jax.lax.stop_gradient(jnp.asarray(cfg_ref))[None],
+            robot, target_link_indices,
+            jaxlie.SE3(target_T[None] if target_T.ndim == 2 else target_T),
+            collision=collision_buffers,
+            collision_margin=canonical_margin)[0]
+
     constraint_grads = _active_constraint_grads(
         q_star, robot, collision_checker, collision_world, collision_margin)
     # Cut the solver's own dependence on the inputs: the gradient is supplied
@@ -277,15 +297,21 @@ def _active_constraint_grads(q_star, robot, checker, world, margin):
 #: guarantee holds, and derivatives become exact instead of ~80% wrong -- but it
 #: is OFF until two things are fixed, both found by turning it on:
 #:
-#:   1. Only the BATCHED path canonicalises. The single-problem entry points do
-#:      not route through here, so batched and single now return different
-#:      configurations (tests/test_nullspace_projection.py::
-#:      test_batched_matches_per_element). Solvers differing by call shape is a
-#:      bug this suite has already paid for once.
-#:   2. ls leaves 4/32 self-colliding in
-#:      tests/test_collision_constraints.py::test_ls_self_collision_is_a_soft_penalty
-#:      -- a self-collision-only setup with no world geometry, so the guard is
-#:      not covering that case as intended. Diagnose before trusting the guard.
+#:   1. FIXED -- the single-problem path now canonicalises through exactly this
+#:      code with a length-1 batch axis, so the two call shapes cannot diverge.
+#:   2. FIXED -- the guard now holds clearance MONOTONE (never returns less than
+#:      it was given) instead of testing feasibility absolutely, and it uses the
+#:      caller's requested standoff instead of a hardcoded 1 mm.
+#:
+#: What remains is a MODEL MISMATCH that predates this work: the kernels' world
+#: collision set has 58 spheres while the checker scoring the result has 59 --
+#: the kernel drops a link with no parent joint. The guard is therefore blind to
+#: one sphere, and canonicalisation can walk until exactly that sphere becomes
+#: binding (test_world_obstacle_is_avoided_and_margin_is_respected: 0.0155 m
+#: against a requested 0.02 m). The solve kernels share the blind spot; they
+#: just do not move far enough along the manifold to expose it. Aligning the two
+#: sphere sets is the fix, and it is a change to the collision buffers rather
+#: than to canonicalisation.
 #:
 #: Cost when enabled: mppi 155 ms -> 508 ms, giving up the margin over cuRobo's
 #: 384 ms. Set PYROFFI_CANONICAL_IK=1 to opt in.
@@ -305,6 +331,7 @@ def differentiable_ik_solution_batch(
     cfg_ref: Float[Array, "n_problems n_act"] | None = None,
     canonical: bool | None = None,
     collision_buffers=None,
+    canonical_margin: float = 0.0,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched :func:`differentiable_ik_solution`.
 
@@ -335,7 +362,8 @@ def differentiable_ik_solution_batch(
         from ._canonical_ik import canonical_ik
         return canonical_ik(q_stars, jax.lax.stop_gradient(cfg_ref), robot,
                             target_link_indices, target_poses,
-                            collision=collision_buffers)
+                            collision=collision_buffers,
+                            collision_margin=canonical_margin)
 
     # ONE kernel launch for the whole batch's task Jacobians, instead of a
     # per-element jax.jacobian inside the vmap. This is the GRiD arrangement:

@@ -88,7 +88,8 @@ CANON_POLISH = 0
 
 def canonicalize_batch(cfgs, cfg_refs, robot, link_idx, target_wxyz_xyz,
                        iters: int = CANON_ITERS, step: float = CANON_STEP,
-                       polish: int = CANON_POLISH, collision=None):
+                       polish: int = CANON_POLISH, collision=None,
+                       collision_margin: float = 0.0):
     """Batched canonicalisation: CUDA for the walk, JAX float64 for the finish.
 
     The pure-JAX loop is kept as a fallback and as the reference the kernel is
@@ -109,7 +110,8 @@ def canonicalize_batch(cfgs, cfg_refs, robot, link_idx, target_wxyz_xyz,
             tj, am = _ancestor_tables(robot, link_idx)
             q, _iters = _cuda.canonicalize_cuda(
                 cfgs, cfg_refs, buffers, tj, am, targets,
-                collision=collision, max_iters=iters, step=step)
+                collision=collision, max_iters=iters, step=step,
+                collision_margin=max(float(collision_margin), 1e-3))
             q = jnp.asarray(q, cfgs.dtype)
         except Exception:
             q = None
@@ -230,7 +232,8 @@ def _normalize(link_idx):
 
 def canonical_ik(cfgs, cfgs_ref, robot, target_link_indices, target_poses,
                  unrolled: bool = False, iters: int = CANON_ITERS,
-                 step: float = CANON_STEP, collision=None):
+                 step: float = CANON_STEP, collision=None,
+                 collision_margin: float = 0.0):
     """Batched canonical IK with exact derivatives.
 
     Args:
@@ -255,7 +258,8 @@ def canonical_ik(cfgs, cfgs_ref, robot, target_link_indices, target_poses,
     # walk can run in CUDA without affecting the derivative's exactness at all.
     q_canon = jax.lax.stop_gradient(
         canonicalize_batch(cfgs, cfgs_ref, robot, link_idx, wxyz, iters, step,
-                           collision=collision))
+                           collision=collision,
+                           collision_margin=collision_margin))
     return jax.vmap(
         lambda q, qr, t: _attach_kkt_rule(q, qr, robot, link_idx, t)
     )(q_canon, cfgs_ref, wxyz)

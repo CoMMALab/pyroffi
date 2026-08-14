@@ -978,7 +978,18 @@ def ls_ik_solve_cuda(
         )
 
     return differentiable_ik_solution(
-        winner, robot, target_link_indices, target_poses
+        winner, robot, target_link_indices, target_poses,
+        cfg_ref=previous_cfg,
+        # Same buffers the solve kernel enforced; canonicalisation preserves
+        # pose but not clearance, so it must see the identical geometry.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, self_sph_local, self_link_start,
+                           self_link_joint, self_pair_i, self_pair_j),
+        # The caller's requested standoff, not a hardcoded one: canonicalisation
+        # walked to 1 mm clearance under a requested 0.02 m margin, respecting
+        # its own guard while silently breaking the solver's contract.
+        canonical_margin=collision_margin,
     )
 
 
@@ -1331,4 +1342,5 @@ def ls_ik_solve_cuda_batch(
         collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
                            world_spheres, world_capsules, world_boxes,
                            world_halfspaces, *_sc_b),
+        canonical_margin=collision_margin,
     )

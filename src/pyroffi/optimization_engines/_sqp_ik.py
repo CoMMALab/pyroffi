@@ -1298,6 +1298,10 @@ def sqp_ik_solve_cuda_batch(
                            world_spheres, world_capsules, world_boxes,
                            world_halfspaces, self_sph_local, self_link_start,
                            self_link_joint, self_pair_i, self_pair_j),
+        # The caller's requested standoff, not a hardcoded one: canonicalisation
+        # walked to 1 mm clearance under a requested 0.02 m margin, respecting
+        # its own guard while silently breaking the solver's contract.
+        canonical_margin=collision_margin,
     )
 
 

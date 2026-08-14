@@ -173,8 +173,31 @@ __global__ void canonical_ik_kernel(
     // to restore r = 0 -- so a problem that starts infeasible, or one whose
     // pose correction crosses an obstacle, could otherwise drift out of the
     // feasible set the solver had reached.
+    // Feasibility is judged RELATIVE TO THE INPUT, not absolutely. A solve that
+    // ends with clearance inside the margin band -- common for a spherized model
+    // whose links nearly touch -- is "infeasible" by an absolute test, so an
+    // absolute guard never records a fallback and silently walks unprotected.
+    // That is what left ls 4/32 self-colliding. The rule that always holds:
+    // never hand back LESS clearance than we were given.
     float q_feas[MAX_ACT];
     bool have_feas = false;
+    float c_floor = 0.0f;
+    if (guard) {
+        fk_single(q, twists, parent_tf, parent_idx, act_idx,
+                  mimic_mul, mimic_off, mimic_act_idx, topo_inv,
+                  T_try, n_joints, n_act);
+        const float c0 = min_clearance(T_try);
+        // NEVER DECREASE clearance -- not merely "stay feasible". An absolute
+        // test depends on this kernel and the caller's collision model agreeing
+        // exactly, and they do not: with a 0.02 m standoff requested, an
+        // absolute guard walked to 0.0155 m by its own measure while the
+        // checker scored it short. Holding clearance monotone makes the guard
+        // independent of that disagreement -- canonicalisation can improve
+        // clearance or hold it, never spend it.
+        c_floor = c0;
+        for (int a = 0; a < n_act; a++) q_feas[a] = q[a];
+        have_feas = true;
+    }
 
     int used = max_iters;
     for (int it = 0; it < max_iters; it++) {
@@ -246,7 +269,7 @@ __global__ void canonical_ik_kernel(
                 fk_single(q_try, twists, parent_tf, parent_idx, act_idx,
                           mimic_mul, mimic_off, mimic_act_idx, topo_inv,
                           T_try, n_joints, n_act);
-                if (min_clearance(T_try) >= 0.0f) break;
+                if (min_clearance(T_try) >= c_floor) break;
                 scale *= 0.5f;
                 if (t == 5) scale = 0.0f;
             }
@@ -263,7 +286,7 @@ __global__ void canonical_ik_kernel(
             fk_single(q, twists, parent_tf, parent_idx, act_idx,
                       mimic_mul, mimic_off, mimic_act_idx, topo_inv,
                       T_try, n_joints, n_act);
-            if (min_clearance(T_try) >= 0.0f) {
+            if (min_clearance(T_try) >= c_floor) {
                 for (int a = 0; a < n_act; a++) q_feas[a] = q[a];
                 have_feas = true;
             }
@@ -282,7 +305,7 @@ __global__ void canonical_ik_kernel(
         fk_single(q, twists, parent_tf, parent_idx, act_idx,
                   mimic_mul, mimic_off, mimic_act_idx, topo_inv,
                   T_try, n_joints, n_act);
-        if (min_clearance(T_try) < 0.0f)
+        if (min_clearance(T_try) < c_floor)
             for (int a = 0; a < n_act; a++) q[a] = q_feas[a];
     }
 
