@@ -39,7 +39,7 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
-from ._ik_primitives import _ik_residual
+from ._ik_primitives import _ik_residual, _ik_residual_kernel_convention
 
 
 def _normalize_targets(
@@ -64,6 +64,7 @@ def differentiable_ik_solution(
     collision_checker=None,
     collision_world=None,
     collision_margin: float = 0.0,
+    task_jacobian: Float[Array, "n_res n_act"] | None = None,
 ) -> Float[Array, "n_act"]:
     """Attach an implicit-diff gradient w.r.t. the target pose(s) to an IK solution.
 
@@ -88,12 +89,21 @@ def differentiable_ik_solution(
     q_star = jax.lax.stop_gradient(q_star)
     out_dtype = q_star.dtype
 
+    # The residual must match whatever produced J_q, or the tangent is wrong.
+    # See `_ik_residual_kernel_convention` for why: the two residuals differ by
+    # an invertible A, the gradient is invariant only when EVERY block shares
+    # one convention, and a mismatch raises nothing -- it just returns a
+    # confidently wrong number. So the choice is made once, here, and the same
+    # `_residual` then supplies the J_t and J_theta blocks below.
+    _res_fn = (_ik_residual_kernel_convention if task_jacobian is not None
+               else _ik_residual)
+
     def _residual(q: Array, robot_: Robot, t: Array) -> Array:
-        # Stacked SE(3) log-map residual over all EEs: shape (6 * n_ee,).
+        # Stacked residual over all EEs: shape (6 * n_ee,).
         # link_idx is static (a Python tuple), so closing over it is safe.
         return jnp.concatenate(
             [
-                _ik_residual(q, robot_, link_idx[k], jaxlie.SE3(t[k]))
+                _res_fn(q, robot_, link_idx[k], jaxlie.SE3(t[k]))
                 for k in range(len(link_idx))
             ]
         )
@@ -101,18 +111,55 @@ def differentiable_ik_solution(
     # ``q_star`` and ``robot`` are passed as explicit arguments (not closed over)
     # so the rule has no closed-over tracers when this runs inside a solver's
     # jax.jit; JAX can then transpose the linear jvp rule for reverse mode.
+    # J_q travels as an explicit primal for the same reason q_s and robot_ do:
+    # a closed-over tracer inside the rule blocks JAX from transposing it, which
+    # would leave forward mode working and reverse mode (jax.grad) broken.
+    # `jnp.zeros((0, 0))` stands in for "absent" so the signature is fixed --
+    # a None primal is not a valid JAX type.
+    _jac_primal = (jnp.zeros((0, 0), q_star.dtype) if task_jacobian is None
+                   else jnp.asarray(task_jacobian, q_star.dtype))
+
     @jax.custom_jvp
-    def _ik_layer(t: Array, q_s: Array, robot_: Robot) -> Array:
+    def _ik_layer(t: Array, q_s: Array, robot_: Robot, jac: Array) -> Array:
         return q_s
 
     @_ik_layer.defjvp
     def _ik_layer_jvp(primals, tangents):
-        (t, q_s, robot_) = primals
-        (dt, _dq_s, drobot) = tangents
+        (t, q_s, robot_, jac) = primals
+        (dt, _dq_s, drobot, _djac) = tangents
         # J_q and its pseudoinverse depend only on the (constant) solution and
         # robot, so the tangent map (dt, dtheta) -> dq* is linear and
         # JAX-transposable.
-        J_q = jax.jacobian(_residual, argnums=0)(q_s, robot_, t)   # (6*n_ee, n_act)
+        # J_q from the CUDA task-Jacobian kernel when the caller supplied it,
+        # mirroring how GRiD feeds its analytic gradient kernels into a
+        # custom_jvp instead of re-differentiating on the host. Falling back to
+        # jax.jacobian keeps every existing caller working and keeps the CPU
+        # path testable against the GPU one.
+        #
+        # The kernel returns the GEOMETRIC Jacobian: its position rows are
+        # exactly d(p_ee)/dq, but its orientation rows are the angular Jacobian
+        # rather than d(log(R_ee R_tgt^-1))/dq. Those coincide only where the
+        # orientation error vanishes, because the right-Jacobian of the log map
+        # tends to identity there -- which is exactly the converged solution
+        # this rule is defined at (it differentiates r = 0). MEASURED on a
+        # panda over 64 solved problems: max|J_cuda - J_jax| = 1.5e-3, i.e.
+        # float32 agreement, while at random UNCONVERGED configurations the
+        # orientation rows differ by O(1). Do not reuse this J away from a
+        # converged solution.
+        #
+        # PRECISION: the kernel is float32 while a JAX-computed J_q follows the
+        # ambient x64 setting. That is immaterial for a well-conditioned J, but
+        # pinv amplifies it without bound near a kinematic singularity, where
+        # dq*/dt is genuinely ill-defined rather than merely hard to compute.
+        # MEASURED at B=64 on a panda: J agrees to 5.6e-4 median and pinv to
+        # 9.4e-4 median, but the single problem at cond(J) = 4.5e3 differed by
+        # 19%. Under x64 with a well-conditioned batch the two agree to ~1e-3
+        # relative. Anyone differentiating THROUGH a near-singular solution
+        # should distrust the magnitude from either source, not just this one.
+        if task_jacobian is not None:
+            J_q = jac
+        else:
+            J_q = jax.jacobian(_residual, argnums=0)(q_s, robot_, t)  # (6*n_ee, n_act)
         J_q_pinv = jnp.linalg.pinv(J_q)                            # (n_act, 6*n_ee)
 
         # Differentiating the optimality condition r(q*, t, theta) = 0 in BOTH
@@ -162,7 +209,7 @@ def differentiable_ik_solution(
             dq = dq - G.T @ jnp.linalg.solve(GGt, G @ dq)
         return q_s, dq.astype(out_dtype)
 
-    return _ik_layer(target_T, q_star, robot)
+    return _ik_layer(target_T, q_star, robot, _jac_primal)
 
 
 def _active_constraint_grads(q_star, robot, checker, world, margin):
@@ -228,10 +275,76 @@ def differentiable_ik_solution_batch(
     # which is why the single-problem path, where the cut sits directly on the
     # solver output, worked all along.
     q_stars = jax.lax.stop_gradient(q_stars)
+
+    # ONE kernel launch for the whole batch's task Jacobians, instead of a
+    # per-element jax.jacobian inside the vmap. This is the GRiD arrangement:
+    # the solve kernel and a separate analytic-derivative kernel, with the
+    # latter feeding the custom_jvp tangent rule.
+    jacs = _batch_task_jacobians(q_stars, robot, target_link_indices,
+                                 target_poses.wxyz_xyz)
+    if jacs is None:
+        return jax.vmap(
+            lambda q, t: differentiable_ik_solution(
+                q, robot, target_link_indices, jaxlie.SE3(t))
+        )(q_stars, target_poses.wxyz_xyz)
+
     return jax.vmap(
-        lambda q, t: differentiable_ik_solution(
-            q, robot, target_link_indices, jaxlie.SE3(t))
-    )(q_stars, target_poses.wxyz_xyz)
+        lambda q, t, j: differentiable_ik_solution(
+            q, robot, target_link_indices, jaxlie.SE3(t), task_jacobian=j)
+    )(q_stars, target_poses.wxyz_xyz, jacs)
+
+
+#: Ancestor tables are derived by walking the chain with numpy, so they cannot be
+#: built under a trace. Keyed on link NAMES plus the EE tuple -- not id(robot),
+#: which would hand back another robot's chain after a garbage collection.
+_ANCESTOR_CACHE: dict = {}
+
+
+def _batch_task_jacobians(q_stars, robot, target_link_indices, target_wxyz_xyz):
+    """``(n_problems, 6*n_ee, n_act)`` task Jacobians from CUDA, or None.
+
+    Returns None -- and the caller falls back to ``jax.jacobian`` -- when the
+    kernel is unavailable or the robot's arrays are still tracers. The fallback
+    is deliberate: this is an optimisation of HOW J_q is obtained, and a missing
+    .so or an exotic tracing context should cost speed, never correctness.
+    """
+    from ..cuda_kernels.ik import _ik_jacobian
+
+    if not _ik_jacobian.library_available():
+        return None
+
+    link_idx = ((target_link_indices,) if isinstance(target_link_indices, int)
+                else tuple(int(i) for i in target_link_indices))
+    try:
+        key = (tuple(robot.links.names), link_idx)
+        tables = _ANCESTOR_CACHE.get(key)
+        if tables is None:
+            tables = _ANCESTOR_CACHE[key] = _ik_jacobian.ancestor_tables(
+                robot, link_idx)
+        target_jnts, ancestor_masks = tables
+
+        # EVERY input is detached. J_q enters the tangent rule as a CONSTANT --
+        # differentiating it would be a second-order term the rule does not use
+        # -- and an input still carrying a tangent makes JAX try to
+        # differentiate the FFI itself, which fails outright with "The FFI call
+        # to `ik_task_jacobian` cannot be differentiated". This is the same cut
+        # `detached_robot` makes for the solve kernels, and the same treatment
+        # GRiD gives its analytic gradient kernels (constants for second order).
+        J = jax.tree.map(jax.lax.stop_gradient, robot.joints)
+        buffers = (J.twists, J.parent_transforms, J.parent_indices,
+                   J.actuated_indices, J.mimic_multiplier, J.mimic_offset,
+                   J.mimic_act_indices, J._topo_sort_inv)
+        n_problems = q_stars.shape[0]
+        targets = jax.lax.stop_gradient(
+            jnp.asarray(target_wxyz_xyz).reshape(n_problems, len(link_idx), 7))
+        _r, jac = _ik_jacobian.task_jacobian(
+            jax.lax.stop_gradient(q_stars), buffers,
+            target_jnts, ancestor_masks, targets)
+        return jac
+    except Exception:
+        # Tracer-valued robot arrays, a capacity overflow, an unregistered
+        # target -- all recoverable by computing J_q in JAX instead.
+        return None
 
 
 def detached_robot(robot):

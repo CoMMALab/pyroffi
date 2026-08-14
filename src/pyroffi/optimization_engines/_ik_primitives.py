@@ -102,6 +102,44 @@ def _ik_residual(
     return (T_actual.inverse() @ target_pose).log()
 
 
+def _ik_residual_kernel_convention(
+    cfg: Float[Array, "n_act"],
+    robot: Robot,
+    target_link_index: int,
+    target_pose: jaxlie.SE3,
+) -> Float[Array, "6"]:
+    """The CUDA kernels' residual, in JAX. Layout: [pos(3), ori(3)].
+
+    World-frame position difference stacked with a world-frame rotation vector::
+
+        pos = p_ee - p_tgt
+        ori = log(R_ee @ R_tgt^-1)
+
+    This is NOT :func:`_ik_residual`, which is the SE(3) LOCAL log-map
+    ``(T_actual^-1 @ T_target).log()``. The two differ by an invertible 6x6 A
+    whose position block carries a rotation, so their Jacobians differ
+    elementwise.
+
+    Both are valid optimality conditions -- r = 0 at the same configurations --
+    and the implicit-diff tangent is invariant to the choice, because for
+    full-row-rank J_q::
+
+        pinv(A J_q) (A J_t) = J_q^+ J_t
+
+    But that invariance holds ONLY when J_q, J_t and J_theta all come from the
+    SAME residual. The CUDA task-Jacobian kernel returns J_q in THIS convention,
+    so the implicit rule uses this function for the remaining blocks. Pairing
+    the kernel's J_q with `_ik_residual`'s J_t would produce a confidently wrong
+    gradient with no error raised anywhere -- the reason the two live side by
+    side with this note rather than one being quietly swapped for the other.
+    """
+    Ts_world_link = robot.forward_kinematics(cfg)
+    T_actual = jaxlie.SE3(Ts_world_link[target_link_index])
+    pos = T_actual.translation() - target_pose.translation()
+    ori = (T_actual.rotation() @ target_pose.rotation().inverse()).log()
+    return jnp.concatenate([pos, ori])
+
+
 @jax.jit
 def _adaptive_weights(f: Float[Array, "6"]) -> Float[Array, "6"]:
     """Adaptive position / orientation balance weights.
