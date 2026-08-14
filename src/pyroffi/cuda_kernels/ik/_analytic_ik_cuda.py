@@ -101,6 +101,37 @@ def _empty_collision_buffers():
             jnp.zeros((0, 2), jnp.int32))
 
 
+def world_arrays(world):
+    """Obstacle buffers from any obstacle description the suite accepts.
+
+    The iterative solvers take ``collision_world`` as a geometry PRIMITIVE (a
+    Box, Sphere, Capsule, HalfSpace, or a sequence of them). This path used to
+    accept only a pre-flattened WorldGeometry wrapper, so passing the ordinary
+    input raised ``AttributeError: 'Box' object has no attribute 'spheres'`` --
+    an interface split with no reason behind it. Both forms are handled here, at
+    the FFI boundary where the other buffers are marshalled, so one obstacle
+    description works across every solver.
+    """
+    if world is None:
+        return _empty_world()
+    if all(hasattr(world, a) for a in ("spheres", "capsules", "boxes", "halfspaces")):
+        return (jnp.asarray(world.spheres, jnp.float32),
+                jnp.asarray(world.capsules, jnp.float32),
+                jnp.asarray(world.boxes, jnp.float32),
+                jnp.asarray(world.halfspaces, jnp.float32))
+
+    from ...collision._cuda_collision import _extract_world_arrays
+    items = world if isinstance(world, (list, tuple)) else (world,)
+    chunks = ([], [], [], [])
+    for w in items:
+        for dst, arr in zip(chunks, _extract_world_arrays(w)):
+            if arr.shape[0] > 0:
+                dst.append(arr)
+    return tuple(
+        jnp.concatenate(c, axis=0).astype(jnp.float32) if c else empty
+        for c, empty in zip(chunks, _empty_world()))
+
+
 @lru_cache(maxsize=1)
 def _empty_world():
     """Cached zero-length buffers for all four world primitive types."""
@@ -316,14 +347,7 @@ def analytic_ik_cuda(geom_blob, targets, q7_samples, previous_cfg=None, *,
         pairs = jnp.asarray(collision.self_pairs, dtype=jnp.int32).reshape(-1, 2)
     else:
         sph_home, sph_joint, pairs = _empty_collision_buffers()
-    if world_spheres is None:
-        world = _empty_world()
-    else:
-        w = world_spheres
-        world = (jnp.asarray(w.spheres, jnp.float32),
-                 jnp.asarray(w.capsules, jnp.float32),
-                 jnp.asarray(w.boxes, jnp.float32),
-                 jnp.asarray(w.halfspaces, jnp.float32))
+    world = world_arrays(world_spheres)
 
     f = _make_batched(bool(respect_limits), float(err_tol), use_prev,
                       float(margin), has_coll)

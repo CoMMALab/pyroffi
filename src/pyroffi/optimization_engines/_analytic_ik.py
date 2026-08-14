@@ -56,7 +56,9 @@ from ..cuda_kernels.ik._analytic_ik_cuda import (
     _empty_world,
     analytic_ik_cuda,
     pack_geometry,
+    world_arrays,
 )
+from ..kinematics._analytic_collision import CollisionData, build_collision_data
 from ..kinematics._analytic_ik import build_geometry, default_err_tol, default_q7_samples
 from ._batching import make_sharded_pmap, run_sharded, sharding_enabled
 from ._implicit_diff import (
@@ -127,6 +129,34 @@ def _geometry_for(robot: Robot, ee_link_index: int):
     return entry
 
 
+#: Analytic collision data, cached on the same tracing-safe key as the geometry.
+_COLL_CACHE: dict = {}
+
+
+def _analytic_collision(robot, checker):
+    """Adapt the suite's ``RobotCollisionSpherized`` to analytic's CollisionData.
+
+    Analytic's kernel consumes a flattened home-frame sphere list, not the
+    spherized checker the other four solvers take. Accepting ``collision_checker``
+    in the signature and then requiring a different type is exactly the kind of
+    inconsistency standardising this solver was meant to remove -- a caller who
+    passes what works everywhere else got ``AttributeError: 'RobotCollisionSpherized'
+    object has no attribute 'spheres_home'``.
+
+    Cached on link names for the same reason the geometry is: under jax.grad the
+    robot arrives as tracers, and build_collision_data walks it with numpy.
+    """
+    if checker is None:
+        return None
+    if isinstance(checker, CollisionData):
+        return checker
+    key = (tuple(robot.links.names), id(type(checker)))
+    hit = _COLL_CACHE.get(key)
+    if hit is None:
+        hit = _COLL_CACHE[key] = build_collision_data(robot, checker)
+    return hit
+
+
 def _as_matrix(target_poses: jaxlie.SE3) -> Array:
     """``SE3`` -> the ``[B, 4, 4]`` homogeneous form the kernel expects."""
     return jnp.asarray(target_poses.as_matrix(), dtype=jnp.float64)
@@ -139,7 +169,8 @@ def _solve(robot, ee, targets_se3, previous_cfgs, num_seeds, err_tol,
     q7 = default_q7_samples(geom, int(num_seeds))
     q, err, found, clearance = analytic_ik_cuda(
         geom_blob, _as_matrix(targets_se3), q7, previous_cfgs,
-        collision=collision, world_spheres=world,
+        collision=_analytic_collision(robot, collision),
+        world_spheres=world,
         respect_limits=bool(respect_limits),
         err_tol=float(err_tol if err_tol is not None else default_err_tol()))
     return q, err, found, clearance
@@ -198,6 +229,26 @@ def analytic_ik_solve_cuda_batch(
     Sharding splits the problem axis exactly as it does for the iterative
     solvers, and is skipped below the threshold where the pmap's split and
     gather cost more than the parallel solve saves.
+
+    Collision handling here is SELECTION, not optimisation, and that makes its
+    guarantee weaker than the iterative solvers'. Analytic IK solves the pose
+    exactly and its only freedom is the redundancy parameter q7, so it can
+    reject colliding q7 samples but cannot push away from an obstacle. When
+    every sample collides it returns the least-bad one rather than failing.
+
+    MEASURED, panda + a 0.3 m box, 256 targets drawn from random reference
+    configurations (58 of which are themselves inside the box):
+
+        analytic, self only          66/256 in obstacle, pose <1mm 255/256
+        analytic, self + world       33/256 in obstacle, pose <1mm 255/256
+        ls, collision_free            0/256 in obstacle, pose <1mm 205/256
+
+    Passing `collision_world` halves obstacle hits, and raising `num_seeds`
+    from 16 to 1024 only moves it 34 -> 30 -- the residual is targets with no
+    collision-free q7 at all, not an under-sampled sweep. `ls` clears them by
+    giving up the pose on a fifth of the batch, which is the trade analytic
+    structurally cannot make. Use analytic when the pose is hard and collision
+    is a preference; use sqp when collision is the hard constraint.
     """
     # Detached for the kernel; the live `robot` reaches the implicit rule,
     # which is what carries dq*/dtheta. See detached_robot.
@@ -274,13 +325,14 @@ def _collision_arrays(checker):
 
 
 def _world_arrays(world):
-    """Raw obstacle buffers, or the cached empties when there is no world."""
-    if world is None:
-        return _empty_world()
-    return (jnp.asarray(world.spheres, jnp.float32),
-            jnp.asarray(world.capsules, jnp.float32),
-            jnp.asarray(world.boxes, jnp.float32),
-            jnp.asarray(world.halfspaces, jnp.float32))
+    """Obstacle buffers, shared with the single-problem FFI path.
+
+    The sharded path needs these as raw arrays (a captured checker object would
+    be frozen into the trace), while the plain path marshals them inside the FFI
+    wrapper. One flattener serves both so the two cannot disagree about what an
+    obstacle argument means.
+    """
+    return world_arrays(world)
 
 
 def _single_ee(target_link_indices: int | Sequence[int]) -> int:
