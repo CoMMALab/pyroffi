@@ -870,7 +870,8 @@ def hjcd_solve_cuda(
     target_poses: jaxlie.SE3 | tuple,
     rng_key: Array,
     previous_cfg: Float[Array, "n_act"],
-    num_seeds: int = 1024   # NOTE: the batch entry point defaults to 32 -- see below,
+    # NOTE: the batch entry point defaults to 32 -- see the warning below.
+    num_seeds: int = 1024,
     coarse_max_iter: int = 20,
     lm_max_iter: int = 40,
     epsilon: float = 0.02,
