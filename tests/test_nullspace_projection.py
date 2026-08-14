@@ -273,3 +273,45 @@ def test_per_problem_constraint_targets(setup, solved):
     # Larger requests should not end up closer to their target than smaller
     # ones do; a mis-broadcast arg would scramble this relationship.
     assert np.all(z1 >= z0 - 1e-6), "elbow moved the wrong way for some element"
+
+
+def test_compiled_core_is_not_stale_across_calls(setup, solved):
+    """Consecutive calls with DIFFERENT inputs must give DIFFERENT answers.
+
+    The inner solve is compiled once per static configuration and cached, so
+    both calls below hit the same executable. An earlier version of that cache
+    closed over cfg, the target poses and constraint_args, baking the FIRST
+    call's values in as compile-time constants -- every later call silently
+    returned the first call's answer. It survived benchmarking because each
+    batch size produced a distinct cache key and therefore a fresh compile.
+
+    This is the assertion that version would have failed.
+    """
+    robot, coll, ee, elbow = setup
+    cfgs_a, targets_a = solved
+    z_a = _elbow_z(robot, elbow, cfgs_a)
+
+    # A second, genuinely different problem set of the SAME shapes, so the cache
+    # key is identical and the same compiled core is reused.
+    n_act = robot.joints.num_actuated_joints
+    rng = np.random.default_rng(11)
+    lo = np.asarray(robot.joints.lower_limits)
+    hi = np.asarray(robot.joints.upper_limits)
+    q_b = jnp.asarray(lo + (hi - lo) * rng.random((B, n_act)), jnp.float32)
+    targets_b = jaxlie.SE3(jax.vmap(lambda c: robot.forward_kinematics(c)[ee])(q_b))
+    z_b = _elbow_z(robot, elbow, q_b)
+
+    con = make_elbow_constraint(elbow)
+    kw = dict(batched_constraint_args=True, collision_checker=coll, max_iter=20)
+    res_a = project_onto_constraints(cfgs_a, robot, (ee,), (targets_a,), (con,),
+                                     (jnp.asarray(z_a + ACHIEVABLE_DZ),), **kw)
+    res_b = project_onto_constraints(q_b, robot, (ee,), (targets_b,), (con,),
+                                     (jnp.asarray(z_b + ACHIEVABLE_DZ),), **kw)
+    res_a2 = project_onto_constraints(cfgs_a, robot, (ee,), (targets_a,), (con,),
+                                      (jnp.asarray(z_a + ACHIEVABLE_DZ),), **kw)
+
+    assert not np.allclose(np.asarray(res_a.cfg), np.asarray(res_b.cfg)), (
+        "two different problems returned the same configuration -- the compiled "
+        "core is baking call-varying data in as a constant")
+    assert np.array_equal(np.asarray(res_a.cfg), np.asarray(res_a2.cfg)), (
+        "the same problem returned different answers on a repeat call")

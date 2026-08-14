@@ -146,6 +146,165 @@ def _constraint_residual(cfg, constraint_args, robot, constraint_fns):
     ])
 
 
+
+def _collision_free(q, robot, collision_checker, collision_world, collision_margin):
+    """``(B,)`` bool -- ONE checker call for the whole batch, not B calls."""
+    if collision_checker is None:
+        return jnp.ones(q.shape[0], dtype=bool)
+    qf = jnp.asarray(q, jnp.float32)
+    ok = jnp.min(collision_checker.compute_self_collision_distance(robot, qf),
+                 axis=-1) >= collision_margin
+    if collision_world is not None:
+        dw = collision_checker.compute_world_collision_distance(
+            robot, qf, collision_world).reshape(q.shape[0], -1)
+        ok = jnp.logical_and(ok, jnp.min(dw, axis=-1) >= collision_margin)
+    return ok
+
+
+#: Compiled inner solves, keyed on the STATIC parts of a call.
+_CORE_CACHE: dict = {}
+
+
+def _get_core(robot, target_link_indices, constraint_fns, collision_checker,
+              collision_world, collision_margin, max_iter, max_step_norm,
+              constraint_tol, pose_tol, damping, pose_restore_iters,
+              batched_constraint_args):
+    """Return the compiled inner solve for this static configuration.
+
+    ONLY statics are captured in the closure. Every array that varies between
+    calls -- the configurations, the target poses, the constraint arguments, the
+    joint limits, the free-joint mask -- is a PARAMETER of ``core``.
+    
+    That split is the whole point. An earlier attempt cached a jit wrapper that
+    closed over ``cfg``, the targets and ``constraint_args``, which baked the
+    FIRST call's values in as compile-time constants: every later call returned
+    the first call's answer, silently. It survived benchmarking because each
+    batch size produced a distinct cache key and so a fresh compile.
+
+    Keying on ``id()`` for the robot and collision objects follows the same
+    assumption ``_ls_ik._COLLISION_BUFFER_CACHE`` already makes -- these are
+    configuration objects whose contents do not change between calls. Shape
+    changes need no key: ``jax.jit`` retraces on those by itself.
+    """
+    key = (id(robot), target_link_indices, constraint_fns,
+           id(collision_checker), id(collision_world), float(collision_margin),
+           int(max_iter), float(max_step_norm), float(constraint_tol),
+           float(pose_tol), float(damping), int(pose_restore_iters),
+           bool(batched_constraint_args))
+    core = _CORE_CACHE.get(key)
+    if core is not None:
+        return core
+
+    def core(cfg, target_poses, constraint_args, lower, upper, free_mask):
+        B, n_act = cfg.shape
+        idx = jnp.arange(B)
+
+        def task_res(q, b):
+            return _task_residual(q, robot, target_link_indices, target_poses, b)
+
+        def con_res(q, args):
+            return _constraint_residual(q, args, robot, constraint_fns)
+
+        _arg_ax = 0 if batched_constraint_args else None
+        batched_task = jax.vmap(task_res)
+        batched_task_jac = jax.vmap(jax.jacobian(task_res, argnums=0))
+        batched_con = jax.vmap(con_res, in_axes=(0, _arg_ax))
+        batched_con_jac = jax.vmap(jax.jacobian(con_res, argnums=0), in_axes=(0, _arg_ax))
+
+        def collision_free(q):
+            """``(B,)`` bool -- ONE checker call for the whole batch, not B calls."""
+            if collision_checker is None:
+                return jnp.ones(q.shape[0], dtype=bool)
+            qf = jnp.asarray(q, jnp.float32)
+            ok = jnp.min(collision_checker.compute_self_collision_distance(robot, qf),
+                         axis=-1) >= collision_margin
+            if collision_world is not None:
+                dw = collision_checker.compute_world_collision_distance(
+                    robot, qf, collision_world).reshape(q.shape[0], -1)
+                ok = jnp.logical_and(ok, jnp.min(dw, axis=-1) >= collision_margin)
+            return ok
+
+        def restore_pose(q):
+            """Iterated task-space correction.
+
+            One Newton correction is itself linearised and leaves the second-order
+            error that rejects otherwise-good null-space steps. Iterating is far
+            cheaper than shrinking the step until the linearisation happens to hold.
+            """
+            for _ in range(pose_restore_iters):
+                r = batched_task(q, idx)
+                J = batched_task_jac(q, idx)
+                corr = jnp.einsum('bij,bj->bi', jnp.linalg.pinv(J), r) * free_mask
+                q = jnp.clip(q - corr, lower, upper)
+            return q
+
+        start_free = collision_free(cfg)
+
+        start_perr = jnp.max(jnp.abs(batched_task(cfg, idx)), axis=-1)
+        pose_budget = jnp.maximum(pose_tol, start_perr)
+
+        def body(_, carry):
+            best, best_viol = carry
+
+            J = batched_task_jac(best, idx)
+            c = batched_con(best, constraint_args)
+            Jc = batched_con_jac(best, constraint_args)
+
+            eye = jnp.broadcast_to(jnp.eye(n_act), (B, n_act, n_act))
+            P = eye - jnp.einsum('bij,bjk->bik', jnp.linalg.pinv(J), J)
+
+            # Gauss-Newton on the constraints, confined to the null space. Damping
+            # is RELATIVE to the projected constraint Jacobian, not an absolute
+            # floor: a constraint is often only weakly visible in the null space
+            # (||Jc P|| ~ 0.02 on a 7-DOF arm), so an absolute 1e-6 leaves this
+            # dividing by ~5e-4 and returning a multi-radian step that fails every
+            # rung of the ladder for overshooting the pose.
+            Jc_n = jnp.einsum('bij,bjk->bik', Jc, P)
+            scale = jnp.maximum(jnp.sum(Jc_n * Jc_n, axis=(1, 2)), 1e-12)
+            JJt = (jnp.einsum('bij,bkj->bik', Jc_n, Jc_n)
+                   + damping * scale[:, None, None] * jnp.eye(Jc_n.shape[1]))
+            dq = -jnp.einsum('bij,bj->bi', P,
+                             jnp.einsum('bji,bj->bi', Jc_n,
+                                        jnp.linalg.solve(JJt, c[..., None]).squeeze(-1)))
+
+            # Trust region: the pose is restored by a linearised correction whose
+            # error grows with the square of the step, so an unbounded step cannot
+            # be corrected back onto the pose at any scale.
+            dq = dq * free_mask                      # frozen joints do not move
+            nrm = jnp.linalg.norm(dq, axis=-1, keepdims=True)
+            dq = jnp.where(nrm > max_step_norm, dq * (max_step_norm / (nrm + 1e-12)), dq)
+
+            def trial(alpha):
+                q = restore_pose(jnp.clip(best + alpha * dq, lower, upper))
+                viol = jnp.max(jnp.abs(batched_con(q, constraint_args)), axis=-1)
+                perr = jnp.max(jnp.abs(batched_task(q, idx)), axis=-1)
+                return q, viol, (perr <= pose_budget) & (viol < best_viol) & collision_free(q)
+
+            qs, viols, oks = jax.vmap(trial)(_STEP_LADDER)         # (S, B, ...)
+
+            # First admissible rung wins, which is the largest step that works.
+            ranked = jnp.where(oks, jnp.arange(len(_STEP_LADDER))[:, None],
+                               len(_STEP_LADDER))
+            pick = jnp.argmin(ranked, axis=0)
+            any_ok = jnp.any(oks, axis=0)
+
+            # Converged or stuck elements are masked, not exited: a batch costs the
+            # worst element's iteration count rather than the sum.
+            take = any_ok & (best_viol > constraint_tol)
+            return (jnp.where(take[:, None], qs[pick, idx], best),
+                    jnp.where(take, viols[pick, idx], best_viol))
+
+        viol0 = jnp.max(jnp.abs(batched_con(cfg, constraint_args)), axis=-1)
+        best, best_viol = jax.lax.fori_loop(0, max_iter, body, (cfg, viol0))
+
+        pose_error = jnp.max(jnp.abs(batched_task(best, idx)), axis=-1)
+        ns_dim = n_act - jnp.linalg.matrix_rank(batched_task_jac(best, idx))
+        return best, best_viol, pose_error, ns_dim, pose_budget, start_free
+
+    core = _CORE_CACHE[key] = jax.jit(core)
+    return core
+
+
 def project_onto_constraints(
     cfg: Float[Array, "b n_act"],
     robot: Robot,
@@ -211,134 +370,31 @@ def project_onto_constraints(
                  else 1.0 - jnp.asarray(fixed_joint_mask).astype(jnp.float32))
     constraint_args = tuple(constraint_args) or tuple(() for _ in constraint_fns)
 
-    idx = jnp.arange(B)
-
-    def task_res(q, b):
-        return _task_residual(q, robot, target_link_indices, target_poses, b)
-
-    def con_res(q, args):
-        return _constraint_residual(q, args, robot, constraint_fns)
-
-    _arg_ax = 0 if batched_constraint_args else None
-    batched_task = jax.vmap(task_res)
-    batched_task_jac = jax.vmap(jax.jacobian(task_res, argnums=0))
-    batched_con = jax.vmap(con_res, in_axes=(0, _arg_ax))
-    batched_con_jac = jax.vmap(jax.jacobian(con_res, argnums=0), in_axes=(0, _arg_ax))
-
-    def collision_free(q):
-        """``(B,)`` bool -- ONE checker call for the whole batch, not B calls."""
-        if collision_checker is None:
-            return jnp.ones(q.shape[0], dtype=bool)
-        qf = jnp.asarray(q, jnp.float32)
-        ok = jnp.min(collision_checker.compute_self_collision_distance(robot, qf),
-                     axis=-1) >= collision_margin
-        if collision_world is not None:
-            dw = collision_checker.compute_world_collision_distance(
-                robot, qf, collision_world).reshape(q.shape[0], -1)
-            ok = jnp.logical_and(ok, jnp.min(dw, axis=-1) >= collision_margin)
-        return ok
-
-    def restore_pose(q):
-        """Iterated task-space correction.
-
-        One Newton correction is itself linearised and leaves the second-order
-        error that rejects otherwise-good null-space steps. Iterating is far
-        cheaper than shrinking the step until the linearisation happens to hold.
-        """
-        for _ in range(pose_restore_iters):
-            r = batched_task(q, idx)
-            J = batched_task_jac(q, idx)
-            corr = jnp.einsum('bij,bj->bi', jnp.linalg.pinv(J), r) * free_mask
-            q = jnp.clip(q - corr, lower, upper)
-        return q
-
-    start_free = collision_free(cfg)
-
     if len(constraint_fns) == 0:
         # Nothing to enforce. Returning the input IS the answer: this is a
         # CONSTRAINT projector, not a pose refiner, and it deliberately does not
         # improve a pose it was given. Callers wanting pose refinement want an
         # LM refiner -- conflating the two is what let the old _ls_ik_single
         # serve both roles and hid which one each call site depended on.
+        idx0 = jnp.arange(B)
+        perr = jnp.max(jnp.abs(jax.vmap(
+            lambda q, b: _task_residual(q, robot, target_link_indices, target_poses, b)
+        )(cfg, idx0)), axis=-1)
+        free = _collision_free(cfg, robot, collision_checker, collision_world,
+                               collision_margin)
         return NullspaceResult(
-            cfg=cfg, success=start_free,
-            constraint_violation=jnp.zeros(B),
-            pose_error=jnp.max(jnp.abs(batched_task(cfg, idx)), axis=-1),
-            nullspace_dim=jnp.zeros(B, jnp.int32),
-            start_collision_free=start_free,
+            cfg=cfg, success=free, constraint_violation=jnp.zeros(B),
+            pose_error=perr, nullspace_dim=jnp.zeros(B, jnp.int32),
+            start_collision_free=free,
         )
 
-    # Acceptance is judged against the pose you ARRIVED with, not an absolute
-    # bound. "Without losing the pose" means not degrading it; an absolute bound
-    # asks the projector to beat the solver that produced its input.
-    #
-    # The default pose_tol is 1e-3 and NOT tighter for a measured reason: the
-    # task-space correction below cannot drive the residual under roughly 2e-4
-    # in float32, whatever the step size -- that is the precision floor of the
-    # FK and log-map chain, not step-dependent drift (it does not shrink as the
-    # step shrinks). A 1e-4 tolerance therefore sits BELOW the achievable floor,
-    # every rung of the ladder fails it, and the projector silently returns its
-    # input having moved nothing. That failure is indistinguishable from an
-    # infeasible constraint, which is what makes it expensive.
-    start_perr = jnp.max(jnp.abs(batched_task(cfg, idx)), axis=-1)
-    pose_budget = jnp.maximum(pose_tol, start_perr)
+    core = _get_core(robot, tuple(target_link_indices), tuple(constraint_fns),
+                     collision_checker, collision_world, collision_margin,
+                     max_iter, max_step_norm, constraint_tol, pose_tol, damping,
+                     pose_restore_iters, batched_constraint_args)
+    best, best_viol, pose_error, ns_dim, pose_budget, start_free = core(
+        cfg, tuple(target_poses), constraint_args, lower, upper, free_mask)
 
-    def body(_, carry):
-        best, best_viol = carry
-
-        J = batched_task_jac(best, idx)
-        c = batched_con(best, constraint_args)
-        Jc = batched_con_jac(best, constraint_args)
-
-        eye = jnp.broadcast_to(jnp.eye(n_act), (B, n_act, n_act))
-        P = eye - jnp.einsum('bij,bjk->bik', jnp.linalg.pinv(J), J)
-
-        # Gauss-Newton on the constraints, confined to the null space. Damping
-        # is RELATIVE to the projected constraint Jacobian, not an absolute
-        # floor: a constraint is often only weakly visible in the null space
-        # (||Jc P|| ~ 0.02 on a 7-DOF arm), so an absolute 1e-6 leaves this
-        # dividing by ~5e-4 and returning a multi-radian step that fails every
-        # rung of the ladder for overshooting the pose.
-        Jc_n = jnp.einsum('bij,bjk->bik', Jc, P)
-        scale = jnp.maximum(jnp.sum(Jc_n * Jc_n, axis=(1, 2)), 1e-12)
-        JJt = (jnp.einsum('bij,bkj->bik', Jc_n, Jc_n)
-               + damping * scale[:, None, None] * jnp.eye(Jc_n.shape[1]))
-        dq = -jnp.einsum('bij,bj->bi', P,
-                         jnp.einsum('bji,bj->bi', Jc_n,
-                                    jnp.linalg.solve(JJt, c[..., None]).squeeze(-1)))
-
-        # Trust region: the pose is restored by a linearised correction whose
-        # error grows with the square of the step, so an unbounded step cannot
-        # be corrected back onto the pose at any scale.
-        dq = dq * free_mask                      # frozen joints do not move
-        nrm = jnp.linalg.norm(dq, axis=-1, keepdims=True)
-        dq = jnp.where(nrm > max_step_norm, dq * (max_step_norm / (nrm + 1e-12)), dq)
-
-        def trial(alpha):
-            q = restore_pose(jnp.clip(best + alpha * dq, lower, upper))
-            viol = jnp.max(jnp.abs(batched_con(q, constraint_args)), axis=-1)
-            perr = jnp.max(jnp.abs(batched_task(q, idx)), axis=-1)
-            return q, viol, (perr <= pose_budget) & (viol < best_viol) & collision_free(q)
-
-        qs, viols, oks = jax.vmap(trial)(_STEP_LADDER)         # (S, B, ...)
-
-        # First admissible rung wins, which is the largest step that works.
-        ranked = jnp.where(oks, jnp.arange(len(_STEP_LADDER))[:, None],
-                           len(_STEP_LADDER))
-        pick = jnp.argmin(ranked, axis=0)
-        any_ok = jnp.any(oks, axis=0)
-
-        # Converged or stuck elements are masked, not exited: a batch costs the
-        # worst element's iteration count rather than the sum.
-        take = any_ok & (best_viol > constraint_tol)
-        return (jnp.where(take[:, None], qs[pick, idx], best),
-                jnp.where(take, viols[pick, idx], best_viol))
-
-    viol0 = jnp.max(jnp.abs(batched_con(cfg, constraint_args)), axis=-1)
-    best, best_viol = jax.lax.fori_loop(0, max_iter, body, (cfg, viol0))
-
-    pose_error = jnp.max(jnp.abs(batched_task(best, idx)), axis=-1)
-    ns_dim = n_act - jnp.linalg.matrix_rank(batched_task_jac(best, idx))
     return NullspaceResult(
         cfg=best,
         success=(best_viol <= constraint_tol) & (pose_error <= pose_budget) & start_free,
