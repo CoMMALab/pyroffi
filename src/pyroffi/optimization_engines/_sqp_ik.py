@@ -52,6 +52,7 @@ from ._batching import (
     sharding_enabled,
 )
 from ._implicit_diff import (
+    detached_robot,
     differentiable_ik_solution,
     differentiable_ik_solution_batch,
 )
@@ -656,6 +657,9 @@ def sqp_ik_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
     if isinstance(target_poses, jaxlie.SE3):
@@ -728,7 +732,7 @@ def sqp_ik_solve_cuda(
     def _single(tgt, prev):
         return _sqp_ik_solve_cuda_jit(
 
-            robot=robot,
+            robot=_robot_k,
                 target_poses=tuple(jaxlie.SE3(w) for w in tgt),
             rng_key=rng_key,
                 previous_cfg=prev,
@@ -775,7 +779,7 @@ def sqp_ik_solve_cuda(
                 "*_solve_cuda_batch entry point with a batched target instead.")
         winners = _sqp_ik_solve_cuda_batch_jit(
 
-            robot=robot,
+            robot=_robot_k,
                 target_poses_batch=jaxlie.SE3(tgt[:, 0]),
             rng_key=rng_key,
                 previous_cfgs=prev,
@@ -1148,6 +1152,9 @@ def sqp_ik_solve_cuda_batch(
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
 
@@ -1225,7 +1232,7 @@ def sqp_ik_solve_cuda_batch(
         )
     else:
         winners = _sqp_ik_solve_cuda_batch_jit(
-            robot=robot,
+            robot=_robot_k,
             target_poses_batch=target_poses,
             rng_key=rng_key,
             previous_cfgs=previous_cfgs,

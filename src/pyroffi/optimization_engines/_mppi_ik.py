@@ -54,6 +54,7 @@ from .._robot import Robot
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._nullspace import project_single
 from ._implicit_diff import (
+    detached_robot,
     differentiable_ik_solution,
     differentiable_ik_solution_batch,
 )
@@ -834,6 +835,9 @@ def mppi_ik_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
     if isinstance(target_poses, jaxlie.SE3):
@@ -901,7 +905,7 @@ def mppi_ik_solve_cuda(
     def _single(tgt, prev):
         return _mppi_ik_solve_cuda_jit(
 
-            robot=robot,
+            robot=_robot_k,
                 target_poses=tuple(jaxlie.SE3(w) for w in tgt),
             rng_key=rng_key,
                 previous_cfg=prev,
@@ -951,7 +955,7 @@ def mppi_ik_solve_cuda(
                 "*_solve_cuda_batch entry point with a batched target instead.")
         winners = _mppi_ik_solve_cuda_batch_jit(
 
-            robot=robot,
+            robot=_robot_k,
                 target_poses_batch=jaxlie.SE3(tgt[:, 0]),
             rng_key=rng_key,
                 previous_cfgs=prev,
@@ -1236,6 +1240,9 @@ def mppi_ik_solve_cuda_batch(
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
 
@@ -1294,7 +1301,7 @@ def mppi_ik_solve_cuda_batch(
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
         broadcast=dict(
-            robot=robot,
+            robot=_robot_k,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
             ancestor_masks=ancestor_masks,

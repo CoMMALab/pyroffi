@@ -44,6 +44,7 @@ from ._ik_primitives import (
 )
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._implicit_diff import (
+    detached_robot,
     differentiable_ik_solution,
     differentiable_ik_solution_batch,
 )
@@ -797,6 +798,9 @@ def ls_ik_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Detached for the kernel; the live `robot` still reaches the implicit
+    # rule below, which is what carries dq*/dtheta.
+    _robot_k = detached_robot(robot)
     # Normalise scalar → 1-tuple API.
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
@@ -872,7 +876,7 @@ def ls_ik_solve_cuda(
     # See _batching.dispatch_vmap_to_batched.
     def _single(target_wxyz_xyz, prev_cfg):
         return _ls_ik_solve_cuda_jit(
-            robot=robot,
+            robot=_robot_k,
             self_sph_local=_sc[0],
             self_link_start=_sc[1],
             self_link_joint=_sc[2],
@@ -918,7 +922,7 @@ def ls_ik_solve_cuda(
                 f"end-effector; got {len(target_link_indices)}. Call "
                 "ls_ik_solve_cuda_batch directly with a batched target instead.")
         winners = _ls_ik_solve_cuda_batch_jit(
-            robot=robot,
+            robot=_robot_k,
             self_sph_local=_sc[0],
             self_link_start=_sc[1],
             self_link_joint=_sc[2],
@@ -1196,6 +1200,9 @@ def ls_ik_solve_cuda_batch(
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Detached for the kernel; the live `robot` still reaches the implicit
+    # rule below, which is what carries dq*/dtheta.
+    _robot_k = detached_robot(robot)
     # Normalise scalar → 1-tuple API.
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
@@ -1255,7 +1262,7 @@ def ls_ik_solve_cuda_batch(
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
         broadcast=dict(
-            robot=robot,
+            robot=_robot_k,
             self_sph_local=_sc_b[0],
             self_link_start=_sc_b[1],
             self_link_joint=_sc_b[2],

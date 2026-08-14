@@ -59,7 +59,7 @@ from ..cuda_kernels.ik._analytic_ik_cuda import (
 )
 from ..kinematics._analytic_ik import build_geometry, default_err_tol, default_q7_samples
 from ._batching import make_sharded_pmap, run_sharded, sharding_enabled
-from ._implicit_diff import differentiable_ik_solution
+from ._implicit_diff import detached_robot, differentiable_ik_solution
 
 #: Geometry blobs keyed on (robot identity, end-effector link). Building one
 #: walks the URDF and packs 95 float64s; it depends only on the kinematic chain,
@@ -131,6 +131,9 @@ def analytic_ik_solve_cuda(
     solve addresses ONE chain, and quietly ignoring the rest would return a
     confident answer to a different question.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     _require_x64()
     ee = _single_ee(target_link_indices)
     del rng_key                       # deterministic; see module docstring
@@ -160,6 +163,9 @@ def analytic_ik_solve_cuda_batch(
     solvers, and is skipped below the threshold where the pmap's split and
     gather cost more than the parallel solve saves.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     _require_x64()
     ee = _single_ee(target_link_indices)
     del rng_key

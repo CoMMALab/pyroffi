@@ -173,3 +173,23 @@ def differentiable_ik_solution_batch(
         lambda q, t: differentiable_ik_solution(
             q, robot, target_link_indices, jaxlie.SE3(t))
     )(q_stars, target_poses.wxyz_xyz)
+
+
+def detached_robot(robot):
+    """A copy of ``robot`` with every leaf cut from autodiff.
+
+    Pass THIS to the CUDA kernels and keep the live model for the implicit rule.
+
+    The split is required, not stylistic. A robot parameter feeds two places:
+    the kernel, and the pure-JAX residual the implicit rule differentiates. If
+    the parameter reaches the FFI still carrying a tangent, JAX classifies the
+    kernel's output as UNKNOWN during linearisation and the whole thing fails
+    with "Linearization failed to produce known values for all output primals" --
+    shielding the kernel's OUTPUT with a custom_jvp is not enough, because the
+    problem is at its inputs.
+
+    It is also the semantically correct cut: dq*/dtheta comes from the
+    optimality condition at the returned configuration, never from how the
+    solver happened to use theta while searching.
+    """
+    return jax.tree.map(jax.lax.stop_gradient, robot)
