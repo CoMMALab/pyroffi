@@ -51,7 +51,10 @@ from ._batching import (
     run_sharded,
     sharding_enabled,
 )
-from ._implicit_diff import differentiable_ik_solution
+from ._implicit_diff import (
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ._ls_ik import _prepare_ls_collision_buffers
 
 
@@ -1280,7 +1283,9 @@ def sqp_ik_solve_cuda_batch(
             )
         )(winners, target_poses.wxyz_xyz)
 
-    return winners
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,10 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._nullspace import project_single
+from ._implicit_diff import (
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
 from ._ik_primitives import self_collision_table_arrays
 from ._ls_ik import _ls_ik_single, _prepare_ls_collision_buffers
@@ -1003,7 +1007,9 @@ def mppi_ik_solve_cuda(
             max_iter=constraint_refine_iters, fixed_joint_mask=fmask,
         )
 
-    return winner
+    return differentiable_ik_solution(
+        winner, robot, target_link_indices, target_poses
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1282,7 +1288,7 @@ def mppi_ik_solve_cuda_batch(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
-    return sharded_batch_call(
+    winners = sharded_batch_call(
         _mppi_ik_solve_cuda_batch_jit,
         targets=target_poses,
         rng_key=rng_key,
@@ -1326,4 +1332,7 @@ def mppi_ik_solve_cuda_batch(
             constraint_fns=cuda_constraint_fns,
         ),
         env_var='PYROFFI_MPPI_IK_PMAP_MIN',
+    )
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses
     )

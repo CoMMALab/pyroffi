@@ -45,7 +45,10 @@ from ._nullspace import project_single
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
 from ._ik_primitives import self_collision_table_arrays
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
-from ._implicit_diff import differentiable_ik_solution
+from ._implicit_diff import (
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ._ls_ik import _prepare_ls_collision_buffers
 
 # Consecutive non-improving LM steps before a random kick is applied.
@@ -1555,4 +1558,6 @@ def hjcd_solve_cuda_batch(
             )
         )(winners, target_poses.wxyz_xyz)
 
-    return winners
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses
+    )

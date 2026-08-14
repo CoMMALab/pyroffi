@@ -113,3 +113,28 @@ def differentiable_ik_solution(
         return q_s, dq.astype(out_dtype)
 
     return _ik_layer(target_T, q_star, robot)
+
+
+def differentiable_ik_solution_batch(
+    q_stars: Float[Array, "n_problems n_act"],
+    robot: Robot,
+    target_link_indices: int | Sequence[int],
+    target_poses,
+) -> Float[Array, "n_problems n_act"]:
+    """Batched :func:`differentiable_ik_solution`.
+
+    The batch entry points returned their solver output RAW, with no implicit
+    rule attached, so ``jax.grad`` through a batched solve did not fall back to
+    anything -- it tried to differentiate the FFI call itself and failed with
+    "The FFI call to `ls_ik_cuda` cannot be differentiated". Every batched
+    solver was undifferentiable, while the single-problem paths worked, which
+    is not a difference anyone would predict from the API.
+
+    Applies the same implicit rule per element. The solver output is
+    ``stop_gradient``-ed inside, so the kernel is never differentiated through;
+    only the optimality condition at the returned configuration is.
+    """
+    return jax.vmap(
+        lambda q, t: differentiable_ik_solution(
+            q, robot, target_link_indices, jaxlie.SE3(t))
+    )(q_stars, target_poses.wxyz_xyz)

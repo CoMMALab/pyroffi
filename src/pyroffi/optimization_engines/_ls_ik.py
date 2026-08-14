@@ -43,7 +43,10 @@ from ._ik_primitives import (
     split_cuda_and_post_constraints,
 )
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
-from ._implicit_diff import differentiable_ik_solution
+from ._implicit_diff import (
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ..collision._cuda_collision import _extract_world_arrays
 
 
@@ -1312,4 +1315,6 @@ def ls_ik_solve_cuda_batch(
             )
         )(winners, target_poses.wxyz_xyz)
 
-    return winners
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses
+    )
