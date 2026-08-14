@@ -185,15 +185,22 @@ def _get_core(robot, target_link_indices, constraint_fns, collision_checker,
     assumption ``_ls_ik._COLLISION_BUFFER_CACHE`` already makes -- these are
     configuration objects whose contents do not change between calls. Shape
     changes need no key: ``jax.jit`` retraces on those by itself.
+
+    The cache holds a STRONG REFERENCE to every object it keyed on. Without
+    that, an id is only unique while its object is alive: a robot that is freed
+    lets CPython hand the same id to the next allocation, and a later call with
+    a DIFFERENT robot would hit this cache and silently run the earlier robot's
+    compiled kinematics. Pinning them trades a little memory for making the key
+    mean what it appears to mean.
     """
     key = (id(robot), target_link_indices, constraint_fns,
            id(collision_checker), id(collision_world), float(collision_margin),
            int(max_iter), float(max_step_norm), float(constraint_tol),
            float(pose_tol), float(damping), int(pose_restore_iters),
            bool(batched_constraint_args))
-    core = _CORE_CACHE.get(key)
-    if core is not None:
-        return core
+    entry = _CORE_CACHE.get(key)
+    if entry is not None:
+        return entry[0]
 
     def core(cfg, target_poses, constraint_args, lower, upper, free_mask):
         B, n_act = cfg.shape
@@ -301,8 +308,10 @@ def _get_core(robot, target_link_indices, constraint_fns, collision_checker,
         ns_dim = n_act - jnp.linalg.matrix_rank(batched_task_jac(best, idx))
         return best, best_viol, pose_error, ns_dim, pose_budget, start_free
 
-    core = _CORE_CACHE[key] = jax.jit(core)
-    return core
+    compiled = jax.jit(core)
+    # Pinned alongside the executable: see the id-reuse note above.
+    _CORE_CACHE[key] = (compiled, robot, collision_checker, collision_world)
+    return compiled
 
 
 def project_onto_constraints(
