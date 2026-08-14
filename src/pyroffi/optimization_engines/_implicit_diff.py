@@ -103,13 +103,40 @@ def differentiable_ik_solution(
     @_ik_layer.defjvp
     def _ik_layer_jvp(primals, tangents):
         (t, q_s, robot_) = primals
-        (dt, _dq_s, _drobot) = tangents
+        (dt, _dq_s, drobot) = tangents
         # J_q and its pseudoinverse depend only on the (constant) solution and
-        # robot, so the tangent map dt -> dq* is linear and JAX-transposable.
+        # robot, so the tangent map (dt, dtheta) -> dq* is linear and
+        # JAX-transposable.
         J_q = jax.jacobian(_residual, argnums=0)(q_s, robot_, t)   # (6*n_ee, n_act)
         J_q_pinv = jnp.linalg.pinv(J_q)                            # (n_act, 6*n_ee)
-        _, Jt_dt = jax.jvp(lambda tt: _residual(q_s, robot_, tt), (t,), (dt,))  # (6*n_ee,)
-        dq = -(J_q_pinv @ Jt_dt)
+
+        # Differentiating the optimality condition r(q*, t, theta) = 0 in BOTH
+        # its arguments gives J_q dq* + J_t dt + J_theta dtheta = 0. The pose
+        # term was already here; the second is the robot's own kinematic
+        # parameters -- twists and parent transforms, 156 scalars on a Panda --
+        # which is the calibration Jacobian.
+        #
+        # SOLVER hyperparameters (pose weights, damping, iteration counts, seed
+        # counts) are deliberately absent, and that is not an omission: they do
+        # not appear in r(q*, t, theta) = 0 at all, so dq*/d(hyperparameter) is
+        # EXACTLY ZERO at a converged solution. That is what convergence means.
+        # A non-zero value there would have to come from unrolling the solver or
+        # from a stochastic estimator, and both answer a different question.
+        _, Jt_dt = jax.jvp(lambda tt: _residual(q_s, robot_, tt), (t,), (dt,))
+        # A symbolic-zero robot tangent (the common case: nobody is
+        # differentiating the model) must not be fed to jax.jvp, which wants a
+        # concrete tangent pytree. Materialising zeros costs a wasted FK, so
+        # detect it and skip.
+        drobot_leaves = [l for l in jax.tree.leaves(drobot)
+                         if not isinstance(l, object.__class__)]
+        has_robot_tangent = any(
+            getattr(l, "shape", None) is not None for l in jax.tree.leaves(drobot))
+        rhs = Jt_dt
+        if has_robot_tangent:
+            _, Jr_dr = jax.jvp(lambda rr: _residual(q_s, rr, t),
+                               (robot_,), (drobot,))
+            rhs = rhs + Jr_dr
+        dq = -(J_q_pinv @ rhs)
         return q_s, dq.astype(out_dtype)
 
     return _ik_layer(target_T, q_star, robot)
