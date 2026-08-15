@@ -2,6 +2,8 @@
 
 from ._collision import colldist_from_sdf as colldist_from_sdf
 from ._collision import collide as collide
+from ._esdf import ESDFWorldGeom as ESDFWorldGeom
+from ._esdf import esdf_query_jax as esdf_query_jax
 from ._geometry import Box as Box
 from ._geometry import Capsule as Capsule
 from ._geometry import CollGeom as CollGeom

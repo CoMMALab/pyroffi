@@ -13,6 +13,12 @@ Distance convention (matches pyroffi):
 World geometry types handled by the CUDA kernel:
   Sphere, Capsule, Box, HalfSpace
 
+An ESDFWorldGeom (dense signed-distance grid, collision/_esdf.py) is also
+accepted as world_geom, but bypasses the CUDA kernel entirely: baseline (v1)
+dispatch queries the pure-JAX trilinear ESDFWorldGeom field directly via
+esdf_query_jax rather than converting to one of the primitive arrays below.
+See _compute_world_impl and compute_world_collision_distance.
+
 Data layout passed into CUDA (all float32, row-major):
   world spheres     [Ms, 4]  (x, y, z, r)
   world capsules    [Mc, 7]  (x1, y1, z1, x2, y2, z2, r)
@@ -45,6 +51,7 @@ import numpy as np
 from jaxtyping import Array, Float
 from loguru import logger
 
+from ._esdf import ESDFWorldGeom, esdf_query_jax
 from ._geometry import Box, Capsule, CollGeom, HalfSpace, Heightmap, Sphere
 from ._robot_collision import RobotCollision, RobotCollisionSpherized
 from ..cuda_kernels.collision._collision_cuda_ffi import (
@@ -101,7 +108,7 @@ def _pose_rotation_matrix_np(pose) -> np.ndarray:
 
 
 def _extract_world_arrays(
-    world_geom: CollGeom,
+    world_geom: Union[CollGeom, ESDFWorldGeom],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Convert a pyroffi CollGeom (last axis = M obstacles) to flat numpy arrays.
 
@@ -113,11 +120,34 @@ def _extract_world_arrays(
         capsules   — float32 [Mc, 7]
         boxes      — float32 [Mb, 15]
         halfspaces — float32 [Mh, 6]
+
+    NOTE on ESDFWorldGeom: this function's 4-tuple return is a shared
+    contract -- besides CUDADifferentiableSDFCollisionChecker, it's imported
+    and unpacked as exactly 4 values by _robogpu_collision.py,
+    _vamp_collision.py, and optimization_engines/_ls_ik.py, none of which
+    know what an ESDF is. Smuggling grid data out as a 5th return value would
+    silently break all of those (ValueError: too many values to unpack) --
+    the isinstance branch below intentionally raises instead of trying to
+    represent a continuous field as CUDA primitives.
+    CUDADifferentiableSDFCollisionChecker.set_world checks for ESDFWorldGeom
+    itself, *before* calling this function, and caches the grid separately;
+    it never reaches this branch for a real ESDF world.
     """
     empty_s = np.zeros((0, 4),  dtype=np.float32)
     empty_c = np.zeros((0, 7),  dtype=np.float32)
     empty_b = np.zeros((0, 15), dtype=np.float32)
     empty_h = np.zeros((0, 6),  dtype=np.float32)
+
+    if isinstance(world_geom, ESDFWorldGeom):
+        raise NotImplementedError(
+            "ESDFWorldGeom cannot be converted to CUDA primitive arrays (it "
+            "is a dense field, not a batch of discrete Sphere/Capsule/Box/"
+            "HalfSpace obstacles). Only "
+            "CUDADifferentiableSDFCollisionChecker.compute_world_collision_distance "
+            "understands ESDFWorldGeom -- it intercepts it in set_world "
+            "before reaching this function. Other world-collision backends "
+            "(RoboGPU, VAMP, LS-IK trajopt) do not support ESDF worlds."
+        )
 
     axes = world_geom.get_batch_axes()
 
@@ -225,7 +255,7 @@ def _pose_rotation_matrix_jax(pose) -> jax.Array:
 
 
 def _extract_world_arrays_jax(
-    world_geom: CollGeom,
+    world_geom: Union[CollGeom, ESDFWorldGeom],
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Traceable analogue of :func:`_extract_world_arrays` (returns jnp arrays).
 
@@ -237,11 +267,28 @@ def _extract_world_arrays_jax(
         capsules   — float32 [Mc, 7]
         boxes      — float32 [Mb, 15]
         halfspaces — float32 [Mh, 6]
+
+    NOTE on ESDFWorldGeom: same 4-tuple-contract reasoning as
+    :func:`_extract_world_arrays` -- this function is also imported directly
+    by _vamp_collision.py and unpacked as exactly 4 values. Mirrors that
+    function's ESDFWorldGeom branch (raises instead of trying to return a
+    5th value); keep the two in sync.
     """
     empty_s = jnp.zeros((0, 4),  dtype=jnp.float32)
     empty_c = jnp.zeros((0, 7),  dtype=jnp.float32)
     empty_b = jnp.zeros((0, 15), dtype=jnp.float32)
     empty_h = jnp.zeros((0, 6),  dtype=jnp.float32)
+
+    if isinstance(world_geom, ESDFWorldGeom):
+        raise NotImplementedError(
+            "ESDFWorldGeom cannot be converted to CUDA primitive arrays (it "
+            "is a dense field, not a batch of discrete Sphere/Capsule/Box/"
+            "HalfSpace obstacles). Only "
+            "CUDADifferentiableSDFCollisionChecker.compute_world_collision_distance "
+            "understands ESDFWorldGeom -- it intercepts it in set_world "
+            "before reaching this function. Other world-collision backends "
+            "(VAMP) do not support ESDF worlds."
+        )
 
     axes = world_geom.get_batch_axes()
 
@@ -349,6 +396,32 @@ class CUDADifferentiableSDFCollisionChecker:
     World geometry types supported (all four are handled by CUDA kernels):
         Sphere, Capsule, Box, HalfSpace
 
+    Also accepted: ESDFWorldGeom (a dense signed-distance grid) -- baseline
+    (v1) dispatch, bypasses the CUDA kernel and queries the field with a
+    pure-JAX trilinear sample instead (collision/_esdf.py::esdf_query_jax).
+    Only RobotCollisionSpherized (sphere) robot geometry is supported with an
+    ESDF world so far, and it cannot be combined with coarse_inner -- see
+    _compute_world_impl / compute_world_collision_distance.
+
+    ESDF-path verification status (as of the change that added ESDFWorldGeom
+    support): __init__/set_world's ESDF-intercept branches, and
+    compute_world_collision_distance's ESDF dispatch in _compute_world_impl
+    (distance value AND jax.grad, checked against an analytic box-SDF oracle)
+    were verified end-to-end via this class -- CPU JAX backend, with FK
+    forced to use_cuda=False by a scratch-only test harness, since this
+    class's _at_config_batched always calls
+    robot.forward_kinematics(..., use_cuda=True) regardless of world-geometry
+    type. That FK-CUDA call itself (the only thing the ESDF path shares with
+    the rest of this class that is NOT pure JAX) is therefore still
+    UNVERIFIED end-to-end -- jax's CUDA PJRT backend cannot currently
+    initialize on the dev box used for this change (RTX 5070 / sm_120 under
+    WSL2; segfaults inside jaxlib's PJRT client init for both the repo-pinned
+    jax-cuda13-plugin==0.10.2 and the newest available ==0.11.0 -- confirmed
+    unrelated to this code, since a raw nvcc-built CUDA kernel runs cleanly
+    on the same GPU). Re-verify compute_world_collision_distance on an
+    ESDFWorldGeom with the real use_cuda=True FK path once a working CUDA
+    JAX backend is available.
+
     Usage::
 
         from pyroffi.collision import RobotCollisionSpherized
@@ -406,6 +479,12 @@ class CUDADifferentiableSDFCollisionChecker:
         self._wc = None          # [Mc, 7]  float32, device
         self._wb = None          # [Mb, 15] float32, device
         self._wh = None          # [Mh, 6]  float32, device
+        # Baseline (v1) ESDF world cache -- set instead of (not alongside
+        # meaningfully) ws/wc/wb/wh above when world_geom is an
+        # ESDFWorldGeom; see set_world and _compute_world_impl.
+        self._esdf_grid = None        # [nx, ny, nz] float32, device
+        self._esdf_origin = None      # [3] float32, device
+        self._esdf_voxel_size = None  # python float
         self._cached_world_id = None   # id() of the last world_geom object
 
         # JIT cache — keyed on robot object identity.
@@ -452,12 +531,21 @@ class CUDADifferentiableSDFCollisionChecker:
 
     # ── World geometry caching ─────────────────────────────────────────────
 
-    def set_world(self, world_geom: CollGeom) -> None:
+    def set_world(self, world_geom: Union[CollGeom, ESDFWorldGeom]) -> None:
         """Pre-upload world geometry to the device (call once, before the loop).
 
         Converts world_geom to flat float32 numpy arrays and uploads them as
         JAX device arrays.  Subsequent calls to compute_world_collision_distance
         reuse these device arrays without any host→device copy.
+
+        If world_geom is an ESDFWorldGeom (baseline v1 ESDF world), it is
+        intercepted here -- BEFORE _extract_world_arrays -- and cached
+        separately as the dense grid/origin/voxel_size; ws/wc/wb/wh are set
+        to the (always-empty, in this case) primitive arrays.
+        _extract_world_arrays itself raises on ESDFWorldGeom (see its
+        docstring) precisely because it's shared by other backends that
+        don't understand ESDF, so this checker must recognize the type
+        itself rather than route it through that shared function.
 
         Also invalidates any cached JIT'd world-collision function so that the
         next compute_world_collision_distance call retraces with the new world
@@ -468,17 +556,29 @@ class CUDADifferentiableSDFCollisionChecker:
         # accessing e.g. Sphere.radius would otherwise stage tracers that
         # _extract_world_arrays cannot convert to numpy.
         with jax.ensure_compile_time_eval():
-            ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
-            self._ws = jnp.array(ws_np)
-            self._wc = jnp.array(wc_np)
-            self._wb = jnp.array(wb_np)
-            self._wh = jnp.array(wh_np)
+            if isinstance(world_geom, ESDFWorldGeom):
+                self._ws = jnp.zeros((0, 4),  dtype=jnp.float32)
+                self._wc = jnp.zeros((0, 7),  dtype=jnp.float32)
+                self._wb = jnp.zeros((0, 15), dtype=jnp.float32)
+                self._wh = jnp.zeros((0, 6),  dtype=jnp.float32)
+                self._esdf_grid = jnp.asarray(world_geom.grid, dtype=jnp.float32)
+                self._esdf_origin = jnp.asarray(world_geom.origin, dtype=jnp.float32)
+                self._esdf_voxel_size = float(world_geom.voxel_size)
+            else:
+                ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geom)
+                self._ws = jnp.array(ws_np)
+                self._wc = jnp.array(wc_np)
+                self._wb = jnp.array(wb_np)
+                self._wh = jnp.array(wh_np)
+                self._esdf_grid = None
+                self._esdf_origin = None
+                self._esdf_voxel_size = None
         self._cached_world_id = id(world_geom)
         # Invalidate JIT cache so the new world shapes trigger retracing.
         self._cached_robot_id = None
         self._jit_world = None
 
-    def _ensure_world_cache(self, world_geom: CollGeom) -> None:
+    def _ensure_world_cache(self, world_geom: Union[CollGeom, ESDFWorldGeom]) -> None:
         """Lazily populate the world cache if world_geom changed."""
         if id(world_geom) != self._cached_world_id:
             self.set_world(world_geom)
@@ -647,6 +747,17 @@ class CUDADifferentiableSDFCollisionChecker:
 
         For RobotCollision (capsule): uses the type-split capsule kernel.
 
+        Baseline (v1) ESDF dispatch: when self._esdf_grid is not None (an
+        ESDFWorldGeom was set via set_world), this bypasses ws/wc/wb/wh and
+        the CUDA kernel entirely, querying the pure-JAX trilinear ESDF field
+        instead (collision/_esdf.py::esdf_query_jax). ws/wc/wb/wh are still
+        accepted for call-site symmetry with the non-ESDF path -- set_world
+        leaves them as empty arrays whenever an ESDF world is set -- but are
+        unused in that branch. See scratch/esdf_prototype.py's ARCHITECTURE
+        NOTE: a forward-only CUDA/FFI trilinear kernel + custom_jvp tangent
+        is the faithful-V2 swap target for this Query dispatch, not built
+        here.
+
         Args:
             cfg — [*batch, DOF] or [DOF]
             ws  — [Ms, 4]   world spheres (device)
@@ -654,10 +765,39 @@ class CUDADifferentiableSDFCollisionChecker:
             wb  — [Mb, 15]  world boxes (device)
             wh  — [Mh, 6]   world halfspaces (device)
         """
-        M = ws.shape[0] + wc.shape[0] + wb.shape[0] + wh.shape[0]
         is_batched = jnp.asarray(cfg).ndim > 1
 
         coll = self._at_config_batched(robot, cfg)
+
+        if self._esdf_grid is not None:
+            if not isinstance(self._inner, RobotCollisionSpherized):
+                raise NotImplementedError(
+                    "ESDF world-collision dispatch only supports "
+                    "RobotCollisionSpherized (sphere) robot geometry so far "
+                    f"-- got {type(self._inner).__name__}. Sampling an ESDF "
+                    "along a capsule's axis is not implemented yet."
+                )
+            centers_soa, radii, S, N, batch_shape = self._sphere_robot_arrays(coll, is_batched)
+            B = radii.shape[0]
+            # centers_soa is [3, B, K] SoA (K = S*N); esdf_query_jax wants
+            # AoS [..., 3], matching scratch/esdf_prototype.py's validated
+            # ESDFRobotWorldCollisionChecker.
+            centers_aoi = jnp.transpose(centers_soa, (1, 2, 0)).reshape(B, S, N, 3)
+            sdf_at_center = esdf_query_jax(
+                centers_aoi, self._esdf_grid, self._esdf_origin, self._esdf_voxel_size
+            )  # [B, S, N]
+            # Sphere signed distance = SDF at center minus radius (same
+            # convention as collision/_geometry_pairs.py::box_sphere).
+            dist_per_sphere = sdf_at_center - radii.reshape(B, S, N)  # [B, S, N]
+            # Min over the sphere axis (S) -> one distance per link, the
+            # same reduction collision_world_sphere_reduced performs
+            # internally for the CUDA-primitive path below.
+            dist_per_link = jnp.min(dist_per_sphere, axis=1)  # [B, N]
+            # M=1: a dense field is a single fused "world object".
+            out = dist_per_link[..., None]  # [B, N, 1]
+            return self._inner._mask_inactive_world(out.reshape(*batch_shape, N, 1))
+
+        M = ws.shape[0] + wc.shape[0] + wb.shape[0] + wh.shape[0]
 
         if isinstance(self._inner, RobotCollisionSpherized):
             centers_soa, radii, S, N, batch_shape = self._sphere_robot_arrays(coll, is_batched)
@@ -845,11 +985,13 @@ class CUDADifferentiableSDFCollisionChecker:
         self,
         robot: "Robot",
         cfg: Float[Array, "*batch_cfg actuated_count"],
-        world_geom: CollGeom,
+        world_geom: Union[CollGeom, ESDFWorldGeom],
     ) -> Float[Array, "*batch_combined N M"]:
         """Compute signed distances between all robot links and world obstacles.
 
         Matches the signature of RobotCollision.compute_world_collision_distance.
+        world_geom may also be an ESDFWorldGeom (baseline v1 ESDF world) --
+        see _compute_world_impl's ESDF branch and collision/_esdf.py.
 
         On the first call for a given (robot, world_geom) pair, this triggers
         XLA compilation.  Subsequent calls with the same shapes hit the compiled
@@ -863,9 +1005,35 @@ class CUDADifferentiableSDFCollisionChecker:
         self._ensure_jit(robot)
         cfg = jnp.asarray(cfg)
 
+        if self._esdf_grid is not None and self._coarse_inner is not None:
+            # _compute_world_impl_coarse_first doesn't know about ESDF: it
+            # would run the coarse CUDA kernel against the (empty, for an
+            # ESDF world) ws/wc/wb/wh arrays, so jnp.all(coarse_out > 0) is
+            # vacuously true over an empty array and it would ALWAYS report
+            # "coarse clear" -- silently skipping the fine check and
+            # returning a collision-free result no matter the real ESDF
+            # distance. Fail loudly instead of risking that.
+            raise NotImplementedError(
+                "Two-phase coarse-first checking is not supported together "
+                "with an ESDF world yet. Construct this checker without "
+                "coarse_inner to use an ESDF world."
+            )
+
         # The two-phase coarse checker uses lax.cond on a coarse pass and is
         # non-differentiable by design (see make_cuda_checker docstring).
         if self._coarse_inner is not None:
+            return self._jit_world(cfg, self._ws, self._wc, self._wb, self._wh)
+
+        if self._esdf_grid is not None:
+            # _compute_world_impl's ESDF branch is pure JAX (esdf_query_jax)
+            # -- ordinary autodiff already flows through self._jit_world
+            # directly, so the custom_jvp + pure-JAX-twin pattern below is
+            # both unneeded AND wrong here: its tangent rule (below) calls
+            # self._inner.compute_world_collision_distance(robot, q,
+            # world_geom), which dispatches world_geom through the
+            # CollGeom-only pairwise `collide` table (_collision.py) --
+            # ESDFWorldGeom isn't a registered CollGeom pair type there, so
+            # that call would raise instead of returning a tangent.
             return self._jit_world(cfg, self._ws, self._wc, self._wb, self._wh)
 
         # The FFI kernel is opaque to autodiff.  Expose a custom_jvp whose
