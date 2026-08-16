@@ -406,21 +406,28 @@ class CUDADifferentiableSDFCollisionChecker:
     ESDF-path verification status (as of the change that added ESDFWorldGeom
     support): __init__/set_world's ESDF-intercept branches, and
     compute_world_collision_distance's ESDF dispatch in _compute_world_impl
-    (distance value AND jax.grad, checked against an analytic box-SDF oracle)
-    were verified end-to-end via this class -- CPU JAX backend, with FK
-    forced to use_cuda=False by a scratch-only test harness, since this
+    (distance value AND jax.grad, checked against an analytic box-SDF
+    oracle) were first verified via this class on the CPU JAX backend, with
+    FK forced to use_cuda=False by a scratch-only test harness, since this
     class's _at_config_batched always calls
     robot.forward_kinematics(..., use_cuda=True) regardless of world-geometry
-    type. That FK-CUDA call itself (the only thing the ESDF path shares with
-    the rest of this class that is NOT pure JAX) is therefore still
-    UNVERIFIED end-to-end -- jax's CUDA PJRT backend cannot currently
-    initialize on the dev box used for this change (RTX 5070 / sm_120 under
-    WSL2; segfaults inside jaxlib's PJRT client init for both the repo-pinned
-    jax-cuda13-plugin==0.10.2 and the newest available ==0.11.0 -- confirmed
-    unrelated to this code, since a raw nvcc-built CUDA kernel runs cleanly
-    on the same GPU). Re-verify compute_world_collision_distance on an
-    ESDFWorldGeom with the real use_cuda=True FK path once a working CUDA
-    JAX backend is available.
+    type -- leaving that real FK-CUDA call itself unverified end-to-end at
+    the time (jax's CUDA PJRT backend could not initialize on the RTX 5070 /
+    sm_120 dev box used for that change, under both the repo-pinned
+    jax-cuda13-plugin==0.10.2 and the newest available ==0.11.0 at the time,
+    confirmed unrelated to this code since a raw nvcc-built CUDA kernel ran
+    cleanly on the same GPU). Subsequently re-verified with the real
+    use_cuda=True FK path and the real compiled _collision_cuda_lib.so on
+    that same GPU, after upgrading the venv to jax/jaxlib 0.11.0 with
+    LD_LIBRARY_PATH/CUDA_ROOT pointed at the venv's own pip-installed
+    nvidia-* runtime libs (the earlier failure was a runtime-lib resolution
+    issue on a box with two side-by-side CUDA installs, not a genuine sm_120
+    kernel gap) -- see scratch/esdf_cuda_gpu_verify.py. Result matched the
+    CPU/mocked-FK run bit-for-bit: min-link distance error 0.00309 (well
+    under the 2-voxel budget at voxel_size=0.02) and gradient cosine
+    similarity 0.98913 against the analytic box-SDF oracle, with
+    jax.grad flowing cleanly through the real CUDA FK kernel into
+    esdf_query_jax.
 
     Usage::
 
