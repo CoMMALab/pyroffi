@@ -135,13 +135,13 @@ class ContactRichTrajOptConfig:
     """Scaling on the dual-ascent step (mu += dual_scale * rho * residual)."""
 
     # --- Early termination -------------------------------------------------
-    #   Both loops are fixed-length `lax.scan`s, so with these enabled a solve
-    #   that converges early stops instead of burning the remaining iterations.
-    #   OFF by default: on the AL subproblems this solver actually sees, the
-    #   penalty terms keep the gradient norm far above any sensible tolerance,
-    #   so the check never fires and the per-iteration branch measured ~11%
-    #   *slower* on the bimanual box-lift benchmark. Turn them on for problems
-    #   that do reach a stationary point before the iteration budget runs out.
+    #   Both loops run as `lax.while_loop`s capped at `n_inner_iters` /
+    #   `n_outer_iters`, so with these enabled a solve that converges early
+    #   stops instead of burning the remaining iterations. OFF by default: on
+    #   the AL subproblems this solver actually sees, the penalty terms keep
+    #   the gradient norm far above any sensible tolerance, so the check never
+    #   fires. Turn them on for problems that do reach a stationary point
+    #   before the iteration budget runs out.
     grad_tol: float = 0.0
     """Inner L-BFGS stops once ``max|grad|`` drops below this. 0 disables."""
     constraint_tol: float = 0.0
@@ -314,21 +314,22 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: ContactRichTrajOptConfig):
             converged,
         )
 
-    # Gated on the *static* config so the default (disabled) emits exactly the
-    # graph it always did. `lax.cond` does genuinely skip the branch on GPU here
-    # -- these solvers optimize a single z, so it is not vmapped down into a
-    # `select` -- but on the AL subproblems this solver actually sees, the
-    # gradient norm never approaches grad_tol, so the check only ever costs a
-    # per-iteration branch. Enable it for problems that do converge early.
-    if cfg.grad_tol > 0.0:
-        def step(carry, _):
-            return jax.lax.cond(carry[-1], lambda c: c, body, carry), None
-    else:
-        def step(carry, _):
-            return body(carry), None
+    # `while_loop` (not a fixed-length `scan`): with `grad_tol` disabled
+    # (default) `converged` is always `False` and this runs exactly
+    # `n_inner_iters` steps, same as before. On the AL subproblems this solver
+    # actually sees, the gradient norm never approaches grad_tol, so leaving it
+    # disabled is a no-op; enable it for problems that do converge early.
+    # Safe under `while_loop` because `contact_rich_trajopt` is only ever
+    # called under `stop_gradient` inside `ioc.inner.solve_implicit` (the IOC
+    # gradient comes from the analytic implicit-function-theorem `_bwd`, not
+    # from differentiating this loop) -- reverse-mode AD through `while_loop`
+    # is unsupported by JAX regardless.
+    def cond_fn(carry):
+        it, converged = carry[10], carry[-1]
+        return jnp.logical_and(it < cfg.n_inner_iters, jnp.logical_not(converged))
 
-    (_, best_x, *_), _ = jax.lax.scan(step, init, None, length=cfg.n_inner_iters)
-    return best_x
+    final = jax.lax.while_loop(cond_fn, body, init)
+    return final[1]
 
 
 # ---------------------------------------------------------------------------
@@ -398,25 +399,36 @@ def _contact_rich_jax(
             converged = jnp.bool_(False)
         return (z, mu, nu, rho_g, rho_o, converged)
 
-    if opt_cfg.constraint_tol > 0.0:
-        def outer(carry, _):
-            return jax.lax.cond(carry[-1], lambda c: c, outer_body, carry), None
-    else:
-        def outer(carry, _):
-            return outer_body(carry), None
+    # `while_loop`, mirroring the inner solve: with `constraint_tol` disabled
+    # (default) `converged` is always `False` and this runs exactly
+    # `n_outer_iters` steps. Enabled, it uses the residuals (`g`, `b`) this
+    # step already computes for the dual-ascent update, so there is no new
+    # criterion being introduced here -- just an earlier exit once it stops
+    # moving. Safe under `while_loop` for the same stop_gradient/custom_vjp
+    # reason as the inner solve above.
+    outer_init = (
+        z,
+        jnp.zeros((T, max(n_grasp, 1))),
+        jnp.zeros((T, 6)),
+        jnp.array(opt_cfg.rho_grasp, jnp.float32),
+        jnp.array(opt_cfg.rho_obj, jnp.float32),
+        jnp.bool_(False),
+        jnp.int32(0),
+    )
 
-    (z, mu, nu, rho_g, rho_o, _), _ = jax.lax.scan(
-        outer,
-        (
-            z,
-            jnp.zeros((T, max(n_grasp, 1))),
-            jnp.zeros((T, 6)),
-            jnp.array(opt_cfg.rho_grasp, jnp.float32),
-            jnp.array(opt_cfg.rho_obj, jnp.float32),
-            jnp.bool_(False),
-        ),
-        None,
-        length=opt_cfg.n_outer_iters,
+    def outer_cond(carry):
+        it, converged = carry[6], carry[5]
+        return jnp.logical_and(it < opt_cfg.n_outer_iters, jnp.logical_not(converged))
+
+    def outer_step(carry):
+        z, mu, nu, rho_g, rho_o, converged, it = carry
+        z, mu, nu, rho_g, rho_o, converged = outer_body(
+            (z, mu, nu, rho_g, rho_o, converged)
+        )
+        return (z, mu, nu, rho_g, rho_o, converged, it + 1)
+
+    z, mu, nu, rho_g, rho_o, _, _ = jax.lax.while_loop(
+        outer_cond, outer_step, outer_init
     )
 
     q = z[:n_q].reshape(T, ndof)

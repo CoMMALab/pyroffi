@@ -1,0 +1,20 @@
+{
+  "KinematicConstraint": {
+    "pos_err": 1.0,
+    "rot_err": 5.0
+  },
+  "StablePlacement": {
+    "goal_support": 2.0
+  },
+  "TrajectoryLength": {
+    "traj_length": 0.001
+  },
+  "soft": {
+    "dist_from_origin": 0.5,
+    "min_y": 0.1,
+    "max_y": 0.1,
+    "max_obj_dist": 0.3,
+    "min_obj_dist": 0.1,
+    "align_yaw": 0.05
+  }
+}

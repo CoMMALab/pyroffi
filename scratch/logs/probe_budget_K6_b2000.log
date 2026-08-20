@@ -1,0 +1,12 @@
+[segments] K=6 d=2 T=30 M=8 budget=2000 solves
+  seed 0: implicit=1.07e-05  fd=5.05e-04  cmaes=4.70e-05  kkt=1.18e-02  cioc=1.87e-04  random=1.46e-02
+wrote /tmp/probe_budget_K6_b2000.json
+
+    method   theta L1       regret     wall
+  implicit      0.625    1.067e-05    30.3s
+  unrolled      1.831    1.625e-01    90.8s
+        fd      0.449    5.054e-04    30.4s
+     cmaes      0.356    4.699e-05    27.9s
+       kkt      1.588    1.182e-02     1.8s
+      cioc      0.381    1.870e-04     7.4s
+    random      0.741    1.456e-02     0.0s

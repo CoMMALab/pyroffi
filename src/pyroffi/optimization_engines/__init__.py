@@ -131,6 +131,8 @@ from ._contact_rich_trajopt import (
     ContactRichTrajOptConfig as ContactRichTrajOptConfig,
 )
 from ._contact_rich_trajopt import contact_rich_trajopt as contact_rich_trajopt
+from ._dynamics_trajopt import DynamicsTrajOptConfig as DynamicsTrajOptConfig
+from ._dynamics_trajopt import dynamics_trajopt as dynamics_trajopt
 from ._chomp_optimization import ChompTrajOptConfig as ChompTrajOptConfig
 from ._chomp_optimization import chomp_trajopt as chomp_trajopt
 from ._stomp_optimization import StompTrajOptConfig as StompTrajOptConfig

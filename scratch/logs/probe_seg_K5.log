@@ -1,0 +1,18 @@
+[segments] K=9 d=2 T=30 M=9 budget=18000 solves
+  seed 0: implicit=2.87e-05  fd=1.29e-03  cmaes=2.97e-05  kkt=1.39e-03  cioc=-3.00e-04  random=8.92e-03
+  seed 1: implicit=7.09e-06  fd=7.26e-05  cmaes=5.21e-06  kkt=7.03e-03  cioc=3.29e-04  random=9.47e-03
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 343, in <module>
+    tyro.cli(main)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/tyro/_cli.py", line 322, in cli
+    out = run_with_args_from_cli()
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 337, in main
+    run(benchmark, n_contexts, n_seeds, n_timesteps, n_iter, budget, k_bumps,
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 201, in run
+    _screen_demos(rel, benchmark, seed, demo_iter)
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 143, in _screen_demos
+    raise RuntimeError(
+RuntimeError: [segments seed 2] 1/9 demonstrations are not local optima: max relative stationarity = 7.79e-05 > 1e-06 after 2500 inner iterations. The recovered costs would not be valid; raise the demonstration iteration count (ioc.bench2d.run.DEMO_N_ITER).

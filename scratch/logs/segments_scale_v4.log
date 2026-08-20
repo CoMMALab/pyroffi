@@ -1,0 +1,69 @@
+[2026-08-20T13:27:44-04:00] === segments K=6 (S=2, n-contexts=8, budget=2000) ===
+[segments] K=6 d=2 T=30 M=8 budget=2000 solves
+  seed 0: implicit=1.07e-05  fd=5.05e-04  cmaes=4.70e-05  kkt=1.18e-02  cioc=1.87e-04  random=1.46e-02
+  seed 1: implicit=2.63e-05  fd=2.33e-03  cmaes=4.56e-04  kkt=4.44e-02  cioc=9.46e-04  random=1.22e-01
+  seed 2: implicit=1.59e-05  fd=-4.27e-04  cmaes=3.11e-05  kkt=8.23e-02  cioc=-2.03e-03  random=2.35e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K6.json
+
+    method   theta L1       regret     wall
+  implicit      0.625    1.585e-05    30.3s
+  unrolled      0.505    1.358e-05    29.2s
+        fd      0.434    5.054e-04    30.5s
+     cmaes      0.356    4.699e-05    28.6s
+       kkt      1.601    4.438e-02     1.5s
+      cioc      0.381    1.870e-04     3.8s
+    random      0.741    2.347e-02     0.0s
+[2026-08-20T13:35:20-04:00] K=6 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K6.json
+[2026-08-20T13:35:20-04:00] === segments K=12 (S=4, n-contexts=12, budget=2000) ===
+[segments] K=12 d=2 T=30 M=12 budget=2000 solves
+  seed 0: implicit=4.01e-06  fd=7.00e-04  cmaes=5.93e-04  kkt=9.05e-04  cioc=4.31e-04  random=3.28e-03
+  seed 1: implicit=5.22e-05  fd=3.15e-02  cmaes=6.07e-04  kkt=2.83e-02  cioc=-4.21e-04  random=7.54e-02
+  seed 2: implicit=7.99e-05  fd=4.45e-03  cmaes=4.38e-04  kkt=5.65e-03  cioc=1.75e-05  random=2.12e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K12.json
+
+    method   theta L1       regret     wall
+  implicit      0.450    5.217e-05    20.2s
+  unrolled      0.281    6.211e-05    19.2s
+        fd      0.975    4.446e-03    20.0s
+     cmaes      0.702    5.926e-04    19.5s
+       kkt      1.169    5.653e-03     1.8s
+      cioc      0.845    1.749e-05     5.0s
+    random      1.005    2.119e-02     0.0s
+[2026-08-20T13:41:08-04:00] K=12 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K12.json
+[2026-08-20T13:41:08-04:00] === segments K=24 (S=8, n-contexts=24, budget=2000) ===
+[segments] K=24 d=2 T=30 M=24 budget=2000 solves
+  seed 0: implicit=1.03e-03  fd=1.58e-02  cmaes=3.70e-03  kkt=7.93e-03  cioc=8.77e-04  random=1.44e-02
+  seed 1: implicit=1.36e-03  fd=3.37e-03  cmaes=4.88e-03  kkt=1.08e-02  cioc=1.08e-03  random=7.14e-03
+  seed 2: implicit=2.36e-04  fd=4.90e-03  cmaes=2.94e-03  kkt=5.36e-03  cioc=-3.44e-05  random=6.69e-03
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K24.json
+
+    method   theta L1       regret     wall
+  implicit      0.622    1.028e-03    11.5s
+  unrolled      0.826    1.609e-03    10.9s
+        fd      0.804    4.901e-03    11.9s
+     cmaes      0.805    3.704e-03    10.5s
+       kkt      1.402    7.932e-03     3.4s
+      cioc      0.930    8.769e-04     8.8s
+    random      0.794    7.137e-03     0.0s
+[2026-08-20T13:45:46-04:00] K=24 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K24.json
+[2026-08-20T13:45:46-04:00] === segments K=48 (S=16, n-contexts=48, budget=2000) ===
+[segments] K=48 d=2 T=30 M=48 budget=2000 solves
+  seed 0: implicit=4.32e-03  fd=2.86e-02  cmaes=1.85e-02  kkt=9.10e-03  cioc=-2.03e-04  random=2.86e-02
+  seed 1: implicit=5.33e-03  fd=3.63e-02  cmaes=1.61e-02  kkt=1.80e-02  cioc=-3.78e-04  random=3.63e-02
+  seed 2: implicit=3.69e-03  fd=1.60e-02  cmaes=1.92e-02  kkt=2.93e-03  cioc=2.17e-04  random=1.60e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K48.json
+
+    method   theta L1       regret     wall
+  implicit      0.846    4.325e-03     7.0s
+  unrolled      0.700    3.705e-03     6.7s
+        fd      0.757    2.855e-02     0.0s
+     cmaes      0.732    1.852e-02     7.5s
+       kkt      1.483    9.096e-03     9.0s
+      cioc      0.699   -2.028e-04    21.5s
+    random      0.757    2.855e-02     0.0s
+[2026-08-20T13:50:56-04:00] K=48 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K48.json
+[2026-08-20T13:50:56-04:00] all four segments K values collected -- rebuilding fig1_scaling
+[scaling]
+  [fig1] censored (target never reached): K=6 fd 1/3 seeds, K=12 fd 1/3 seeds, K=24 fd 0/3 seeds, K=24 cmaes 0/3 seeds, K=48 implicit 1/3 seeds, K=48 fd 0/3 seeds, K=48 cmaes 0/3 seeds
+  wrote figures/fig1_scaling.pdf|png
+[2026-08-20T13:50:59-04:00] run_segments_scale_v4.sh done, FAIL=0

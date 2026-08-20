@@ -215,6 +215,10 @@ class GRiDDynamics:
             ],
             dtype=jnp.float32,
         )
+        # Eager (concrete) flag: `bool((self._damping != 0).any())` inside a
+        # traced function is not jit-safe (the comparison traces instead of
+        # evaluating), so the branch decision must be precomputed here.
+        self._has_damping = bool((self._damping != 0).any())
 
     # ------------------------------------------------------------------
     # Joint-order / sign mapping helpers.
@@ -467,16 +471,17 @@ class GRiDDynamics:
     ) -> Float[Array, "*batch n n"]:
         """Joint-space mass matrix M(q) on the GPU.
 
-        Computed by the custom ``CrbaKernel``: XImats are loaded once per
-        timestep, then each column is ``ID(q, 0, e_j, g=0)`` via GRiD's
-        thread-parallel inverse-dynamics inner routine (exactly CRBA's M).
+        Computed by GRiD's own generated ``crba_kernel`` (BFS-parallel
+        composite-inertia accumulation), not a per-column ID sweep.
         """
         return self._crba_call(q)
 
     def _crba_raw(self, q: Array) -> Array:
         n = self.num_dof
         batch_axes, (qf,) = self._flatten(q)
-        buf = self._call("crba", (qf.shape[0], n, n), qf)  # [b, col, row]
+        buf = self._call(
+            "crba", (qf.shape[0], n, n), qf, gravity=onp.float32(self.gravity)
+        )  # [b, col, row]
         M = self._mat_from_grid(jnp.swapaxes(buf, -1, -2))
         return M.reshape(*batch_axes, n, n)
 
@@ -540,7 +545,7 @@ class GRiDDynamics:
         # The kernel differentiates GRiD's FD at the effective (damping-
         # compensated) torque; add the -Minv @ diag(d) chain-rule term for qd.
         G = self._fdgrad_call(q, qd, u - self._damping * qd)
-        if bool((self._damping != 0).any()):
+        if self._has_damping:
             Minv = self._minv_call(q)
             G = G.at[..., :, n:].add(-Minv * self._damping[None, :])
         return G

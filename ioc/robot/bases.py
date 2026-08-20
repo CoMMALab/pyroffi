@@ -1,0 +1,140 @@
+"""Cost bases for the robot experiments.
+
+A basis is a pair `(residual_fn, feature_names)` where
+`residual_fn(x_flat, scene)` returns one residual vector r_k per feature and
+phi_k = ||r_k||^2.  Features are written as residuals, not scalars, so the inner
+problem stays a nonlinear least-squares problem with a PSD Gauss-Newton Hessian
+(see `ioc.inner`).
+
+Kinematic bases
+---------------
+`k3`   effort, collision, smoothness -- the E1 basis.
+`k9`   one effort weight per joint, plus collision and smoothness.
+`k16`  per-joint effort *and* smoothness, plus collision and a posture term.
+
+k9/k16 exist for the cost-dimension sweep: they grow K while the trajectory
+dimension and the landscape geometry stay fixed, which is the regime where the
+per-step solve count is the whole story.  Growing K by adding *structurally
+different* features would confound cost dimension with problem difficulty.
+
+`collinear` is a deliberate non-identifiability control: the smoothness residual
+is replaced by a second copy of the effort residual.  No method can separate the
+two, the recovered weights should be flat along their difference, and the Gram
+certificate should show it.
+
+Dynamic basis
+-------------
+`dynamic` adds an RNEA torque feature, which is what makes the demonstrations
+depend on mass, inertia and payload rather than geometry alone.  E3 fits a
+kinematic basis to those demonstrations and measures the regret -- the price of
+ignoring dynamics.
+"""
+
+import jax
+import jax.numpy as jnp
+
+DT = 0.1  # [s] timestep between waypoints
+GRAVITY = -9.81
+
+K3_NAMES = ("effort", "collision", "smooth")
+DYNAMIC_NAMES = ("effort", "collision", "smooth", "torque")
+
+
+def x_dtype():
+    """float64 when x64 is enabled, else float32 -- the graph's working dtype."""
+    return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
+
+def kinematic(problem, basis="k3", collinear=False):
+    """Return `(residual_fn, names)` for one of the kinematic bases."""
+    dof = problem.dof
+
+    def residual_fn(x_flat, scene):
+        q = problem.unpack(x_flat, scene)
+        dq = q[1:] - q[:-1]
+        ddq = q[2:] - 2.0 * q[1:-1] + q[:-2]
+        r_coll = problem.clearance_residual(q, scene)
+
+        if basis == "k3":
+            r_effort, r_smooth = dq.reshape(-1), ddq.reshape(-1)
+            if collinear:
+                r_smooth = r_effort
+            return (r_effort, r_coll, r_smooth)
+        if basis == "k9":
+            return tuple([dq[:, j] for j in range(dof)] + [r_coll, ddq.reshape(-1)])
+        if basis == "k16":
+            nominal = 0.5 * (scene.q_start + scene.q_goal)
+            return tuple(
+                [dq[:, j] for j in range(dof)]
+                + [ddq[:, j] for j in range(dof)]
+                + [r_coll, (q - nominal).reshape(-1)]
+            )
+        raise ValueError(basis)
+
+    if basis == "k3":
+        names = K3_NAMES
+    elif basis == "k9":
+        names = tuple(f"effort_j{j}" for j in range(dof)) + ("collision", "smooth")
+    elif basis == "k16":
+        names = (
+            tuple(f"effort_j{j}" for j in range(dof))
+            + tuple(f"smooth_j{j}" for j in range(dof))
+            + ("collision", "posture")
+        )
+    else:
+        raise ValueError(basis)
+    return residual_fn, names
+
+
+def make_payload(problem, payload_kg):
+    """Constant downward force at the last body, as a [torque; force] wrench."""
+    if payload_kg <= 0:
+        return None
+    return jnp.zeros((problem.dof, 6)).at[-1, 5].set(payload_kg * GRAVITY)
+
+
+def dynamic(problem, payload_wrench=None, torque_backend="grid"):
+    """Return `(residual_fn, names)` for the kinematic basis plus RNEA torque.
+
+    `torque_backend="grid"` routes inverse dynamics through the GRiD CUDA FFI.
+    Two consequences, both handled rather than avoided:
+
+    1. GRiD computes in float32 internally, so torques carry ~2.6e-7 relative
+       error even when the surrounding graph is float64.  The torque feature is
+       whitened by a large scale (~5e5), which shrinks that error's contribution
+       to the weighted residual; the remaining effect on the outer gradient is
+       measured, not assumed.
+    2. The FFI supports one level of differentiation -- `jax.jacobian` works,
+       `jax.hessian` raises.  So the implicit adjoint must either use the
+       Gauss-Newton curvature (`adjoint_hessian="gn"`, first derivatives only) or
+       build its curvature from the float64 JAX RNEA while the forward solve
+       stays on CUDA (`adjoint_cost_fn`; see `ioc.inner`).
+    """
+
+    def torque_residual(q):
+        """RNEA torques at interior knots, from central differences."""
+        qd = (q[2:] - q[:-2]) / (2.0 * DT)
+        qdd = (q[2:] - 2.0 * q[1:-1] + q[:-2]) / (DT**2)
+        qm = q[1:-1]
+        f_ext = None
+        if payload_wrench is not None:
+            f_ext = jnp.broadcast_to(
+                payload_wrench, qm.shape[:1] + payload_wrench.shape
+            )
+        tau = problem.robot.inverse_dynamics(
+            qm, qd, qdd, gravity=GRAVITY, use_cuda=(torque_backend == "grid"),
+            f_ext=f_ext,
+        )
+        # Keep the surrounding graph in its own dtype regardless of what the
+        # kernel returns, so a float32 backend cannot silently downcast the whole
+        # trajectory optimization.
+        return tau.reshape(-1).astype(x_dtype())
+
+    def residual_fn(x_flat, scene):
+        q = problem.unpack(x_flat, scene)
+        r_effort = (q[1:] - q[:-1]).reshape(-1)
+        r_smooth = (q[2:] - 2.0 * q[1:-1] + q[:-2]).reshape(-1)
+        r_coll = problem.clearance_residual(q, scene)
+        return (r_effort, r_coll, r_smooth, torque_residual(q))
+
+    return residual_fn, DYNAMIC_NAMES

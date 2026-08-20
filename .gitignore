@@ -26,6 +26,8 @@ NVIDIA-OptiX-SDK-9.1.0-linux64-x86_64
 *mp4
 resources/*.csv
 resources/*.pdf
+resources/bench_dynamics_targets_*.npz
+*__dynbench.urdf
 .claude/
 .claude
 baselines

@@ -1,0 +1,12 @@
+[segments] K=48 d=2 T=30 M=48 budget=6000 solves
+  seed 0: implicit=1.46e-03  fd=2.47e-02  cmaes=1.26e-02  kkt=9.10e-03  cioc=-2.03e-04  random=2.86e-02
+wrote /tmp/probe_budget_K48_b6000.json
+
+    method   theta L1       regret     wall
+  implicit      1.603    1.463e-03    21.3s
+  unrolled      1.357    8.174e-04    70.4s
+        fd      0.757    2.473e-02    18.7s
+     cmaes      0.851    1.264e-02    19.8s
+       kkt      1.409    9.096e-03    10.1s
+      cioc      0.699   -2.028e-04    26.3s
+    random      0.757    2.855e-02     0.0s

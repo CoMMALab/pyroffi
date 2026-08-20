@@ -156,11 +156,11 @@ class FlatContactTrajOptConfig:
     w_track_max: float = 1e4
 
     # --- Early termination -------------------------------------------------
-    #   The inner solve is a fixed-length `lax.scan`; enabling this stops a
-    #   converged solve instead of burning the remaining iterations. OFF by
-    #   default -- see the matching note in :mod:`_contact_rich_trajopt`: on
-    #   these objectives the gradient norm never approaches the tolerance, so
-    #   the check only costs a per-iteration branch.
+    #   The inner solve runs as a `lax.while_loop` capped at `n_inner_iters`;
+    #   enabling this stops a converged solve instead of burning the remaining
+    #   iterations. OFF by default -- see the matching note in
+    #   :mod:`_contact_rich_trajopt`: on these objectives the gradient norm
+    #   never approaches the tolerance, so the check never fires.
     grad_tol: float = 0.0
     """Inner L-BFGS stops once ``max|grad|`` drops below this. 0 disables."""
 
@@ -583,18 +583,20 @@ def _inner_solve(z0, endpoint_mask, cost_fn, cfg: FlatContactTrajOptConfig):
             converged,
         )
 
-    # Gated on the *static* config so the default (disabled) emits exactly the
-    # graph it always did -- see the matching note in
-    # :mod:`_contact_rich_trajopt` for why this is off by default.
-    if cfg.grad_tol > 0.0:
-        def step(carry, _):
-            return jax.lax.cond(carry[-1], lambda c: c, body, carry), None
-    else:
-        def step(carry, _):
-            return body(carry), None
+    # `while_loop` (not a fixed-length `scan`): with `grad_tol` disabled
+    # (default) `converged` is always `False` and this runs exactly
+    # `n_inner_iters` steps, same as before; enabling it stops paying for the
+    # remaining budget once the gradient norm bottoms out. Safe here because
+    # `flat_contact_trajopt` is only ever called under `stop_gradient` inside
+    # `ioc.inner.solve_implicit` (the IOC gradient comes from the analytic
+    # implicit-function-theorem `_bwd`, not from differentiating this loop) --
+    # reverse-mode AD through `while_loop` is unsupported by JAX regardless.
+    def cond_fn(carry):
+        it, converged = carry[10], carry[-1]
+        return jnp.logical_and(it < cfg.n_inner_iters, jnp.logical_not(converged))
 
-    (_, best_x, *_), _ = jax.lax.scan(step, init, None, length=cfg.n_inner_iters)
-    return best_x
+    final = jax.lax.while_loop(cond_fn, body, init)
+    return final[1]
 
 
 # ---------------------------------------------------------------------------

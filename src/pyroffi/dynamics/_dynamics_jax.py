@@ -30,6 +30,13 @@ if TYPE_CHECKING:
 
 _DEFAULT_GRAVITY = -9.81
 
+# Dense n x n mask GEMMs (and the einsum contractions below) run at JAX's
+# default matmul precision, which is TF32 on Ampere (A5000) -- frax's dense
+# dynamics are TF32-limited as a result (measured FD rel_err ~0.55). We pin
+# the whole dense path to float32 "highest" precision so pyroffi_jax stays at
+# its usual ~4e-5 and does not regress under the rewrite.
+_HIGHEST = jax.lax.Precision.HIGHEST
+
 
 def _topological_dof_order(dyn: DynamicsInfo) -> list[int]:
     """DOF indices ordered parent-before-child (computed on static topology)."""
@@ -138,6 +145,18 @@ def _body_origin_world(X0_i: Array) -> Array:
     return jnp.array([rhat[2, 1], rhat[0, 2], rhat[1, 0]])
 
 
+def _body_origins_world(X0: Array) -> Array:
+    """World positions of all body frame origins, batched over (n, 6, 6) X0.
+
+    Vectorized version of :func:`_body_origin_world` for the stacked
+    world->body transforms produced by :func:`_spatial_data`.
+    """
+    E = X0[:, :3, :3]
+    B = X0[:, 3:, :3]
+    rhat = -jnp.matmul(jnp.swapaxes(E, -1, -2), B)  # (n, 3, 3) skew of r
+    return jnp.stack([rhat[:, 2, 1], rhat[:, 0, 2], rhat[:, 1, 0]], axis=-1)
+
+
 def _fext_to_body(dyn: DynamicsInfo, X0: list[Array], f_ext: Array) -> list[Array]:
     """Rotate per-body world-axis wrenches (at body origins) into body coords.
 
@@ -152,7 +171,185 @@ def _fext_to_body(dyn: DynamicsInfo, X0: list[Array], f_ext: Array) -> list[Arra
     return out
 
 
-def _rnea_single(
+def _skew_batched(v: Array) -> Array:
+    """Batched 3x3 cross-product matrix: ``v`` (..., 3) -> (..., 3, 3).
+
+    Built from explicit element rows (no per-vector ``jnp.block``), so it is
+    jit- and vmap-friendly and emits a single batched scatter.
+    """
+    v0, v1, v2 = v[..., 0], v[..., 1], v[..., 2]
+    z = jnp.zeros_like(v0)
+    return jnp.stack(
+        [
+            jnp.stack([z, -v2, v1], axis=-1),
+            jnp.stack([v2, z, -v0], axis=-1),
+            jnp.stack([-v1, v0, z], axis=-1),
+        ],
+        axis=-2,
+    )
+
+
+def _motion_cross(X: Array, Y: Array) -> Array:
+    """Batched spatial motion cross product ``X x Y`` (angular-first).
+
+    ``X``, ``Y`` are (..., 6) ``[omega; v]``; the result is
+    ``[omega_X x omega_Y; v_X x omega_Y + omega_X x v_Y]``.
+    """
+    return jnp.concatenate(
+        [
+            jnp.cross(X[..., :3], Y[..., :3]),
+            jnp.cross(X[..., 3:], Y[..., :3]) + jnp.cross(X[..., :3], Y[..., 3:]),
+        ],
+        axis=-1,
+    )
+
+
+def _force_cross(X: Array, Y: Array) -> Array:
+    """Batched spatial force cross product ``X x* Y`` (angular-first).
+
+    ``X`` is (..., 6) motion ``[omega; v]`` and ``Y`` is (..., 6) force
+    ``[torque; force]``; the result is
+    ``[omega x torque + v x force; omega x force]``.
+    """
+    return jnp.concatenate(
+        [
+            jnp.cross(X[..., :3], Y[..., :3]) + jnp.cross(X[..., 3:], Y[..., 3:]),
+            jnp.cross(X[..., :3], Y[..., 3:]),
+        ],
+        axis=-1,
+    )
+
+
+def _invert_motion_transform_batched(X: Array) -> Array:
+    """Batched inverse of motion transforms ``[[E, 0], [B, E]]`` (angular-first).
+
+    ``X`` is (..., 6, 6) -> (..., 6, 6); uses the closed form
+    ``[[E^T, 0], [-E^T B E^T, E^T]]`` (same as ``_invert_motion_transform``).
+    """
+    E = X[..., :3, :3]
+    B = X[..., 3:, :3]
+    Et = E.swapaxes(-1, -2)
+    C = -(Et @ B @ Et)
+    z = jnp.zeros_like(E)
+    return jnp.block([[Et, z], [C, Et]])
+
+
+def _spatial_data(
+    dyn: DynamicsInfo, q: Array
+) -> tuple[Array, Array, Array, Array]:
+    """World-frame spatial data shared by the dense RNEA/CRBA solvers.
+
+    Returns per-sample ``(S_w, I_w, mask, r)``:
+      - ``S_w``  (n, 6): world-frame joint axes, ``S_w[i] = X0[i]^-1 S[i]``.
+      - ``I_w``  (n, 6, 6): world-frame link inertias,
+        ``I_w[i] = X0[i]^T I_body[i] X0[i]`` (adjoint of the world->body
+        transform, so ``v^T I v`` is invariant under ``v_w = X0^-1 v_body``).
+      - ``mask`` (n, n): ancestor mask, ``mask[i, j] = 1`` iff ``j`` is on the
+        world->body-i path (inclusive).
+      - ``r``    (n, 3): world position of each body frame origin (used to
+        re-reference an external wrench to the world origin in RNEA).
+
+    All quantities are angular-first. These are dense per-sample arrays; the
+    caller's ``vmap`` over the flattened batch turns them into batched GEMMs
+    (the frax pattern). ``X0`` is built with an unrolled parent-before-child
+    accumulation (general tree; frax's ``_unrolled_fk``) -- for n <= 43 this is
+    a handful of tiny 6x6 GEMMs, negligible against the n x n mask GEMMs that
+    dominate the cost.
+    """
+    n = dyn.num_dof
+    is_p = dyn.joint_is_prismatic
+    S = dyn.S
+
+    # Per-joint motion transform X_joint (parent -> joint frame), batched
+    # Rodrigues: stacked skew + ONE batched 3x3 K@K GEMM, then one 6x6 GEMM.
+    axis = jnp.where(is_p[:, None] > 0.5, S[:, 3:], S[:, :3])  # (n, 3)
+    K = _skew_batched(axis)  # (n, 3, 3)
+    s = jnp.sin(q)[:, None, None]
+    c = jnp.cos(q)[:, None, None]
+    I3 = jnp.eye(3)[None]  # (1, 3, 3)
+    R = I3 + s * K + (1.0 - c) * (K @ K)  # (n, 3, 3)
+    Rt = R.swapaxes(-1, -2)  # (n, 3, 3)
+    z33 = jnp.zeros((n, 3, 3))
+    X_rev = jnp.block([[Rt, z33], [z33, Rt]])  # (n, 6, 6)
+    I3n = jnp.broadcast_to(I3, (n, 3, 3))  # (n, 3, 3)
+    X_pri = jnp.block([[I3n, z33], [-_skew_batched(axis * q[:, None]), I3n]])
+    X_joint = jnp.where(is_p[:, None, None] > 0.5, X_pri, X_rev)  # (n, 6, 6)
+    Xup = X_joint @ dyn.X_tree  # (n, 6, 6)
+
+    # World->body transforms X0, unrolled parent-before-child (general tree).
+    order = _topological_dof_order(dyn)
+    X0 = jnp.zeros((n, 6, 6))
+    for i in order:
+        p = dyn.parent_dof_indices[i]
+        X0_i = Xup[i] if p == -1 else Xup[i] @ X0[p]
+        X0 = X0.at[i].set(X0_i)
+
+    X0_inv = _invert_motion_transform_batched(X0)  # (n, 6, 6)
+    S_w = jnp.einsum("nij,nj->ni", X0_inv, S, precision=_HIGHEST)  # (n, 6)
+    # World-frame inertia. A spatial metric (inertia) transforms by the
+    # ADJOINT of the world->body transform, not its inverse: the scalar
+    # v^T I v is invariant under v_w = X0^-1 v_body iff I_w = X0^T I_body X0.
+    I_w = X0.swapaxes(-1, -2) @ dyn.I_body @ X0  # (n, 6, 6)
+    r = _body_origins_world(X0)  # (n, 3) body frame origins in world coords
+    mask = _ancestor_mask(dyn)  # (n, n)
+    return S_w, I_w, mask, r
+
+
+def _rnea_from_spatial(
+    S_w: Array,
+    I_w: Array,
+    mask: Array,
+    r: Array,
+    damping: Array,
+    qd: Array,
+    qdd: Array,
+    gravity: Array | float,
+    f_ext: Array | None = None,
+) -> Array:
+    """Dense world-frame RNEA from shared spatial data (one GEMM per term).
+
+    ``r`` gives the world position of each body frame origin; it is needed to
+    re-reference an externally applied wrench from its body origin to the world
+    origin at which this RNEA is evaluated (see the ``f_ext`` block below).
+    """
+    a_base = jnp.concatenate(
+        [jnp.zeros(3), jnp.array([0.0, 0.0, 1.0]) * (-jnp.asarray(gravity))]
+    )
+    vJ = S_w * qd[:, None]  # (n, 6) joint velocity contributions (world)
+    v = mask @ vJ  # (n, 6) body spatial velocities (world)
+    a = a_base[None] + (mask @ _motion_cross(v, vJ)) + (
+        mask @ (S_w * qdd[:, None])
+    )  # (n, 6) body spatial accelerations (world)
+    Ia = jnp.einsum("ijk,ik->ij", I_w, a, precision=_HIGHEST)
+    Iv = jnp.einsum("ijk,ik->ij", I_w, v, precision=_HIGHEST)
+    f = Ia + _force_cross(v, Iv)  # (n, 6) body spatial forces (world)
+    if f_ext is not None:
+        # f_ext[i] is a wrench applied at body i's FRAME ORIGIN (world axes), but
+        # this RNEA is referenced at the WORLD origin. Shift each wrench: the
+        # force part is a free vector (unchanged); the torque gains the moment of
+        # that force about the world origin, r_i x F_i.
+        F_ext = f_ext[:, 3:]
+        f = f - jnp.concatenate(
+            [f_ext[:, :3] + jnp.cross(r, F_ext), F_ext], axis=-1
+        )
+    net = mask.T @ f  # (n, 6) net joint forces (world)
+    return jnp.einsum("ij,ij->i", S_w, net, precision=_HIGHEST) + damping * qd
+
+
+def _crba_from_spatial(S_w: Array, I_w: Array, mask: Array) -> Array:
+    """Dense world-frame CRBA from shared spatial data (einsum composite).
+
+    ``M[a, b] = S_a^T (sum_{k anc a} I_w_k) S_b`` for ``b`` on ``a``'s
+    ancestor path (inclusive); the mask-region product selects exactly those
+    entries and symmetrizes the lower triangle.
+    """
+    I_comp = jnp.einsum("ij,jkl->ikl", mask.T, I_w, precision=_HIGHEST)  # (n, 6, 6)
+    M_all = jnp.einsum("ij,ijk,lk->il", S_w, I_comp, S_w, precision=_HIGHEST)
+    M_lower = mask * M_all
+    return M_lower + jnp.tril(M_lower, -1).T
+
+
+def _rnea_dense(
     dyn: DynamicsInfo,
     q: Array,
     qd: Array,
@@ -160,72 +357,19 @@ def _rnea_single(
     gravity: Array | float,
     f_ext: Array | None = None,
 ) -> Array:
-    n = dyn.num_dof
-    order = _topological_dof_order(dyn)
-    Xup = _compute_Xup(dyn, q)
-    f_ext_body = (
-        None
-        if f_ext is None
-        else _fext_to_body(dyn, _compute_X0(dyn, Xup), f_ext)
-    )
-
-    # Gravity trick: base acceleration = -a_g.
-    a_base = jnp.concatenate(
-        [jnp.zeros(3), jnp.array([0.0, 0.0, 1.0]) * (-jnp.asarray(gravity))]
-    )
-
-    v: list[Array | None] = [None] * n
-    a: list[Array | None] = [None] * n
-    f: list[Array | None] = [None] * n
-
-    for i in order:
-        p = dyn.parent_dof_indices[i]
-        vJ = dyn.S[i] * qd[i]
-        if p == -1:
-            v[i] = vJ
-            a[i] = Xup[i] @ a_base + dyn.S[i] * qdd[i]
-        else:
-            v[i] = Xup[i] @ v[p] + vJ
-            a[i] = Xup[i] @ a[p] + dyn.S[i] * qdd[i] + _crm(v[i]) @ vJ
-        f[i] = dyn.I_body[i] @ a[i] + _crf(v[i]) @ (dyn.I_body[i] @ v[i])
-        if f_ext_body is not None:
-            f[i] = f[i] - f_ext_body[i]
-
-    tau = jnp.zeros(n)
-    for i in reversed(order):
-        tau = tau.at[i].set(dyn.S[i] @ f[i] + dyn.damping[i] * qd[i])
-        p = dyn.parent_dof_indices[i]
-        if p != -1:
-            f[p] = f[p] + Xup[i].T @ f[i]
-    return tau
+    with jax.default_matmul_precision("highest"):
+        return _rnea_from_spatial(
+            *_spatial_data(dyn, q), dyn.damping, qd, qdd, gravity, f_ext
+        )
 
 
-def _crba_single(dyn: DynamicsInfo, q: Array) -> Array:
-    n = dyn.num_dof
-    order = _topological_dof_order(dyn)
-    Xup = _compute_Xup(dyn, q)
-
-    Ic: list[Array] = [dyn.I_body[i] for i in range(n)]
-    for i in reversed(order):
-        p = dyn.parent_dof_indices[i]
-        if p != -1:
-            Ic[p] = Ic[p] + Xup[i].T @ Ic[i] @ Xup[i]
-
-    M = jnp.zeros((n, n))
-    for i in range(n):
-        F = Ic[i] @ dyn.S[i]
-        M = M.at[i, i].set(dyn.S[i] @ F)
-        j = i
-        while dyn.parent_dof_indices[j] != -1:
-            F = Xup[j].T @ F
-            j = dyn.parent_dof_indices[j]
-            Mij = dyn.S[j] @ F
-            M = M.at[i, j].set(Mij)
-            M = M.at[j, i].set(Mij)
-    return M
+def _crba_dense(dyn: DynamicsInfo, q: Array) -> Array:
+    with jax.default_matmul_precision("highest"):
+        S_w, I_w, mask, _ = _spatial_data(dyn, q)
+        return _crba_from_spatial(S_w, I_w, mask)
 
 
-def _fd_solve_single(
+def _fd_dense(
     dyn: DynamicsInfo,
     q: Array,
     qd: Array,
@@ -237,20 +381,27 @@ def _fd_solve_single(
 
     Forms ``qdd = M(q)^-1 (tau - bias)`` where ``bias = RNEA(q, qd, qdd=0)``
     collects the Coriolis/centrifugal, gravity, viscous-damping and external-
-    wrench terms. The solve uses a Cholesky factorization of the symmetric
-    positive-definite mass matrix (``assume_a="pos"``), following ``frax``'s
-    forward-dynamics formulation. Compared with the O(n) Articulated Body
-    Algorithm (:func:`_aba_single`) this avoids the per-joint division by the
-    projected articulated inertia ``S_i^T IA_i S_i`` -- which is where ABA can
-    produce NaN/Inf for degenerate (near-massless) links -- at the cost of an
-    O(n^3) factorization, negligible for manipulator-sized ``n`` and numerically
-    robust for well-conditioned ``M``.
+    wrench terms. Both ``M`` and ``bias`` consume a single world-frame
+    spatial-data pass (:func:`_spatial_data`), so the forward-kinematics chain
+    is evaluated once per call (the previous list-based solvers computed it
+    separately for CRBA and RNEA). The solve uses a Cholesky factorization of
+    the symmetric positive-definite mass matrix (``assume_a="pos"``),
+    following ``frax``'s forward-dynamics formulation. Compared with the O(n)
+    Articulated Body Algorithm (:func:`_aba_single`) this avoids the per-joint
+    division by the projected articulated inertia ``S_i^T IA_i S_i`` -- which
+    is where ABA can produce NaN/Inf for degenerate (near-massless) links -- at
+    the cost of an O(n^3) factorization, negligible for manipulator-sized ``n``
+    and numerically robust for well-conditioned ``M``.
     """
     import jax.scipy as jsp
 
-    M = _crba_single(dyn, q)
-    bias = _rnea_single(dyn, q, qd, jnp.zeros_like(q), gravity, f_ext)
-    return jsp.linalg.solve(M, tau - bias, assume_a="pos")
+    with jax.default_matmul_precision("highest"):
+        S_w, I_w, mask, r = _spatial_data(dyn, q)
+        M = _crba_from_spatial(S_w, I_w, mask)
+        bias = _rnea_from_spatial(
+            S_w, I_w, mask, r, dyn.damping, qd, jnp.zeros_like(q), gravity, f_ext
+        )
+        return jsp.linalg.solve(M, tau - bias, assume_a="pos")
 
 
 def _aba_single(
@@ -400,7 +551,7 @@ def inverse_dynamics_jax(
     applied at each body's frame origin, expressed in world axes.
     """
     return _batched(
-        lambda d, q_, qd_, qdd_, f_: _rnea_single(d, q_, qd_, qdd_, gravity, f_),
+        lambda d, q_, qd_, qdd_, f_: _rnea_dense(d, q_, qd_, qdd_, gravity, f_),
         dyn,
         q,
         qd,
@@ -414,7 +565,7 @@ def mass_matrix_jax(
     q: Float[Array, "*batch n_dof"],
 ) -> Float[Array, "*batch n_dof n_dof"]:
     """Joint-space mass matrix M(q) via the composite rigid body algorithm."""
-    return _batched(_crba_single, dyn, q)
+    return _batched(_crba_dense, dyn, q)
 
 
 def forward_dynamics_jax(
@@ -428,7 +579,7 @@ def forward_dynamics_jax(
     """Joint accelerations from state and torques.
 
     Computes ``qdd = M(q)^-1 (tau - RNEA(q, qd, 0))`` via a Cholesky solve of the
-    composite-rigid-body mass matrix (:func:`_fd_solve_single`, following
+    composite-rigid-body mass matrix (:func:`_fd_dense`, following
     ``frax``). This is numerically robust for degenerate/near-massless links,
     where the O(n) Articulated Body Algorithm (:func:`_aba_single`, kept for
     reference/benchmarking) can divide by a vanishing projected inertia and
@@ -436,7 +587,7 @@ def forward_dynamics_jax(
     :func:`inverse_dynamics_jax`.
     """
     return _batched(
-        lambda d, q_, qd_, tau_, f_: _fd_solve_single(d, q_, qd_, tau_, gravity, f_),
+        lambda d, q_, qd_, tau_, f_: _fd_dense(d, q_, qd_, tau_, gravity, f_),
         dyn,
         q,
         qd,

@@ -1,0 +1,10 @@
+{
+  "num_optimized_plans": 1,
+  "num_initial_plans": 5,
+  "num_skipped_plans": 0,
+  "num_satisfying_final": 0,
+  "num_particles": 4096,
+  "best_cost": Infinity,
+  "best_soft_cost": Infinity,
+  "found_solution": false
+}

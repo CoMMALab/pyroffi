@@ -1,0 +1,11 @@
+[segments] K=6 d=2 T=30 M=4
+demo screen OK, 15.3s
+  step 20  wall=7.1s  loss=1.102e-02  best=1.351e-03  stall=5
+  step 40  wall=14.0s  loss=2.199e-03  best=9.400e-04  stall=4
+  step 60  wall=20.9s  loss=9.775e-04  best=8.223e-04  stall=5
+  step 80  wall=27.9s  loss=8.131e-04  best=8.131e-04  stall=0
+  step 100  wall=34.8s  loss=8.152e-04  best=8.127e-04  stall=5
+  step 120  wall=41.8s  loss=8.125e-04  best=8.123e-04  stall=2
+  step 140  wall=48.7s  loss=8.122e-04  best=8.122e-04  stall=1
+  step 160  wall=55.7s  loss=8.122e-04  best=8.122e-04  stall=1
+  step 180  wall=62.7s  loss=8.122e-04  best=8.122e-04  stall=1

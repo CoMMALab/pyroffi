@@ -1,0 +1,30 @@
+{
+  "Collision": {
+    "default": 0.001
+  },
+  "KinematicConstraint": {
+    "pos_err": 0.005,
+    "rot_err": 0.05
+  },
+  "Motion": {
+    "joint_limit": 0.0,
+    "self_collision": 0.0
+  },
+  "StablePlacement": {
+    "goal_in_xy": 0.001,
+    "goal_support": 0.01,
+    "platform0_in_xy": 0.001,
+    "platform0_support": 0.01,
+    "floor_in_xy": 0.001,
+    "floor_support": 0.01,
+    "table_in_xy": 0.001,
+    "table_support": 0.01,
+    "shelf_in_xy": 0.001,
+    "shelf_support": 0.01,
+    "stove_in_xy": 0.001,
+    "stove_support": 0.01
+  },
+  "ValidPush": {
+    "dist_from_button": 0.0
+  }
+}

@@ -1,0 +1,1059 @@
+"""Figure generation for the IOC study, formatted for IEEE T-RO.
+
+Figures are sized to the IEEE two-column grid (3.5 in single, 7.16 in double),
+set in a Times-compatible serif at the caption's point size, and written as both
+PDF (vector, for LaTeX) and PNG (for review).  Titles are omitted -- T-RO figures
+carry their text in the caption -- and panels are labelled (a), (b), ... instead.
+
+Colour is the validated Okabe-Ito subset: every adjacent pair clears the
+colour-vision-deficiency separation floor, and the three-series primary set used
+for the main result also clears 3:1 contrast against the page.  Every series
+additionally carries a distinct marker and dash pattern, so the figures survive
+greyscale printing and photocopying, where hue carries nothing.
+
+    python -m ioc.plots                 # all figures
+    python -m ioc.plots --only scaling
+"""
+
+import dataclasses
+import glob
+import json
+import os
+
+import jax
+
+# `ioc.collect` runs every data-generating stage under JAX_ENABLE_X64=1 (the
+# lone deliberate exception is the float32 E3 ablation), but fig2/fig3 build
+# their environments and solve demonstrations *inline* here rather than from
+# collected JSON, so they inherit nothing from that env default. Under the
+# JAX default (float32) the GN forward solver's noise floor sits around 1e-5,
+# which is above `bench2d.run`'s 1e-6 demonstration-stationarity screen: on
+# the multimodal 6-bump `field` benchmark this makes `_screen_demos` raise
+# outright, and on benchmarks where it happens not to raise it silently
+# degrades the implicit adjoint the same way documented for `ioc.robot`
+# (cos agreement 0.9999 -> 0.59). Match the robot experiments' and
+# `collect.py`'s convention here instead of relying on the caller's shell.
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import tyro
+import matplotlib.patheffects as pe
+from matplotlib.patches import Circle
+
+from ioc import analytic, outer as outer_opt
+from ioc.bench2d import problems as b2d
+from ioc.bench2d import run as b2d_run
+from ioc.bench2d.run import build_solver
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(HERE, "data")
+FIGS = os.path.join(HERE, "figures")
+ROOT = os.path.dirname(HERE)
+
+# --- T-RO page geometry ------------------------------------------------------
+COL1, COL2 = 3.5, 7.16  # inches
+
+# --- validated palette (Okabe-Ito subset; see scripts/validate_palette.js) ----
+# Order is fixed: a series keeps its hue no matter which others are plotted.
+STYLE = {
+    "implicit": dict(color="#0072B2", marker="o", ls="-", label="Implicit (ours)"),
+    "fd":       dict(color="#D55E00", marker="s", ls="--", label="Finite diff."),
+    "cmaes":    dict(color="#009E73", marker="^", ls="-.", label="CMA-ES"),
+    "cioc":     dict(color="#E69F00", marker="D", ls=(0, (3, 1, 1, 1)), label="CIOC [Levine '12]"),
+    "kkt":      dict(color="#CC79A7", marker="v", ls=":", label="Inverse KKT"),
+    "kkt_seed": dict(color="#CC79A7", marker="v", ls="-", label=r"Implicit, KKT-seeded $z_0$"),
+    "unrolled": dict(color="#56B4E9", marker="P", ls=(0, (5, 2)), label="Unrolled"),
+    "random":   dict(color="0.55", marker="", ls=(0, (1, 2)), label="Random weights"),
+}
+DEMO_C, FIT_C, OBS_C = "#222222", "#0072B2", "#c9c9c9"
+
+# Smallest regret the log axes will show.  Regret is a cost difference and dips
+# marginally below zero when a fit beats the reference solve by solver noise.
+REGRET_FLOOR = 1e-9
+
+
+def set_style():
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "font.size": 8,
+        "axes.labelsize": 8,
+        "axes.titlesize": 8,
+        "legend.fontsize": 6.5,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "axes.linewidth": 0.6,
+        "grid.linewidth": 0.4,
+        "grid.color": "#d9d9d9",
+        "lines.linewidth": 1.3,
+        "lines.markersize": 3.6,
+        "xtick.major.width": 0.6,
+        "ytick.major.width": 0.6,
+        "xtick.major.size": 2.5,
+        "ytick.major.size": 2.5,
+        "legend.frameon": False,
+        "legend.handlelength": 2.4,
+        "legend.columnspacing": 1.1,
+        "legend.labelspacing": 0.3,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+        "pdf.fonttype": 42,  # editable/embeddable type-42 fonts, as IEEE requires
+        "ps.fonttype": 42,
+    })
+
+
+def finish(fig, name):
+    os.makedirs(FIGS, exist_ok=True)
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(FIGS, f"{name}.{ext}"), dpi=400)
+    plt.close(fig)
+    print(f"  wrote figures/{name}.pdf|png")
+
+
+def panel_label(ax, text, dx=-0.16, dy=1.04):
+    ax.text(dx, dy, text, transform=ax.transAxes, fontsize=8, fontweight="bold",
+            va="top", ha="left")
+
+
+def tidy(ax):
+    ax.grid(True, alpha=0.7, zorder=0)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+
+def solves_to(trace, target):
+    return next((s for s, l in trace if l < target), None)
+
+
+# ---------------------------------------------------------------------------
+# Fig. 1 - cost of a fit vs cost dimension  (the main result)
+# ---------------------------------------------------------------------------
+
+
+def fig_scaling():
+    files = sorted(glob.glob(os.path.join(DATA, "bench2d", "bench2d_seg_K*.json")),
+                   key=lambda f: int(f.split("K")[-1].split(".")[0]))
+    if not files:
+        print("  [skip] no segments sweep data")
+        return
+    METHODS = ("implicit", "fd", "cmaes")
+    Ks = []
+    series = {m: [] for m in METHODS}
+    lo = {m: [] for m in METHODS}
+    hi = {m: [] for m in METHODS}
+    censored = []  # (K, method, n_reached, n_seeds) wherever a seed never got there
+    for f in files:
+        d = json.load(open(f))
+        r = d["results"]
+        Ks.append(d["K"])
+        for m in METHODS:
+            vals = [solves_to(r[s][m]["trace"], 1e-2) for s in r]
+            ok = [v for v in vals if v]
+            if len(ok) < len(vals):
+                censored.append((d["K"], m, len(ok), len(vals)))
+            if len(ok) >= 2:
+                series[m].append(np.median(ok))
+                lo[m].append(np.percentile(ok, 25))
+                hi[m].append(np.percentile(ok, 75))
+            else:
+                series[m].append(np.nan)
+                lo[m].append(np.nan)
+                hi[m].append(np.nan)
+    Ks = np.array(Ks)
+    # Seeds that never reach the target are dropped, so a median over the
+    # survivors *flatters* whichever method failed more often.  Say so out loud
+    # rather than let the curve imply every seed converged.
+    if censored:
+        print("  [fig1] censored (target never reached): " + ", ".join(
+            f"K={k} {m} {n}/{tot} seeds" for k, m, n, tot in censored))
+    else:
+        print("  [fig1] no censoring: every seed reached the target")
+
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 2.5))
+    ax = axes[0]
+    for m in ("fd", "cmaes", "implicit"):
+        st = STYLE[m]
+        ax.plot(Ks, series[m], marker=st["marker"], ls=st["ls"], color=st["color"],
+                label=st["label"], clip_on=False, zorder=3)
+        # Median with the inter-quartile band across seeds: a bare median line
+        # asserts a precision the 3-seed sample does not have.
+        ax.fill_between(Ks, lo[m], hi[m], color=st["color"], alpha=0.13, lw=0,
+                        zorder=2)
+    ax.set_yscale("log")
+    ax.set_xlabel("cost parameters $K$")
+    ax.set_ylabel(r"solves to reach $L<10^{-2}$")
+    ax.set_xticks(Ks)
+    tidy(ax)
+    h, l = ax.get_legend_handles_labels()
+    order = [l.index(STYLE[m]["label"]) for m in ("implicit", "fd", "cmaes")]
+    ax.legend([h[i] for i in order], [l[i] for i in order], loc="upper left", ncol=1)
+    panel_label(ax, "(a)")
+
+    ax = axes[1]
+    base = np.asarray(series["implicit"], float)
+    for m in ("fd", "cmaes"):
+        st = STYLE[m]
+        ratio = np.asarray(series[m], float) / base
+        ax.plot(Ks, ratio, marker=st["marker"], ls=st["ls"], color=st["color"],
+                label=st["label"], clip_on=False)
+        # direct label: identity without relying on hue alone
+        ax.annotate(f"{ratio[-1]:.0f}$\\times$", (Ks[-1], ratio[-1]),
+                    textcoords="offset points", xytext=(-4, 6),
+                    color=st["color"], fontsize=7, ha="right")
+    ax.axhline(1.0, color="0.4", lw=0.6, ls="-")
+    ax.annotate("parity", (Ks[-1], 1.0), textcoords="offset points",
+                xytext=(-2, 4), fontsize=6.5, color="0.4", ha="right")
+    ax.set_xlabel("cost parameters $K$")
+    ax.set_ylabel("solves relative to implicit")
+    ax.set_xticks(Ks)
+    tidy(ax)
+    panel_label(ax, "(b)")
+    fig.tight_layout(w_pad=1.6)
+    finish(fig, "fig1_scaling")
+
+
+# ---------------------------------------------------------------------------
+# Fig. 2 - the benchmark environments, with demonstrations
+# ---------------------------------------------------------------------------
+
+
+def _make_env(benchmark, k_bumps, M, T, seed, bump_width, theta=None,
+              n_iter=None, n_obstacles=None, shared_obstacle=None,
+              shared_bumps=False, bump_layout=None, demo_pairs=None,
+              unit_scales=False, demo_noise=0.0, n_restarts=1, topo_restarts=False):
+    """Build one benchmark's contexts and solve demonstrations under `theta`.
+
+    `theta` is given explicitly for the environment plates: a Dirichlet draw can
+    leave a feature almost unweighted, and a plate drawn that way misrepresents
+    the environment (with a near-zero boundary weight the racing demonstrations
+    cut straight across the infield, which is not what the benchmark poses).
+    """
+    res_fn, names, d = b2d.BENCHMARKS[benchmark]
+    cfg = b2d.default_cfg(benchmark, bump_width=bump_width)
+    if n_obstacles is not None:
+        cfg["n_obstacles"] = n_obstacles
+    if n_iter is None:
+        n_iter = b2d_run.DEMO_N_ITER[benchmark]
+    names = b2d.benchmark_names(benchmark, k_bumps, cfg)
+    K = len(names)
+    rng = np.random.default_rng(seed)
+    if theta is None:
+        th = np.maximum(rng.dirichlet(np.full(K, 0.7)), 0.01)
+        th = th / th.sum()
+    else:
+        th = np.asarray(theta, float)
+        th = th / th.sum()
+    th = jnp.asarray(th)
+    ctxs = b2d.sample_contexts(rng, M, benchmark, T, d, k_bumps, cfg)
+    if shared_obstacle is not None:
+        # One scene, several start/goal pairs: the plate then reads as a single
+        # environment rather than M overlaid ones.  Accepts a single (x, y, r)
+        # or a full (n_obs, 3) set.
+        so = jnp.atleast_2d(jnp.asarray(shared_obstacle, float))
+        ctxs = dataclasses.replace(ctxs, obstacles=jnp.tile(so[None], (M, 1, 1)))
+    if shared_bumps:
+        # `sample_contexts` draws a fresh bump layout per context, but a field
+        # figure only ever renders context 0's field.  Without this, most of
+        # the plotted demonstrations are optimal for a *different*, unseen
+        # field and the panel does not show what it claims to: a trajectory
+        # bending around the drawn cost hills.
+        ctxs = dataclasses.replace(
+            ctxs,
+            centers=jnp.tile(ctxs.centers[:1], (M, 1, 1)),
+            widths=jnp.tile(ctxs.widths[:1], (M, 1)),
+        )
+    if bump_layout is not None:
+        # A hand-placed field, not a random draw: random layouts here are both
+        # visually incoherent (bumps overlap or scatter with no readable
+        # structure) and, measured directly, poorly conditioned for recovery
+        # (Gram lambda_2/lambda_K ~1e-2, implicit_L1 1.5-1.7 across several
+        # seeds) -- a hand-placed layout can guarantee well-separated bumps
+        # every demo actually gets exposed to.
+        bc, bw = bump_layout
+        ctxs = dataclasses.replace(
+            ctxs,
+            centers=jnp.tile(jnp.asarray(bc, float)[None], (M, 1, 1)),
+            widths=jnp.tile(jnp.asarray(bw, float)[None], (M, 1)),
+        )
+    if demo_pairs is not None:
+        # Explicit start/goal pairs so the illustration can guarantee specific
+        # homotopy classes (e.g. above vs. below a blocking bump) instead of
+        # hoping a random sample lands on both sides.
+        starts, goals = zip(*demo_pairs)
+        ctxs = dataclasses.replace(
+            ctxs,
+            start=jnp.asarray(np.stack(starts), float),
+            goal=jnp.asarray(np.stack(goals), float),
+        )
+    scales = b2d.calibrate(res_fn, ctxs, T, d, cfg, jax.random.key(seed), K)
+    if unit_scales:
+        scales = jnp.ones_like(scales)
+    inner = build_solver(res_fn, scales, T, d, cfg, n_iter, 1e-2, 3, 1e-9,
+                         n_restarts=n_restarts, topo_restarts=topo_restarts)
+    si, cost = inner.solve_implicit, inner.cost
+    x0 = jax.vmap(lambda c: b2d.seed_path(c, T, d, cfg))(ctxs)
+
+    # Demonstrations from a converged solve, as in `bench2d.run` -- a figure
+    # must not depict a "demonstration" that is not a local optimum, and the
+    # solver the *learner* uses is deliberately cheaper than the demonstrator's.
+    demo_iter = max(n_iter, b2d_run.DEMO_N_ITER[benchmark])
+    demo_solver = build_solver(res_fn, scales, T, d, cfg, demo_iter, 1e-2, 3,
+                               1e-9, n_restarts=n_restarts, topo_restarts=topo_restarts)
+    xs = jax.vmap(lambda x, c: demo_solver.solve_implicit(x, th, c))(x0, ctxs)
+    b2d_run._screen_demos(
+        jax.vmap(lambda x, c: b2d_run.relative_stationarity(
+            demo_solver.features, demo_solver.grad_x, x, th, c, K))(xs, ctxs),
+        benchmark, seed, demo_iter)
+    demos = jax.vmap(lambda x, c: b2d.unpack(x, c, T, d))(xs, ctxs)
+    if demo_noise > 0:
+        # Matches `bench2d.run`: endpoints are fixed by the context, so noise is
+        # applied only to the interior.  Any figure that *compares methods* must
+        # set this -- on noiseless demonstrations Inverse KKT is exact by
+        # construction (it fits grad_x J = 0, which holds exactly), so it wins
+        # trivially and the comparison says nothing about the noisy regime every
+        # other result in the study is reported in.
+        nz = jnp.asarray(rng.normal(scale=demo_noise, size=demos.shape))
+        demos = demos + nz.at[:, 0].set(0.0).at[:, -1].set(0.0)
+    return dict(cfg=cfg, ctxs=ctxs, demos=np.asarray(demos), theta=th, K=K,
+                solver=si, x0=x0, T=T, d=d, res_fn=res_fn, scales=scales,
+                names=names, cost=cost, inner=inner)
+
+
+def _field_grid(ctx, theta, extent=(-2.5, 2.5, -1.9, 1.9), n=240):
+    cen, wid = np.asarray(ctx.centers), np.asarray(ctx.widths)
+    gx, gy = np.meshgrid(np.linspace(extent[0], extent[1], n),
+                         np.linspace(extent[2], extent[3], n))
+    pts = np.stack([gx.ravel(), gy.ravel()], -1)
+    f = np.zeros(pts.shape[0])
+    for k in range(cen.shape[0]):
+        f += float(theta[k + 2]) * np.exp(
+            -((pts - cen[k]) ** 2).sum(-1) / (2 * wid[k] ** 2))
+    return gx, gy, f.reshape(gx.shape)
+
+
+def _draw_field_background(ax, ctx, theta, extent=(-2.5, 2.5, -1.9, 1.9), n=240,
+                           vmax=None):
+    """Render the cost field.
+
+    `vmax` must be passed explicitly whenever two fields are meant to be
+    *compared* (true vs recovered).  Letting each panel normalize to its own
+    maximum makes a field that is uniformly too weak look identical to the
+    correct one, which is precisely the error the figure exists to show.
+    """
+    gx, gy, f = _field_grid(ctx, theta, extent, n)
+    # Sequential, single hue, light->dark.  The field is a *cost* (positive
+    # weights on positive residuals): it has magnitude but no polarity, so a
+    # diverging map would imply a sign change that does not exist.
+    im = ax.pcolormesh(gx, gy, f, cmap="Reds", vmin=0.0,
+                       vmax=(f.max() if vmax is None else vmax) + 1e-12,
+                       shading="auto", rasterized=True, zorder=0)
+    # Contours give the reader the shape of the field independent of the
+    # colour ramp, which matters in greyscale reproduction.
+    ax.contour(gx, gy, f, levels=6, colors="k", linewidths=0.25, alpha=0.35,
+               zorder=1)
+    return im
+
+
+def _draw_circuit(ax, cfg, lw=0.7):
+    """The racing circuit: filled corridor, walls, and dashed centreline."""
+    a = np.linspace(0, 2 * np.pi, 800)
+    r = np.asarray(b2d.track_radius_at(jnp.asarray(a), cfg))
+    W = cfg["track_halfwidth"]
+    inner, outer = r - W, r + W
+    # The inner boundary must be traversed backwards *as a curve* -- reversing
+    # the angles while leaving the radii in forward order pairs r(a) with the
+    # wrong a and draws a corridor that is not the one the cost uses.
+    ax.fill(np.concatenate([outer * np.cos(a), (inner * np.cos(a))[::-1]]),
+            np.concatenate([outer * np.sin(a), (inner * np.sin(a))[::-1]]),
+            color="#efefef", zorder=0)
+    for rad in (inner, outer):
+        ax.plot(rad * np.cos(a), rad * np.sin(a), color="0.55", lw=lw, zorder=1)
+    ax.plot(r * np.cos(a), r * np.sin(a), color="0.7", lw=0.6, ls=(0, (4, 3)),
+            zorder=1)
+    return float((r + W).max())
+
+
+# A thin white casing under every demonstration.  The racing line correctly
+# hugs the inside of the turns, which puts it directly on top of the drawn
+# track wall; without the casing the two merge and the demonstration reads as
+# leaving the corridor when it never does (measured: 0/30 points outside).
+HALO = [pe.Stroke(linewidth=2.6, foreground="white"), pe.Normal()]
+
+
+def _plate(ax, demos, n_show, lw=1.15):
+    for i in range(min(n_show, len(demos))):
+        p = demos[i][:, :2]
+        ax.plot(p[:, 0], p[:, 1], color=DEMO_C, lw=lw, alpha=0.95, zorder=3,
+                solid_capstyle="round", path_effects=HALO)
+        ax.plot(*p[0], marker="o", ms=2.8, color=DEMO_C, zorder=4)
+        ax.plot(*p[-1], marker="*", ms=5.4, color=DEMO_C, zorder=4)
+
+
+def fig_environments():
+    """Environment plates in the style of Levine & Koltun (2012, Fig. 3-5):
+    the scene geometry with demonstrations drawn on it, one context per panel."""
+    T, M = 30, 4
+    fig, axes = plt.subplots(1, 3, figsize=(COL2, 2.25),
+                             gridspec_kw=dict(width_ratios=[1.0, 1.25, 1.25]))
+
+    # (a) racing circuit ------------------------------------------------------
+    # Weights chosen so the boundary binds and the line has to compromise: a
+    # near-zero boundary weight would let the demonstrations cut the infield,
+    # which is not what the benchmark poses.
+    env = _make_env("racing", 1, M, T, 3, 0.45,
+                    theta=[0.30, 0.40, 0.15, 0.15])  # time, boundary, smooth, curv
+    ax = axes[0]
+    rmax = _draw_circuit(ax, env["cfg"])
+    # Three stints, not four: each spans most of a lap, so a fourth adds
+    # overlap without adding information.
+    _plate(ax, env["demos"], 3)
+    ax.set_xlim(-rmax - 0.12, rmax + 0.12)
+    ax.set_ylim(-rmax - 0.12, rmax + 0.12)
+
+    # (b) cost field ----------------------------------------------------------
+    # A hand-placed field rather than a random draw. Two reasons:
+    #  1. `sample_contexts` draws an independent bump layout per demonstration,
+    #     but the panel can only render one field, so an unshared/random layout
+    #     leaves most plotted paths bending around bumps that are not the ones
+    #     drawn -- the "why doesn't this look optimal" confusion the panel
+    #     exists to avoid.
+    #  2. A single blocking bump dead centre, flanked by four small corner
+    #     bumps that stay clear of the start-goal corridor, gives every
+    #     demonstration one obstacle to react to instead of several
+    #     overlapping ones. Paired with start/goal offsets above and below
+    #     y=0, this reads as one obvious story: both homotopy classes (over
+    #     the top, under the bottom) arcing back through the panel's
+    #     horizontal centre, with a genuine near-zero-cost gap on each side
+    #     (bump width 0.4 at a lane offset of ~1.0 puts exposure at <1% of
+    #     peak) rather than a path grazing the cost hill's edge.
+    _field_centers = [
+        (0.0, 0.0), (0.2, 0.1),
+        (-2.3, 1.75), (2.3, 1.75), (-2.3, -1.75), (2.3, -1.75),
+    ]
+    _field_widths = [0.4, 0.35, 0.4, 0.4, 0.4, 0.4]
+    _field_pairs = [
+        ((-2.2, 0.9), (2.2, 0.9)),
+        ((-2.2, 0.6), (2.2, 1.1)),
+        ((-2.2, -0.9), (2.2, -0.9)),
+        ((-2.2, -0.6), (2.2, -1.1)),
+    ]
+    th_field = [0.16, 0.10, 0.30, 0.10, 0.085, 0.085, 0.085, 0.085]
+    env = _make_env("field", 6, M, T, 0, 0.4, theta=th_field,
+                    bump_layout=(_field_centers, _field_widths),
+                    demo_pairs=_field_pairs)
+    ax = axes[1]
+    c0 = jax.tree.map(lambda x: x[0], env["ctxs"])
+    im = _draw_field_background(ax, c0, env["theta"])
+    ax.scatter(np.asarray(c0.centers)[:, 0], np.asarray(c0.centers)[:, 1],
+               s=4, c="0.25", zorder=2, linewidths=0)
+    _plate(ax, env["demos"], M)
+    ax.set_xlim(-2.5, 2.5)
+    ax.set_ylim(-1.9, 1.9)
+    cb = fig.colorbar(im, ax=ax, fraction=0.036, pad=0.02)
+    cb.set_label("cost", fontsize=6.5, labelpad=1)
+    cb.ax.tick_params(labelsize=6, width=0.5, length=2)
+    cb.outline.set_linewidth(0.5)
+
+    # (c) car / unicycle ------------------------------------------------------
+    # One shared slalom, several start/goal pairs: the plate then reads as a
+    # single environment rather than four overlaid ones.
+    env = _make_env("unicycle", 1, M, T, 2, 0.45,
+                    theta=[0.20, 0.15, 0.10, 0.35, 0.20], n_obstacles=3,
+                    shared_obstacle=[(-1.05, 0.22, 0.42), (0.0, -0.26, 0.44),
+                                     (1.05, 0.22, 0.42)])
+    ax = axes[2]
+    for ox, oy, orr in np.asarray(env["ctxs"].obstacles[0]):
+        ax.add_patch(Circle((ox, oy), orr, facecolor=OBS_C, edgecolor="0.5",
+                            lw=0.5, zorder=1))
+    for i in range(M):
+        s_ = env["demos"][i]
+        p, phi = s_[:, :2], s_[:, 2]
+        ax.plot(p[:, 0], p[:, 1], color=DEMO_C, lw=1.15, alpha=0.95, zorder=3,
+                solid_capstyle="round", path_effects=HALO)
+        # heading arrows make the nonholonomic state visible, as in the
+        # car-navigation plates of Levine & Koltun
+        for t in range(2, len(p) - 2, 9):
+            ax.arrow(p[t, 0], p[t, 1], 0.20 * np.cos(phi[t]), 0.20 * np.sin(phi[t]),
+                     head_width=0.09, head_length=0.09, fc=DEMO_C, ec=DEMO_C,
+                     lw=0.4, length_includes_head=True, zorder=4)
+        ax.plot(*p[0], marker="o", ms=2.8, color=DEMO_C, zorder=5)
+        ax.plot(*p[-1], marker="*", ms=5.4, color=DEMO_C, zorder=5)
+    ax.set_xlim(-2.5, 2.5)
+    ax.set_ylim(-1.9, 1.9)
+
+    for ax, lab, tag in zip(axes,
+                            ("racing corridor", "cost field", "car (unicycle)"),
+                            ("(a)", "(b)", "(c)")):
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel(lab, labelpad=2)
+        panel_label(ax, tag, dx=-0.02, dy=1.11)
+
+    from matplotlib.lines import Line2D
+    fig.legend(handles=[
+        Line2D([], [], color=DEMO_C, lw=1.15, label="demonstration"),
+        Line2D([], [], color=DEMO_C, marker="o", ls="", ms=2.8, label="start"),
+        Line2D([], [], color=DEMO_C, marker="*", ls="", ms=5.4, label="goal"),
+    ], loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.04))
+    fig.tight_layout(w_pad=1.0, rect=(0, 0.05, 1, 1))
+    finish(fig, "fig2_environments")
+
+
+# ---------------------------------------------------------------------------
+# Fig. 3 - recovered reward field and recovered trajectories
+# ---------------------------------------------------------------------------
+
+
+def _match_aspect(ext, ratio):
+    """Grow `ext` symmetrically until its width:height equals `ratio`.
+
+    Panels drawn with `aspect="equal"` in equal-width gridspec cells only come
+    out the same height if their *data* extents share an aspect ratio.  When
+    they do not, matplotlib centres the shorter axes in its cell and its title
+    and xlabel drift out of line with the row.  Growing (never cropping) keeps
+    everything that was inside the extent inside it.
+    """
+    x0, x1, y0, y1 = ext
+    w, h = x1 - x0, y1 - y0
+    if w / h < ratio:
+        grow = (ratio * h - w) / 2.0
+        x0, x1 = x0 - grow, x1 + grow
+    else:
+        grow = (w / ratio - h) / 2.0
+        y0, y1 = y0 - grow, y1 + grow
+    return (x0, x1, y0, y1)
+
+
+def _tag_inside(ax, text):
+    """Panel letter inside the axes.
+
+    Image panels are drawn edge to edge, so a tag placed above the frame either
+    collides with the panel title or forces dead space between rows.
+    """
+    ax.text(0.035, 0.96, text, transform=ax.transAxes, fontsize=7.5,
+            fontweight="bold", va="top", ha="left", zorder=6,
+            bbox=dict(boxstyle="square,pad=0.16", fc="white", ec="none",
+                      alpha=0.82))
+
+
+def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
+                 name="fig3_recovery", n_show=4, n_restarts=7):
+    """Recovered cost field, for the implicit method and both zero-solve baselines.
+
+    Three things this figure has to get right, none of which are cosmetic:
+
+    * **Name the method.**  A panel captioned only "recovered" leaves the reader
+      guessing which of six methods produced it.  Every recovery panel is
+      labelled, and the analytic baselines are shown beside ours on identical
+      data so the comparison is visible rather than asserted.
+    * **One colour scale.**  The panels share a single `vmax` and one colorbar.
+      Per-panel normalization (what this figure used to do) rescales a recovered
+      field to fill the same ramp as the truth, so a uniformly-too-weak fit is
+      drawn identically to a correct one -- it hides exactly the error the
+      figure exists to show.
+    * **The noisy regime.**  Demonstrations carry the same sigma=0.02 noise as
+      every dataset in the study.  On *noiseless* demonstrations Inverse KKT is
+      exact by construction -- it fits grad_x J = 0, which holds exactly at an
+      unperturbed optimum -- so it reaches L1 = 0.00 and the panel says nothing
+      about the regime the paper's claims live in.  This figure used to be
+      built on noiseless demonstrations.
+    * **An identifiable target.**  The bump layout is the scattered,
+      varied-width one; on the old equal-width grid at this bump width the
+      feature Gram was numerically rank-deficient, so *no* method could recover
+      theta and the panel was measuring the benchmark's degeneracy rather than
+      the method's accuracy.  lambda_2 of the Gram is reported with the figure.
+    """
+    T, M = 30, 8
+    # n_restarts>1 with topo_restarts=True replaces i.i.d. jitter multistart
+    # with structured lateral-detour seeds (see `pb.make_topo_seed_fn`): on
+    # this 6-bump field the inner problem is genuinely multimodal, and a
+    # single-start solve lets x*(theta) jump basins as theta moves, which
+    # breaks the implicit adjoint (see `ioc.inner.InnerSolver.solve`) while
+    # leaving the zero-solve analytic baselines (kkt, cioc) unaffected --
+    # exactly the asymmetry this panel was showing without diagnosing it.
+    # A hand-placed field, same rationale as `fig_environments`'s field panel:
+    # a random bump layout was measured poorly conditioned regardless of seed
+    # (Gram lambda_2/lambda_K ~1-5e-2, implicit_L1 1.5-1.7 across several
+    # seeds tried), because a random draw can leave a bump nearly un-excited
+    # by every demonstration -- unidentifiable however good the solver is.
+    # This layout reuses fig2's central blocker (two homotopy lanes) plus five
+    # more bumps, each placed on one specific demo's path so every feature is
+    # excited by at least one demonstration; `demo_pairs` spans both homotopy
+    # classes at three lane offsets each.
+    _rec_centers = [
+        (0.0, 0.0),
+        (0.0, 1.35), (0.0, -1.35),
+        (-1.6, 1.65), (1.6, 1.65),
+        (-1.6, -1.65),
+    ]
+    _rec_widths = [0.45, 0.35, 0.35, 0.4, 0.4, 0.4]
+    _rec_pairs = [
+        ((-2.2, 0.9), (2.2, 0.9)), ((-2.2, 0.6), (2.2, 1.1)),
+        ((-2.2, -0.9), (2.2, -0.9)), ((-2.2, -0.6), (2.2, -1.1)),
+        ((-2.2, 1.3), (2.2, 1.6)), ((-2.2, 1.6), (2.2, 1.3)),
+        ((-2.2, -1.3), (2.2, -1.6)), ((-2.2, -1.6), (2.2, -1.3)),
+    ][:M]
+    _rec_theta = [0.12, 0.08, 0.18, 0.10, 0.14, 0.16, 0.12, 0.10]
+    env = _make_env("field", 6, M, T, 0, 0.4, theta=_rec_theta, n_iter=n_iter,
+                    demo_noise=demo_noise, n_restarts=n_restarts,
+                    topo_restarts=n_restarts > 1,
+                    bump_layout=(_rec_centers, _rec_widths),
+                    demo_pairs=_rec_pairs)
+    si, ctxs, demos = env["solver"], env["ctxs"], env["demos"]
+    x0, d, K = env["x0"], env["d"], env["K"]
+    inner = env["inner"]
+
+    def loss(z):
+        t = jax.nn.softmax(z)
+
+        def one(c, dm, xx):
+            p = b2d.unpack(si(xx, t, c), c, T, d)[:, :2]
+            return jnp.mean(jnp.sum((p - dm[:, :2]) ** 2, axis=-1))
+
+        return jnp.mean(jax.vmap(one)(ctxs, demos, x0))
+
+    gf = jax.jit(jax.value_and_grad(loss))
+    # Restarts are charged to the solve budget like every other method pays
+    # for its extra work (see `ioc.outer` module docstring).
+    z, _ = outer_opt.adam(gf, jnp.zeros(K), lr=lr, budget_solves=budget,
+                          solves_per_step=M * n_restarts, trace_best=True)
+
+    # The two zero-solve baselines, fitted on exactly the same demonstrations.
+    z_kkt = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=600)
+    z_cioc = analytic.cioc_fit(inner.grad_x, inner.gn_system, ctxs, demos, K,
+                               n_steps=600)
+    _, G = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=1, lr=0.0,
+                            return_gram=True)
+    ev = np.linalg.eigvalsh(np.asarray(G) / np.trace(np.asarray(G)) * K)
+
+    fits = [("implicit", jax.nn.softmax(z)),
+            ("kkt", jax.nn.softmax(z_kkt)),
+            ("cioc", jax.nn.softmax(z_cioc))]
+    th_hat = fits[0][1]
+    xhat = jax.vmap(lambda x, c: si(x, th_hat, c))(x0, ctxs)
+
+    c0 = jax.tree.map(lambda x: x[0], ctxs)
+    # Shared ceiling across every field panel, including the recovered ones.
+    vmax = max(_field_grid(c0, th)[2].max()
+               for th in [env["theta"]] + [t for _, t in fits])
+
+    errs = {m: float(jnp.sum(jnp.abs(th - env["theta"]))) for m, th in fits}
+    best = min(errs, key=errs.get)
+
+    fig = plt.figure(figsize=(COL2, 2.0))
+    # Column 4 is an empty spacer that reserves room for the colorbar's tick
+    # labels; without it they are overdrawn by the trajectory panel.
+    gs = fig.add_gridspec(1, 6, width_ratios=[1, 1, 1, 1, 0.34, 1], wspace=0.10)
+    axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
+    axt = fig.add_subplot(gs[0, 5])
+
+    panels = [(env["theta"], "ground truth", None, False)] + [
+        (th, STYLE[m]["label"], errs[m], m == best) for m, th in fits]
+    for ax, (th, lab, err, is_best) in zip(axes, panels):
+        im = _draw_field_background(ax, c0, th, vmax=vmax)
+        ax.scatter(np.asarray(c0.centers)[:, 0], np.asarray(c0.centers)[:, 1],
+                   s=5, c="k", zorder=3, linewidths=0)
+        ax.set_xlim(-2.5, 2.5)
+        ax.set_ylim(-1.9, 1.9)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        # Method above the panel, its error below: a single stacked xlabel put
+        # the identity and the score in the same visual slot as the neighbouring
+        # panel's, which made the four hard to scan.
+        ax.set_title(lab, fontsize=7, pad=3)
+        if err is not None:
+            ax.set_xlabel(rf"$\|\hat\theta-\theta^\star\|_1={err:.2f}$",
+                          labelpad=3, fontsize=7,
+                          fontweight="bold" if is_best else "normal")
+    # Anchored to the last field panel, so the bar is exactly as tall as the
+    # maps it describes.  A colorbar in its own gridspec column spans the whole
+    # figure height instead, which `aspect="equal"` makes much taller than the
+    # panels.
+    cb = fig.colorbar(im, cax=axes[3].inset_axes([1.05, 0.0, 0.045, 1.0]))
+    cb.set_label("cost", fontsize=6.5, labelpad=1)
+    cb.ax.tick_params(labelsize=6, width=0.5, length=2)
+    cb.outline.set_linewidth(0.5)
+
+    # Trajectories for the implicit fit, drawn over the true field so the reader
+    # can see *why* the paths bend where they do.  Limits come from the data
+    # (the old panel clipped its own trajectories), and the field is rendered
+    # over those limits rather than a fixed box, so there is no bare margin.
+    # A subset of contexts: all M overlaid is a hairball at this panel size, and
+    # the panel is here to show the *character* of the fit, not to be counted.
+    show = list(range(min(n_show, M)))
+    paths = [np.asarray(b2d.unpack(xhat[i], jax.tree.map(lambda x: x[i], ctxs),
+                                   T, d))[:, :2] for i in show]
+    allp = np.concatenate([demos[show][:, :, :2].reshape(-1, 2)] + paths)
+    pad = 0.12
+    ext = _match_aspect(
+        (min(-2.5, allp[:, 0].min() - pad), max(2.5, allp[:, 0].max() + pad),
+         min(-1.9, allp[:, 1].min() - pad), max(1.9, allp[:, 1].max() + pad)),
+        5.0 / 3.8)
+    _draw_field_background(axt, c0, env["theta"], extent=ext, vmax=vmax)
+    for j, i in enumerate(show):
+        dm = demos[i][:, :2]
+        # The noisy observation is what every method is actually given.  At high
+        # sigma the difference between it and the smooth fit is the whole story,
+        # so draw it as the scattered samples it is rather than a clean line.
+        axt.plot(dm[:, 0], dm[:, 1], color=DEMO_C, lw=0.7, alpha=0.55,
+                 zorder=3, label="demonstration" if j == 0 else None)
+        axt.scatter(dm[:, 0], dm[:, 1], s=1.6, color=DEMO_C, alpha=0.85,
+                    linewidths=0, zorder=4)
+        axt.plot(paths[j][:, 0], paths[j][:, 1], color=FIT_C, lw=1.15,
+                 ls=(0, (3, 2)), path_effects=HALO,
+                 label="implicit fit" if j == 0 else None, zorder=5)
+    axt.set_xlim(ext[0], ext[1])
+    axt.set_ylim(ext[2], ext[3])
+    axt.set_aspect("equal")
+    axt.set_xticks([])
+    axt.set_yticks([])
+    axt.set_title("trajectories", fontsize=7, pad=3)
+    axt.set_xlabel(rf"$\sigma={demo_noise:g}$", labelpad=3, fontsize=7)
+    # Lower left, so it does not sit under the panel tag at upper left.
+    axt.legend(loc="lower left", ncol=1, fontsize=5.8, handlelength=1.6,
+               borderpad=0.25, labelspacing=0.25,
+               bbox_to_anchor=(0.005, 0.005), framealpha=0.82, frameon=True)
+    axt.get_legend().get_frame().set_linewidth(0)
+
+    for ax, tag in zip(axes + [axt], ("(a)", "(b)", "(c)", "(d)", "(e)")):
+        _tag_inside(ax, tag)
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.86, bottom=0.16)
+    print(f"  [{name}] sigma={demo_noise:g}  "
+          f"Gram lambda_2/lambda_K = {ev[1] / ev[-1]:.2e}  "
+          + "  ".join(f"{m}_L1={errs[m]:.3f}" for m, _ in fits)
+          + f"  best={best}")
+    finish(fig, name)
+    return errs
+
+
+# ---------------------------------------------------------------------------
+# Fig. 4 - robustness to demonstration suboptimality (robot, E1)
+# ---------------------------------------------------------------------------
+
+
+def fig_recovery_highnoise(sigma=0.05, **kw):
+    """The same recovery panel in the high-noise regime, where the bilevel
+    methods separate from the analytic ones.
+
+    This is not a second look at the same result.  The two zero-solve baselines
+    fit the *stationarity residual at the demonstration*, so they assume the
+    demonstration is an exact optimum.  It is at sigma=0 (relative stationarity
+    ~1e-9) and it is emphatically not once noise is added (0.49 at sigma=0.02),
+    and nothing in either method lets it trade a stationarity violation for
+    behaviour that matches.  A rollout-based loss can, because it re-solves.
+    So the ordering is expected to invert as sigma grows -- and at sigma=0 it
+    runs the other way, with Inverse KKT exact at zero solves.  Both regimes are
+    reported (`fig3_recovery` at sigma=0.02) rather than only the flattering one;
+    the crossover is the result, not the win.
+    """
+    return fig_recovery(demo_noise=sigma, name="fig3b_recovery_highnoise", **kw)
+
+
+def fig_noise():
+    files = sorted(glob.glob(os.path.join(DATA, "robot", "e1_sigma*.json")))
+    if not files:
+        print("  [skip] no E1 noise data")
+        return
+    rows = {}
+    for f in files:
+        d = json.load(open(f))
+        rows[d["demo_noise"]] = d["results"]
+    sig = np.array(sorted(rows))
+    methods = ("implicit", "fd", "cmaes", "kkt", "random")
+    # Implicit and finite differences agree to 3-4 significant figures here, so
+    # one curve would sit exactly on top of the other and vanish.  Dodge the
+    # markers slightly along x so both remain visible; the lines still coincide,
+    # which is the point being made.
+    dodge = {"implicit": -0.0006, "fd": 0.0006}
+    floor = 1e-7  # KKT is exact at sigma=0 (regret ~1e-19); an unclipped log
+    # axis would span 12 decades of empty space and crush the informative range.
+
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 2.4))
+    for ax, field, ylab, logy in (
+            (axes[0], "theta_l1", r"$\|\hat\theta-\theta^\star\|_1$", False),
+            (axes[1], "regret", "cost regret", True)):
+        for m in methods:
+            st = STYLE[m]
+            vals = [[t["methods"][m][field] for t in rows[s].values()] for s in sig]
+            med = np.array([np.median(v) for v in vals])
+            q1 = np.array([np.percentile(v, 25) for v in vals])
+            q3 = np.array([np.percentile(v, 75) for v in vals])
+            if logy:
+                med, q1, q3 = (np.maximum(a, floor) for a in (med, q1, q3))
+            x = sig + dodge.get(m, 0.0)
+            ax.plot(x, med, marker=st["marker"], ls=st["ls"], color=st["color"],
+                    label=st["label"], clip_on=False, zorder=3)
+            ax.fill_between(x, q1, q3, color=st["color"], alpha=0.12, lw=0, zorder=2)
+        ax.set_xlabel(r"demonstration noise $\sigma$ [rad]")
+        ax.set_ylabel(ylab)
+        ax.set_xticks(sig)
+        tidy(ax)
+    axes[1].set_yscale("log")
+    axes[1].set_ylim(bottom=floor)
+    # KKT is exact on noiseless demonstrations; say so rather than let the
+    # clipped marker imply a finite value.
+    axes[1].annotate("Inverse KKT exact\n($\\approx\\!10^{-19}$)", xy=(sig[0], floor),
+                     xytext=(34, 30), textcoords="offset points", fontsize=6,
+                     color=STYLE["kkt"]["color"],
+                     arrowprops=dict(arrowstyle="-", lw=0.5,
+                                     color=STYLE["kkt"]["color"]))
+    axes[0].legend(loc="upper left", ncol=2)
+    panel_label(axes[0], "(a)")
+    panel_label(axes[1], "(b)")
+    fig.tight_layout(w_pad=1.6)
+    finish(fig, "fig4_noise")
+
+
+# ---------------------------------------------------------------------------
+# Fig. 4b - KKT-seeding ablation (implicit only): does a free z0 from
+# Inverse-KKT survive demonstration noise and landscape multimodality?
+# ---------------------------------------------------------------------------
+
+# Local to this ablation: the "random" arm here is z0 ~ N(0, 0.5) *fed through
+# the same implicit-adjoint Adam fit* as the KKT-seeded arm, not the
+# unoptimized `STYLE["random"]` baseline used elsewhere -- same optimizer,
+# same budget, different starting point only.
+_KKT_SEED_STYLE = {
+    "random":   dict(color="0.45", marker="o", ls="--", label=r"Implicit, random $z_0$"),
+    "kkt_seed": STYLE["kkt_seed"],
+}
+
+
+def fig_kkt_seed():
+    """Regret vs demonstration noise, split by bump width (uni/multimodal
+    `field` regime) and inner-solver restarts, comparing an implicit-adjoint
+    Adam fit started from a random z0 against one seeded by `analytic.kkt_fit`
+    (zero extra forward solves). Every other setting -- contexts, demos,
+    budget -- is identical between the two lines in a panel; only z0 differs.
+    """
+    path = os.path.join(DATA, "bench2d", "bench2d_kkt_seed_dynamics.json")
+    if not os.path.exists(path):
+        print("  [skip] no kkt-seed ablation data")
+        return
+    data = json.load(open(path))
+
+    import re
+    parsed = {}
+    for tag, d in data.items():
+        m = re.match(r"bw([\d.]+)_R(\d+)_sigma([\d.]+)", tag)
+        bw, R, sigma = m.group(1), int(m.group(2)), float(m.group(3))
+        parsed[(bw, R, sigma)] = d["results"]
+    bws = sorted({k[0] for k in parsed}, reverse=True)   # wide (unimodal) first
+    Rs = sorted({k[1] for k in parsed})
+    sigmas = sorted({k[2] for k in parsed})
+
+    regime_name = {bws[0]: "wide bumps, unimodal", bws[1]: "narrow bumps, multimodal"}
+
+    fig, axes = plt.subplots(len(bws), len(Rs), figsize=(COL2, 2.5 * len(bws)),
+                              squeeze=False, sharex=True)
+    for i, bw in enumerate(bws):
+        for j, R in enumerate(Rs):
+            ax = axes[i][j]
+            meds = {}
+            for arm in ("random", "kkt_seed"):
+                st = _KKT_SEED_STYLE[arm]
+                vals = [[t["arms"][arm]["regret"] for t in parsed[(bw, R, s)].values()]
+                        for s in sigmas if (bw, R, s) in parsed]
+                med = np.array([np.median(v) for v in vals])
+                q1 = np.array([np.percentile(v, 25) for v in vals])
+                q3 = np.array([np.percentile(v, 75) for v in vals])
+                med, q1, q3 = (np.maximum(a, REGRET_FLOOR) for a in (med, q1, q3))
+                meds[arm] = med
+                ax.plot(sigmas, med, marker=st["marker"], ls=st["ls"],
+                        color=st["color"], label=st["label"], clip_on=False, zorder=3)
+                ax.fill_between(sigmas, q1, q3, color=st["color"], alpha=0.15,
+                                 lw=0, zorder=2)
+            ax.set_yscale("log")
+            ax.set_xticks(sigmas)
+            tidy(ax)
+            # Headline number per panel: the noiseless-case speedup, where the
+            # comparison is cleanest.  Placed in the low corner shared by both
+            # curves' right tail, which stays clear across all four panels.
+            gain = meds["random"][0] / meds["kkt_seed"][0]
+            ax.text(0.97, 0.06, rf"${gain:,.0f}\times$ at $\sigma{{=}}0$",
+                    transform=ax.transAxes, ha="right", va="bottom", fontsize=6.5,
+                    color=_KKT_SEED_STYLE["kkt_seed"]["color"],
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.85))
+            if i == 0:
+                ax.set_title(f"$R={R}$ restarts", fontsize=8)
+            if i == len(bws) - 1:
+                ax.set_xlabel(r"demonstration noise $\sigma$")
+            if j == 0:
+                ax.set_ylabel("cost regret")
+    for i, bw in enumerate(bws):
+        y0 = axes[i][0].get_position().y0
+        y1 = axes[i][0].get_position().y1
+        fig.text(0.005, (y0 + y1) / 2, regime_name[bw], rotation=90,
+                  ha="left", va="center", fontsize=7.5)
+    fig.suptitle("Seeding the implicit fit with Inverse-KKT: a free head start "
+                 "that fades with demonstration noise",
+                 fontsize=8.5, y=0.995)
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7,
+               bbox_to_anchor=(0.55, 0.94), frameon=False)
+    fig.tight_layout(rect=(0.03, 0, 1, 0.88))
+    finish(fig, "fig4b_kkt_seed")
+
+
+def fig_kkt_seed_trace():
+    """Convergence traces (best loss vs forward solves) at sigma=0 -- the free,
+    noiseless case where the head start should be largest -- one seed per
+    (bump width, restarts) cell, chosen as the seed closest to that cell's
+    median final regret so the picked trace is representative, not cherry-picked.
+    """
+    path = os.path.join(DATA, "bench2d", "bench2d_kkt_seed_dynamics.json")
+    if not os.path.exists(path):
+        print("  [skip] no kkt-seed ablation data")
+        return
+    data = json.load(open(path))
+
+    import re
+    cells = {}
+    for tag, d in data.items():
+        m = re.match(r"bw([\d.]+)_R(\d+)_sigma0\.0$", tag)
+        if m:
+            cells[(m.group(1), int(m.group(2)))] = d["results"]
+    if not cells:
+        print("  [skip] no sigma=0 cells in kkt-seed ablation data")
+        return
+    bws = sorted({k[0] for k in cells}, reverse=True)  # wide (unimodal) first
+    Rs = sorted({k[1] for k in cells})
+    regime_name = {bws[0]: "wide bumps, unimodal", bws[-1]: "narrow bumps, multimodal"} \
+        if len(bws) > 1 else {bws[0]: ""}
+
+    fig, axes = plt.subplots(len(bws), len(Rs), figsize=(COL2, 2.3 * len(bws)),
+                              squeeze=False, sharex=True, sharey=True)
+    for i, bw in enumerate(bws):
+        for j, R in enumerate(Rs):
+            ax = axes[i][j]
+            results = cells.get((bw, R))
+            if results is None:
+                ax.axis("off")
+                continue
+            finals = np.array([t["arms"]["kkt_seed"]["regret"] for t in results.values()])
+            rep = list(results.keys())[int(np.argsort(finals)[len(finals) // 2])]
+            for arm in ("random", "kkt_seed"):
+                st = _KKT_SEED_STYLE[arm]
+                solves, loss = zip(*results[rep]["arms"][arm]["trace"])
+                ax.plot(solves, np.maximum(loss, REGRET_FLOOR), ls=st["ls"],
+                        color=st["color"], label=st["label"], lw=1.1, zorder=3)
+            ax.set_yscale("log")
+            tidy(ax)
+            if i == 0:
+                ax.set_title(f"$R={R}$ restarts", fontsize=8)
+            if i == len(bws) - 1:
+                ax.set_xlabel("forward solves")
+            if j == 0:
+                ax.set_ylabel("best loss so far")
+    for i, bw in enumerate(bws):
+        y0 = axes[i][0].get_position().y0
+        y1 = axes[i][0].get_position().y1
+        fig.text(0.005, (y0 + y1) / 2, regime_name[bw], rotation=90,
+                  ha="left", va="center", fontsize=7.5)
+    fig.suptitle("Convergence from each $z_0$ (median seed, noiseless demonstrations)",
+                 fontsize=8.5, y=0.995)
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7,
+               bbox_to_anchor=(0.55, 0.94), frameon=False)
+    fig.tight_layout(rect=(0.03, 0, 1, 0.88))
+    finish(fig, "fig4c_kkt_seed_trace")
+
+
+# ---------------------------------------------------------------------------
+# Fig. 5 - regime boundary: smooth vs multimodal inner problems
+# ---------------------------------------------------------------------------
+
+
+def fig_regime():
+    """Regime boundary. Drawn as dots, not bars: a log axis has no zero, so bar
+    length would not be proportional to the value it encodes."""
+    combos = [(bw, R) for bw in ("0.90", "0.45") for R in (1, 4)]
+    got = {}
+    for bw, R in combos:
+        f = os.path.join(DATA, "bench2d", f"bench2d_regime_bw{bw}_R{R}.json")
+        if os.path.exists(f):
+            got[(bw, R)] = json.load(open(f))["results"]
+    if not got:
+        print("  [skip] no regime data")
+        return
+    keys = [c for c in combos if c in got]
+    methods = ("implicit", "fd", "cmaes", "cioc")
+    x = np.arange(len(keys))
+
+    fig, ax = plt.subplots(figsize=(COL1, 2.7))
+    ax.axvspan(-0.5, 1.5, color="#f4f4f4", zorder=0, lw=0)
+    for j, m in enumerate(methods):
+        st = STYLE[m]
+        per = [[t[m]["regret"] for t in got[c].values()] for c in keys]
+        vals = np.array([np.median(v) for v in per])
+        q1 = np.array([np.percentile(v, 25) for v in per])
+        q3 = np.array([np.percentile(v, 75) for v in per])
+        # Regret is a difference of costs and goes very slightly negative when a
+        # fit beats the reference solve by solver noise.  On a log axis that is
+        # not representable: left alone it silently produces a non-positive
+        # ylim and a degenerate canvas.  Clip the whisker to the axis floor.
+        q1 = np.maximum(q1, REGRET_FLOOR)
+        q3 = np.maximum(q3, REGRET_FLOOR)
+        vals = np.maximum(vals, REGRET_FLOOR)
+        off = (j - 1.5) * 0.16
+        # Dots only: on a log axis a stem would start from an arbitrary floor,
+        # so its length would encode nothing.  Position carries the value; the
+        # whisker is the inter-quartile range across seeds, which these
+        # benchmarks need -- run-to-run regret spread is ~40% (see the
+        # contact-solver nondeterminism note), so a bare dot overstates the
+        # separation between methods.
+        ax.errorbar(x + off, vals, yerr=[vals - q1, q3 - vals], ls="",
+                    marker=st["marker"], color=st["color"], ms=4.8,
+                    elinewidth=0.7, capsize=1.6, capthick=0.7,
+                    label=st["label"], zorder=3, clip_on=False)
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"$R={R}$" for _, R in keys])
+    ax.set_xlim(-0.5, len(keys) - 0.5)
+    lo = min(max(np.percentile([t[m]["regret"] for t in got[c].values()], 25),
+                 REGRET_FLOOR)
+             for c in keys for m in methods)
+    ax.set_ylim(lo * 0.35, None)
+    ax.set_ylabel("cost regret")
+    ax.set_xlabel("inner restarts")
+    tidy(ax)
+    ax.text(0.5, 1.03, "smooth", transform=ax.get_xaxis_transform(),
+            ha="center", fontsize=7.5)
+    ax.text(2.5, 1.03, "multimodal", transform=ax.get_xaxis_transform(),
+            ha="center", fontsize=7.5)
+    ax.legend(loc="upper center", ncol=2, fontsize=6.5,
+              bbox_to_anchor=(0.5, -0.22))
+    fig.tight_layout()
+    finish(fig, "fig5_regime")
+
+
+def main(only: str = ""):
+    set_style()
+    todo = {
+        "scaling": fig_scaling,
+        "environments": fig_environments,
+        "recovery": fig_recovery,
+        "recovery_highnoise": fig_recovery_highnoise,
+        "noise": fig_noise,
+        "kkt_seed": fig_kkt_seed,
+        "kkt_seed_trace": fig_kkt_seed_trace,
+        "regime": fig_regime,
+    }
+    for name, fn in todo.items():
+        if only and only != name:
+            continue
+        print(f"[{name}]")
+        fn()
+
+
+if __name__ == "__main__":
+    tyro.cli(main)

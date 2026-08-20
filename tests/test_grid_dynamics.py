@@ -105,7 +105,7 @@ def test_batched_shapes_and_jit(setup):
 
 
 def test_mass_matrix_agreement(setup):
-    """Custom CrbaKernel M(q) vs the pure-JAX CRBA."""
+    """GRiD's generated crba_kernel M(q) vs the pure-JAX CRBA."""
     robot, gd = setup
     q = _state(gd, jax.random.PRNGKey(6))[0]
     M = gd.mass_matrix(q)

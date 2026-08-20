@@ -1,26 +1,47 @@
-"""Benchmark and correctness evaluation: HJCD-IK, LS-IK, SQP-IK, MPPI-IK, and Learned-IK.
+"""Benchmark and correctness evaluation of IK solvers: pyroffi (this work) vs baselines.
+
+Methods
+    pyroffi (this work)
+        HJCD-IK, LS-IK, SQP-IK, MPPI-IK, Analytic-IK — each with a JAX (differentiable,
+        GPU) backend and a CUDA/FFI kernel backend.  Learned-IK (JAX, Flax MLP warm-start
+        + LM refinement).
+    Baselines
+        cuRobo IK (NV LAb LBM-optimized IK, its own conda env, see below).
+        PyRoKi-LS and PyRoKi-AnalyticJac (jaxls LM; "AnalyticJac" uses the analytic
+        task-space Jacobian in the residual, not a closed-form solver).
+        QuIK-CPU (Halley's-method CPU IK).
 
 Sequential (per-problem) timing
-    JAX solvers are evaluated one pose at a time to measure single-problem
-    latency.  CUDA solvers are also timed sequentially for a like-for-like
-    comparison.
+    Every solver is evaluated one pose at a time to measure single-problem
+    latency.  JAX/CUDA pyroffi solvers are timed with JIT device timers inside a
+    fixed-count lax.scan (no Python dispatch in the timed loop); cuRobo is timed
+    with CUDA events; PyRoKi and QuIK with wall clocks.
 
 Batch timing
-    JAX and CUDA batch solvers are timed over all N_TARGETS at once to measure
-    throughput.  The effective per-problem time is batch_wall_time / N_TARGETS.
+    Batch solvers are timed over N_TARGETS_BATCH targets at once to measure
+    throughput.  The effective per-problem time is total_time / N_TARGETS_BATCH.
 
 Correctness
     For each solver the median position / rotation errors across all target
-    poses are reported.  JAX vs CUDA agreement is checked at batch level.
+    poses are reported, and success is counted against a single common
+    threshold (POS_THR_M = 1 mm, ROT_THR_RAD = 0.05 rad) for every method.
+    (cuRobo's solver internally targets its native 5 mm tolerance; the success
+    column is nevertheless scored with the same 1 mm / 0.05 rad metric.)
 
 Collision-free IK
     When COLLISION_FREE=True a static obstacle scene is created (or loaded from
-    ENV_FILE) and each solver is re-run with a differentiable collision penalty.
-    Results include a coll_free column showing how many solutions are actually
-    collision-free (min signed distance > 0).
+    ENV_FILE) and each differentiable solver is re-run with the same soft
+    collision penalty in its objective.  Results include a coll_free column
+    showing how many solutions are actually collision-free (min signed distance
+    > 0).  cuRobo uses its own world-collision-aware IK; its rows are scored
+    with the same success thresholds and its coll_free_n comes from its own
+    self/world-collision check.  Analytic-IK is excluded from the collision
+    rows: its CUDA collision handling is candidate *selection* over a closed-form
+    branch set, not the differentiable penalty that all other collision rows use,
+    so including it would not be an apples-to-apples comparison.
 
     The scene is saved to ENV_FILE as JSON with a ``curobo_world_model`` key
-    that can be fed directly into a CuRobo WorldConfig for fair comparison.
+    that can be fed directly into a cuRobo WorldConfig for fair comparison.
 
 Learned-IK
     The Learned-IK solver requires a pre-trained Flax model.  Train one with:
@@ -37,6 +58,34 @@ Usage:
     dispatcher that never touches the GPU; the ``--robot``/``--solver`` flags mark
     the isolated child invocations and are not meant to be passed by hand.
 
+    Fairness / reproducibility notes:
+      * All target poses are generated from a fixed seed-0 RNG in the pyroffi env
+        and every method is given the exact same targets.  For cuRobo the targets
+        are dumped to an .npz sidecar and its child (which runs in a separate
+        conda env) consumes that file, so nothing is re-sampled or re-derived.
+      * All pyroffi and PyRoKi solvers use num_seeds = 32 random restarts.
+        cuRobo is also given num_seeds = 32 (its own benchmark ships with 2/8);
+        the seed budget is therefore documented per method.
+      * Analytic-IK children run with JAX_ENABLE_X64=1 (set pre-import) because
+        the closed-form solve and its CUDA FFI require float64; all other
+        children run in the default (float32) dtype.
+      * cuRobo runs in its own conda env (``curobo``, editable install of
+        baselines/curobo).  The dispatcher locates the interpreter via the
+        CUROBO_PYTHON env var, a sibling "curobo" conda env, or
+        ``conda run -n curobo``.  cuRobo only ships robot configs for panda
+        (franka.yml) and g1 (unitree_g1.yml); fetch/baxter cuRobo rows are
+        skipped with a logged note.  The per-robot tool frame is narrowed
+        in-memory before the solver is built (panda → panda_hand, g1 →
+        right_hand_palm_link, which is present in unitree_g1.yml's kinematics),
+        so cuRobo goals and the error comparison happen in the same frame as
+        the pyroffi targets — no static offset is needed.
+      * GPU monitoring (NVML) respects CUDA_VISIBLE_DEVICES: with
+        CUDA_VISIBLE_DEVICES=k the monitor watches physical GPU k, so the
+        reported util/VRAM rows always belong to the GPU the child actually ran
+        on.
+      * MPPI's L-BFGS refinement budget is identical (25 iterations) on the JAX
+        and CUDA backends.
+
 Prerequisites:
     1. A CUDA-capable GPU.
     2. CUDA libraries compiled:
@@ -49,6 +98,8 @@ Prerequisites:
     4. (Optional) Flax model for Learned-IK:
            pip install flax optax
            python train_learned_ik.py --robot panda
+    5. (Optional) cuRobo baseline: a conda env ``curobo`` with an editable
+       install of baselines/curobo (or CUROBO_PYTHON pointing at its python).
 """
 
 from __future__ import annotations
@@ -61,6 +112,7 @@ import functools
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import threading
@@ -90,6 +142,17 @@ _IS_SOLVER_CHILD = "--solver" in sys.argv[1:]
 if not _CPU_ONLY and not _IS_SOLVER_CHILD:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+# Analytic-IK (closed-form) children run in float64: the 7-DOF branch solve and
+# its CUDA FFI kernel both require x64, while every other child keeps the
+# default dtype so JAX/CUDA agreement is measured under the same precision.
+# JAX reads JAX_ENABLE_X64 at import, so this must land before ``import jax``.
+if "--solver" in sys.argv[1:]:
+    _solver_idx = sys.argv.index("--solver")
+    if _solver_idx + 1 < len(sys.argv) and sys.argv[_solver_idx + 1] in (
+        "Analytic-JAX", "Analytic-CUDA",
+    ):
+        os.environ["JAX_ENABLE_X64"] = "1"
+
 import jax
 import jax.numpy as jnp
 import jaxlie
@@ -101,12 +164,16 @@ from pyroffi.collision import Box, RobotCollisionSpherized, Sphere, collide
 from pyroffi._robot_srdf_parser import read_disabled_collisions_from_srdf
 
 # Optional NVML for GPU monitoring (nvidia-ml-py / pynvml).
+# NVML indices are PHYSICAL, so the handle must track CUDA_VISIBLE_DEVICES —
+# otherwise a child pinned to GPU k would report GPU 0's util/VRAM.
 try:
     if _CPU_ONLY:
         raise RuntimeError("CPU-only mode")
     import pynvml as _pynvml
     _pynvml.nvmlInit()
-    _NVML_HANDLE: object | None = _pynvml.nvmlDeviceGetHandleByIndex(0)
+    _cve = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    _cve_idx = int(_cve.split(",")[0].strip()) if _cve.strip() else 0
+    _NVML_HANDLE: object | None = _pynvml.nvmlDeviceGetHandleByIndex(_cve_idx)
     _NVML_OK = True
 except Exception:
     _NVML_HANDLE = None
@@ -162,6 +229,21 @@ if not _CPU_ONLY:
     from pyroffi.optimization_engines._mppi_ik import (
         mppi_ik_solve_cuda,
         mppi_ik_solve_cuda_batch,
+    )
+
+# Analytic (closed-form) IK for the 7-DOF spherical-wrist family.  The JAX
+# backend is pure JAX (available in CPU-only mode too); the CUDA/FFI backend
+# needs a GPU and float64 (see the pre-import JAX_ENABLE_X64 flag above).
+from pyroffi.kinematics._analytic_ik import (
+    analytic_ik_solve,
+    analytic_ik_solve_batched,
+    build_geometry,
+)
+
+if not _CPU_ONLY:
+    from pyroffi.optimization_engines._analytic_ik import (
+        analytic_ik_solve_cuda,
+        analytic_ik_solve_cuda_batch,
     )
 
 # QuIK CPU (Halley's-method) IK backend (optional; needs cricket JIT + a
@@ -224,13 +306,30 @@ ROBOT_TIER = {
 # benchmark keys off these base solver labels (see _candidate_solvers / --solver).
 _CORE_METHODS = ("HJCD", "LS", "SQP", "MPPI")
 
+# Robots whose 7-DOF arm chain supports the closed-form (Analytic-IK) solve.
+# build_geometry() validates the family at runtime; this set keeps the dispatcher
+# from spawning children that would immediately skip.
+_ANALYTIC_ROBOTS = frozenset(("panda", "fetch", "baxter"))
 
-def _candidate_solvers(cpu_only: bool, no_jax: bool) -> list[str]:
+# cuRobo ships robot configs only for these two; the value is cuRobo's robot file
+# name.  The cuRobo child narrows each config's tool_frames to pyroffi's EE link
+# in-memory (panda_hand; right_hand_palm_link for g1, which is present in
+# unitree_g1.yml's kinematics), so no static offset is needed.  fetch/baxter
+# cuRobo rows are skipped with a logged note (see main()).
+_CUROBO_ROBOT_FILES = {"panda": "franka.yml", "g1": "unitree_g1.yml"}
+
+
+def _candidate_solvers(
+    cpu_only: bool, no_jax: bool, robot_name: str | None = None,
+) -> list[str]:
     """Base solver labels to benchmark, one subprocess each (see main()).
 
     This is the STATIC candidate set implied by the mode flags; the optional
-    solvers (Learned/PyRoKi/QuIK) may still be unavailable at runtime, in which
-    case that solver's child finds nothing to run and exits without writing rows.
+    solvers (Learned/PyRoKi/QuIK/cuRobo) may still be unavailable at runtime, in
+    which case that solver's child finds nothing to run and exits without writing
+    rows.  When robot_name is given the set is further restricted to methods that
+    support that robot: Analytic-IK only for 7-DOF spherical-wrist arms, cuRobo
+    only where it ships a robot config.
     """
     labels: list[str] = []
     for m in _CORE_METHODS:
@@ -238,9 +337,16 @@ def _candidate_solvers(cpu_only: bool, no_jax: bool) -> list[str]:
             labels.append(f"{m}-JAX")
         if not cpu_only:
             labels.append(f"{m}-CUDA")
+    _analytic_ok = robot_name is None or robot_name in _ANALYTIC_ROBOTS
+    if not no_jax and _analytic_ok:
+        labels.append("Analytic-JAX")
+    if not cpu_only and _analytic_ok:
+        labels.append("Analytic-CUDA")
     if not no_jax:
-        labels += ["Learned-JAX", "PyRoKi"]
+        labels += ["Learned-JAX", "PyRoKi-LS", "PyRoKi-AnalyticJac"]
     labels.append("QuIK-CPU")
+    if robot_name is not None and robot_name in _CUROBO_ROBOT_FILES:
+        labels.append("cuRobo")
     return labels
 
 
@@ -275,7 +381,7 @@ ROBOT_FIXED_JOINT_NAMES = {
     "g1": (),
 }
 
-N_TARGETS = 10    # number of random target poses to evaluate
+N_TARGETS = 32    # number of random target poses to evaluate
 N_TARGETS_BATCH = 256
 N_WARMUP  = 3      # JIT / kernel warm-up calls (discarded from timing)
 N_TIMED   = 5      # timed repetitions (sequential: per pose; batch: per full call)
@@ -329,7 +435,7 @@ IK_KWARGS_MPPI_JAX = dict(
     num_seeds         = 32,
     n_particles       = 16,
     n_mppi_iters      = 5,
-    n_lbfgs_iters     = 30,
+    n_lbfgs_iters     = 25,   # == CUDA backend (fairness: identical refinement budget)
     m_lbfgs           = 5,
     pos_weight        = 50.0,
     ori_weight        = 10.0,
@@ -371,6 +477,16 @@ IK_KWARGS_PYROKI = dict(
     pos_weight   = 50.0,
     ori_weight   = 10.0,
     max_iter     = 100,
+)
+
+# Analytic (closed-form) IK: the 7-DOF branch solve is deterministic, so the only
+# tuning knob is the q7 sample grid (JAX) / seed budget (CUDA); both use 32 to
+# match every other method's num_seeds.
+IK_KWARGS_ANALYTIC_JAX = dict(
+    num_q7 = 32,
+)
+IK_KWARGS_ANALYTIC_CUDA = dict(
+    num_seeds = 32,
 )
 
 # Success threshold.
@@ -801,6 +917,90 @@ def _make_batched_rng_keys_seq(base_rng_keys: jax.Array) -> jax.Array:
 
 
 # ---------------------------------------------------------------------------
+# Analytic (closed-form) IK adapters
+# ---------------------------------------------------------------------------
+# The closed-form solve covers only the 7-DOF arm chain (the FIRST 7 actuated
+# joints of every robot in this benchmark).  Joints past the chain (gripper
+# fingers) keep their previous value, and fixed-joint-masked joints are pinned
+# to their previous value — exactly what the other solvers do through
+# fixed_joint_mask.
+
+def _embed_7dof(q7, prev, fixed_joint_mask):
+    """Embed a 7-DOF closed-form solution into the full actuated space."""
+    if q7.shape[-1] != prev.shape[-1]:
+        full = jnp.concatenate([q7, prev[..., 7:]], axis=-1)
+    else:
+        full = q7
+    return jnp.where(fixed_joint_mask == 1, prev, full)
+
+
+def _make_analytic_seq_fn(geometry, target_link_name):
+    """Map the bench's generic seq convention onto analytic_ik_solve (JAX).
+
+    The solve is deterministic, so rng_key is accepted and ignored.
+    """
+    def fn(robot, target_link_indices, target_poses, rng_key, previous_cfg,
+           fixed_joint_mask=None, **kwargs):
+        tp = target_poses[0] if isinstance(target_poses, (tuple, list)) else target_poses
+        q7, _found = analytic_ik_solve(
+            robot, target_link_name, tp,
+            num_q7=int(kwargs.get("num_q7", 32)),
+            previous_cfg=previous_cfg,      # sliced [:7] internally
+            geometry=geometry,
+        )
+        return _embed_7dof(q7, previous_cfg, fixed_joint_mask)
+    return fn
+
+
+def _make_analytic_jax_batch_fn(geometry, target_link_name):
+    """Map the bench's generic JAX batch convention onto analytic_ik_solve_batched.
+
+    ``rng_keys`` is accepted and ignored (deterministic solve); the batched JAX
+    path takes target POSE MATRICES, hence ``.as_matrix()``.
+    """
+    def fn(robot, tli, target_poses, rng_keys, previous_cfgs,
+           fixed_joint_mask=None, **kwargs):
+        q7, _found = analytic_ik_solve_batched(
+            robot, target_link_name, target_poses.as_matrix(),
+            num_q7=int(kwargs.get("num_q7", 32)),
+            previous_cfg=previous_cfgs,     # sliced :7 internally
+            geometry=geometry,
+            backend="jax",                  # force JAX for the Analytic-JAX row
+        )
+        return _embed_7dof(q7, previous_cfgs, fixed_joint_mask)
+    return fn
+
+
+def _make_analytic_cuda_seq_fn():
+    """Generic seq convention onto analytic_ik_solve_cuda (CUDA FFI, x64)."""
+    def fn(robot, tli, target_poses, rng_key, previous_cfg,
+           fixed_joint_mask=None, **kwargs):
+        tp = target_poses[0] if isinstance(target_poses, (tuple, list)) else target_poses
+        # The FFI kernel reshapes previous_cfg to (1, 7): exactly 7 columns.
+        prev7 = None if previous_cfg is None else jnp.asarray(previous_cfg)[:7]
+        q7 = analytic_ik_solve_cuda(
+            robot, tli, tp, rng_key,
+            previous_cfg=prev7,
+            num_seeds=int(kwargs.get("num_seeds", 32)),
+        )
+        return _embed_7dof(q7, previous_cfg, fixed_joint_mask)
+    return fn
+
+
+def _make_analytic_cuda_batch_fn():
+    """Generic CUDA batch convention onto analytic_ik_solve_cuda_batch."""
+    def fn(robot, tli, target_poses, rng_key, previous_cfgs,
+           fixed_joint_mask=None, **kwargs):
+        q7 = analytic_ik_solve_cuda_batch(
+            robot, tli, target_poses, rng_key,
+            previous_cfgs=jnp.asarray(previous_cfgs)[:, :7],  # FFI: 7 cols
+            num_seeds=int(kwargs.get("num_seeds", 32)),
+        )
+        return _embed_7dof(q7, previous_cfgs, fixed_joint_mask)
+    return fn
+
+
+# ---------------------------------------------------------------------------
 # PyRoKi helpers
 # ---------------------------------------------------------------------------
 
@@ -811,13 +1011,20 @@ def _make_pyroki_solvers(
     *,
     collision_cost_fn=None,
     collision_weight: float = 0.0,
+    pose_cost_factory=None,
 ):
     """Build JIT'd single-problem and batch PyRoKi IK solvers.
+
+    ``pose_cost_factory`` selects the pose-cost factory: pyroki's autodiff
+    ``pose_cost`` (default, "PyRoKi-LS") or ``pose_cost_analytic_jac``
+    ("PyRoKi-AnalyticJac" — analytic task-space Jacobian, same LM solver).
 
     Returns:
         solve_fn(target_wxyz_xyz, seed_cfgs) -> cfg  (single target)
         batch_fn(target_wxyz_xyz_batch, seed_cfgs_batch) -> cfgs  (N targets)
     """
+    if pose_cost_factory is None:
+        pose_cost_factory = _pyroki.costs.pose_cost
     joint_var = pyroki_robot.joint_var_cls(0)
     tli_arr   = jnp.array(target_link_index, dtype=jnp.int32)
     pos_w     = float(kwargs.get("pos_weight", 50.0))
@@ -850,7 +1057,7 @@ def _make_pyroki_solvers(
 
         def _one_seed(seed_cfg):
             costs = [
-                _pyroki.costs.pose_cost(pyroki_robot, joint_var, target, tli_arr, pos_w, ori_w),
+                pose_cost_factory(pyroki_robot, joint_var, target, tli_arr, pos_w, ori_w),
                 _pyroki.costs.limit_cost(pyroki_robot, joint_var),
             ]
             if _coll_cost_factory is not None:
@@ -1476,6 +1683,7 @@ def _run_robot_benchmark(
     robot_name: str,
     csv_file: pathlib.Path | None,
     solver_filter: str | None = None,
+    blocks: set[str] | None = None,
 ) -> None:  # noqa: C901
     # When ``solver_filter`` is set (the per-solver subprocess path, see main()),
     # only that one base solver is set up, warmed up, timed and written. ``_want``
@@ -1485,6 +1693,11 @@ def _run_robot_benchmark(
         if solver_filter is None:
             return True
         return name.replace("-COLL", "").replace("-BATCH", "") == solver_filter
+
+    # ``blocks`` (from --blocks) restricts which of the four evaluation phases run:
+    # {"seq","seq_coll","batch","batch_coll"}. None means all four.
+    def _block_wanted(block: str) -> bool:
+        return blocks is None or block in blocks
 
     print("=" * 80)
     _title_solver = solver_filter if solver_filter is not None else \
@@ -1539,36 +1752,53 @@ def _run_robot_benchmark(
     mid_cfg = jnp.array((lo + hi) / 2, dtype=jnp.float32)
 
     # ------------------------------------------------------------------
-    # PyRoKi setup (optional)
+    # PyRoKi setup (optional): two variants sharing one pyroki robot
+    #   PyRoKi-LS          — autodiff pose residual (pyroki.costs.pose_cost)
+    #   PyRoKi-AnalyticJac — analytic task-space Jacobian
+    #                        (pyroki.costs.pose_cost_analytic_jac), same LM solver
     # ------------------------------------------------------------------
-    _pyroki_solve_fn      = None
-    _pyroki_batch_fn      = None
-    _pyroki_coll_solve_fn = None
-    _pyroki_coll_batch_fn = None
+    _pyroki_ls       = None   # (solve_fn, batch_fn)
+    _pyroki_analytic = None   # (solve_fn, batch_fn)
+    _pyroki_ls_coll       = None
+    _pyroki_analytic_coll = None
 
-    if not _want("PyRoKi"):
+    if not (_want("PyRoKi-LS") or _want("PyRoKi-AnalyticJac")):
         pass  # not the selected solver; skip PyRoKi setup entirely
     elif _NO_JAX:
         print("\nPyRoKi disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
     elif _PYROKI_AVAILABLE:
-        print("\nSetting up PyRoKi solver ...")
+        print("\nSetting up PyRoKi solvers (LS + AnalyticJac) ...")
         _pyroki_robot = _pyroki.Robot.from_urdf(urdf)
-        _pyroki_solve_fn, _pyroki_batch_fn = _make_pyroki_solvers(
-            _pyroki_robot, target_link_index, IK_KWARGS_PYROKI
-        )
-        # Warm up (triggers JIT compilation).
+        # Warm-up inputs shared by both variants.
         _num_seeds = IK_KWARGS_PYROKI["num_seeds"]
         _lo_j = jnp.array(lo, dtype=jnp.float32)
         _hi_j = jnp.array(hi, dtype=jnp.float32)
-        _key0 = jax.random.PRNGKey(0)
-        _seeds0 = jax.random.uniform(_key0, (_num_seeds, n_act), minval=_lo_j, maxval=_hi_j)
-        # We need a placeholder target to warm up; it will be replaced in actual runs.
+        _seeds0 = jax.random.uniform(
+            jax.random.PRNGKey(0), (_num_seeds, n_act), minval=_lo_j, maxval=_hi_j,
+        )
+        # Placeholder target to warm up; it will be replaced in actual runs.
         _mid_wxyz_xyz = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5], dtype=jnp.float32)
-        print("  Warming up PyRoKi (JIT compile) ...")
-        for _ in range(N_WARMUP):
-            _w = _pyroki_solve_fn(_mid_wxyz_xyz, _seeds0)
-            jax.block_until_ready(_w)
-        print("  PyRoKi ready.")
+
+        def _build_pyroki_variant(label, pose_cost_factory):
+            """Build and warm up one PyRoKi variant; None if not selected."""
+            if not _want(label):
+                return None
+            solve_fn, batch_fn = _make_pyroki_solvers(
+                _pyroki_robot, target_link_index, IK_KWARGS_PYROKI,
+                pose_cost_factory=pose_cost_factory,
+            )
+            if _block_wanted("seq") or _block_wanted("seq_coll"):
+                print(f"  Warming up {label} (JIT compile) ...")
+                for _ in range(N_WARMUP):
+                    _w = solve_fn(_mid_wxyz_xyz, _seeds0)
+                    jax.block_until_ready(_w)
+                print(f"  {label} ready.")
+            return solve_fn, batch_fn
+
+        _pyroki_ls = _build_pyroki_variant("PyRoKi-LS", _pyroki.costs.pose_cost)
+        _pyroki_analytic = _build_pyroki_variant(
+            "PyRoKi-AnalyticJac", _pyroki.costs.pose_cost_analytic_jac,
+        )
     elif not _PYROKI_AVAILABLE:
         print("\nPyRoKi unavailable (pip install git+https://github.com/chungmin99/pyroki.git).")
 
@@ -1708,19 +1938,28 @@ def _run_robot_benchmark(
                       f"{type(e).__name__}: {str(e)[:90]}")
                 _quik_vamp_checker = None
 
-        if _pyroki_solve_fn is not None:
-            print("  Setting up collision-aware PyRoKi ...")
+        def _make_pyroki_coll_variant(variant, label):
+            """Collision-aware build of one PyRoKi variant; None if the base
+            variant is absent."""
+            if variant is None:
+                return None
+            print(f"  Setting up collision-aware {label} ...")
 
             def _pyroki_coll_cost(cfg):
                 return _collision_penalty(cfg, robot, _dummy)
 
-            _pyroki_coll_solve_fn, _pyroki_coll_batch_fn = _make_pyroki_solvers(
+            return _make_pyroki_solvers(
                 _pyroki_robot,
                 target_link_index,
                 IK_KWARGS_PYROKI,
                 collision_cost_fn=_pyroki_coll_cost,
                 collision_weight=COLL_WEIGHT,
             )
+
+        _pyroki_ls_coll = _make_pyroki_coll_variant(_pyroki_ls, "PyRoKi-LS")
+        _pyroki_analytic_coll = _make_pyroki_coll_variant(
+            _pyroki_analytic, "PyRoKi-AnalyticJac",
+        )
 
     # ------------------------------------------------------------------
     # Learned-IK: load pre-trained Flax model (optional)
@@ -1807,6 +2046,21 @@ def _run_robot_benchmark(
     target_poses_stacked = jaxlie.SE3(
         jnp.stack([p.wxyz_xyz for p in all_target_poses])
     )  # (N_TARGETS_BATCH, 7)
+
+    # Sidecar for the cuRobo child, which runs in a separate conda env and
+    # cannot consume these jaxlie poses directly (see bench_ik_curobo.py).
+    # The dump is deterministic (seed-0 targets), so every pyroffi child
+    # rewrites the identical file; cuRobo is the LAST candidate solver per
+    # robot, so by the time its child starts the file is guaranteed to exist.
+    if robot_name in _CUROBO_ROBOT_FILES:
+        out_dir = csv_file.parent if csv_file is not None else RESOURCE_ROOT
+        targets_npz = out_dir / f"bench_ik_targets_{robot_name}.npz"
+        np.savez_compressed(
+            targets_npz,
+            seq=np.stack([p.wxyz_xyz for p in target_poses]).astype(np.float32),
+            batch=target_poses_stacked.wxyz_xyz.astype(np.float32),
+        )
+        print(f"  wrote cuRobo target sidecar: {targets_npz}")
 
     # Per-pose RNG keys and warm-start configs.
     rng_keys          = [jax.random.PRNGKey(i + 1) for i in range(N_TARGETS)]
@@ -2001,18 +2255,23 @@ def _run_robot_benchmark(
         )
         batch_timers[name] = t
 
-    if _pyroki_batch_fn is not None:
+    for _label, _variant in (("PyRoKi-LS-BATCH", _pyroki_ls),
+                            ("PyRoKi-AnalyticJac-BATCH", _pyroki_analytic)):
+        if not (_block_wanted("batch") or _block_wanted("batch_coll")):
+            continue  # skip the (large) vmapped batch warmup entirely
+        if _variant is None:
+            continue
         _num_seeds = IK_KWARGS_PYROKI["num_seeds"]
         _lo_j = jnp.array(lo, dtype=jnp.float32)
         _hi_j = jnp.array(hi, dtype=jnp.float32)
-        print("Warming up PyRoKi-BATCH ...")
+        print(f"Warming up {_label} ...")
         _batch_seeds = jax.random.uniform(
             jax.random.PRNGKey(0),
             (len(target_poses_stacked.wxyz_xyz), _num_seeds, n_act),
             minval=_lo_j, maxval=_hi_j,
         )
         for _ in range(N_WARMUP):
-            out = _pyroki_batch_fn(target_poses_stacked.wxyz_xyz, _batch_seeds)
+            out = _variant[1](target_poses_stacked.wxyz_xyz, _batch_seeds)
             jax.block_until_ready(out)
 
     # ------------------------------------------------------------------
@@ -2049,10 +2308,15 @@ def _run_robot_benchmark(
             fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs, n_act, timer=timer,
         )
 
-    if _pyroki_solve_fn is not None:
-        print("  Running PyRoKi ...")
-        seq_results["PyRoKi"] = _run_pyroki_sequential(
-            _pyroki_solve_fn, robot, _pyroki_robot, target_link_index,
+    for _label, _variant in (("PyRoKi-LS", _pyroki_ls),
+                            ("PyRoKi-AnalyticJac", _pyroki_analytic)):
+        if not _block_wanted("seq"):
+            continue
+        if _variant is None:
+            continue
+        print(f"  Running {_label} ...")
+        seq_results[_label] = _run_pyroki_sequential(
+            _variant[0], robot, _pyroki_robot, target_link_index,
             target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
@@ -2095,10 +2359,15 @@ def _run_robot_benchmark(
                 fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs, n_act, timer=timer,
             )
 
-        if _pyroki_coll_solve_fn is not None:
-            print("  Running PyRoKi-COLL ...")
-            seq_coll_results["PyRoKi"] = _run_pyroki_sequential(
-                _pyroki_coll_solve_fn, robot, _pyroki_robot, target_link_index,
+        for _label, _variant in (("PyRoKi-LS", _pyroki_ls_coll),
+                                ("PyRoKi-AnalyticJac", _pyroki_analytic_coll)):
+            if not _block_wanted("seq_coll"):
+                continue
+            if _variant is None:
+                continue
+            print(f"  Running {_label}-COLL ...")
+            seq_coll_results[_label] = _run_pyroki_sequential(
+                _variant[0], robot, _pyroki_robot, target_link_index,
                 target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
@@ -2144,10 +2413,15 @@ def _run_robot_benchmark(
             is_jax_batch=jnp.asarray(rng).ndim == 2, timer=timer,
         )
 
-    if _pyroki_batch_fn is not None:
-        print("  Running PyRoKi-BATCH ...")
-        batch_results["PyRoKi-BATCH"] = _run_pyroki_batch(
-            _pyroki_batch_fn, robot, _pyroki_robot, target_link_index,
+    for _label, _variant in (("PyRoKi-LS-BATCH", _pyroki_ls),
+                            ("PyRoKi-AnalyticJac-BATCH", _pyroki_analytic)):
+        if not _block_wanted("batch"):
+            continue
+        if _variant is None:
+            continue
+        print(f"  Running {_label} ...")
+        batch_results[_label] = _run_pyroki_batch(
+            _variant[1], robot, _pyroki_robot, target_link_index,
             target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
@@ -2191,10 +2465,15 @@ def _run_robot_benchmark(
                 is_jax_batch=jnp.asarray(rng).ndim == 2, timer=timer,
             )
 
-        if _pyroki_coll_batch_fn is not None:
-            print("  Running PyRoKi-COLL-BATCH ...")
-            batch_coll_results["PyRoKi"] = _run_pyroki_batch(
-                _pyroki_coll_batch_fn, robot, _pyroki_robot, target_link_index,
+        for _label, _variant in (("PyRoKi-LS", _pyroki_ls_coll),
+                                ("PyRoKi-AnalyticJac", _pyroki_analytic_coll)):
+            if not _block_wanted("batch_coll"):
+                continue
+            if _variant is None:
+                continue
+            print(f"  Running {_label}-COLL-BATCH ...")
+            batch_coll_results[_label] = _run_pyroki_batch(
+                _variant[1], robot, _pyroki_robot, target_link_index,
                 target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
@@ -2238,27 +2517,35 @@ def _run_robot_benchmark(
     seq_order = _method_order()
     if _learned_ik_available:
         seq_order.append("Learned-JAX")
-    if _pyroki_solve_fn is not None:
-        seq_order.append("PyRoKi")
+    if _pyroki_ls is not None:
+        seq_order.append("PyRoKi-LS")
+    if _pyroki_analytic is not None:
+        seq_order.append("PyRoKi-AnalyticJac")
     if "QuIK-CPU" in seq_results:
         seq_order.append("QuIK-CPU")
 
     batch_order = _method_order("-BATCH")
     if _learned_ik_available:
         batch_order.append("Learned-JAX-BATCH")
-    if _pyroki_batch_fn is not None:
-        batch_order.append("PyRoKi-BATCH")
+    if _pyroki_ls is not None:
+        batch_order.append("PyRoKi-LS-BATCH")
+    if _pyroki_analytic is not None:
+        batch_order.append("PyRoKi-AnalyticJac-BATCH")
     if "QuIK-CPU-BATCH" in batch_results:
         batch_order.append("QuIK-CPU-BATCH")
 
     coll_seq_order = _method_order()
-    if _pyroki_coll_solve_fn is not None:
-        coll_seq_order.append("PyRoKi")
+    if _pyroki_ls_coll is not None:
+        coll_seq_order.append("PyRoKi-LS")
+    if _pyroki_analytic_coll is not None:
+        coll_seq_order.append("PyRoKi-AnalyticJac")
     if "QuIK-CPU" in seq_coll_results:
         coll_seq_order.append("QuIK-CPU")
     coll_batch_order = _method_order()
-    if _pyroki_coll_batch_fn is not None:
-        coll_batch_order.append("PyRoKi")
+    if _pyroki_ls_coll is not None:
+        coll_batch_order.append("PyRoKi-LS")
+    if _pyroki_analytic_coll is not None:
+        coll_batch_order.append("PyRoKi-AnalyticJac")
     if "QuIK-CPU" in batch_coll_results:
         coll_batch_order.append("QuIK-CPU")
 
@@ -2346,6 +2633,33 @@ def _run_robot_benchmark(
     print()
 
 
+def _curobo_python_cmd() -> list[str] | None:
+    """Locate a python interpreter with cuRobo installed.
+
+    Precedence: the CUROBO_PYTHON env var, a sibling ``curobo`` conda env next
+    to the active one (i.e. ``<envs>/curobo/bin/python``), then
+    ``conda run -n curobo``.  Returns None if no candidate is found.
+    """
+    override = os.environ.get("CUROBO_PYTHON")
+    if override:
+        if pathlib.Path(override).is_file():
+            return [override]
+        print(f"  warning: CUROBO_PYTHON={override} not found; trying other candidates")
+    prefix = os.environ.get("CONDA_PREFIX")
+    if prefix:
+        envs_dir = pathlib.Path(prefix).resolve().parent
+    else:
+        # Not inside a conda env: infer <envs>/ from sys.executable
+        # (<envs>/<env>/bin/python).
+        envs_dir = pathlib.Path(sys.executable).resolve().parent.parent.parent
+    sibling = envs_dir / "curobo" / "bin" / "python"
+    if sibling.is_file():
+        return [str(sibling)]
+    if shutil.which("conda") is not None:
+        return ["conda", "run", "--no-capture-output", "-n", "curobo"]
+    return None
+
+
 def _run_solver_subprocess(
     robot_name: str, solver: str, csv_file: pathlib.Path, args: argparse.Namespace,
 ) -> None:
@@ -2356,7 +2670,35 @@ def _run_solver_subprocess(
     can perturb another solver's timings. For CUDA solvers the robot's GLASS tier
     (ROBOT_TIER) is pinned via PYROFFI_IK_TIER, which is read once on first kernel
     launch; it is harmless (ignored) for JAX/CPU solvers.
+
+    cuRobo is the exception: it runs in its OWN conda env via
+    bench_ik_curobo.py, consuming the target sidecar this script wrote during
+    target generation (see _run_robot_benchmark).
     """
+    if solver == "cuRobo":
+        prefix = _curobo_python_cmd()
+        if prefix is None:
+            print(
+                f"\n=== Skipping {robot_name} / cuRobo: no cuRobo interpreter found ==="
+                "\n  Set CUROBO_PYTHON to the env's python, create a sibling 'curobo'"
+                "\n  conda env, or make 'conda' available — with an editable install"
+                "\n  of baselines/curobo."
+            )
+            return
+        targets_npz = csv_file.parent / f"bench_ik_targets_{robot_name}.npz"
+        cmd = prefix + [
+            str(pathlib.Path(__file__).with_name("bench_ik_curobo.py")),
+            "--robot", robot_name,
+            "--targets", str(targets_npz),
+            "--outdir", str(csv_file.parent),
+            "--env-file", str(ENV_FILE),
+        ]
+        print(f"\n=== Running {robot_name} / cuRobo in subprocess ({' '.join(prefix)}) ===")
+        env = os.environ.copy()
+        env.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+        subprocess.run(cmd, env=env, check=True)
+        return
+
     tier = ROBOT_TIER.get(robot_name)
     tier_note = f", PYROFFI_IK_TIER={tier}" if tier is not None else ""
     print(f"\n=== Running {robot_name} / {solver} in subprocess{tier_note} ===")
@@ -2440,6 +2782,17 @@ def main() -> None:
             "only its rows to the CSV."
         ),
     )
+    parser.add_argument(
+        "--blocks",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated subset of evaluation blocks to run: "
+            "{seq,seq_coll,batch,batch_coll}. Default runs all four. "
+            "Useful to skip the batch blocks (which build the large vmapped "
+            "kernel) when only per-problem latency is wanted."
+        ),
+    )
     args = parser.parse_args()
 
     csv_file = (args.outdir / CSV_FILE.name) if args.outdir is not None else CSV_FILE
@@ -2448,7 +2801,8 @@ def main() -> None:
     if args.solver is not None:
         if args.robot is None:
             raise SystemExit("--solver requires --robot (internal child invocation).")
-        _run_robot_benchmark(args.robot, csv_file, solver_filter=args.solver)
+        _blocks = set(args.blocks.split(",")) if args.blocks else None
+        _run_robot_benchmark(args.robot, csv_file, solver_filter=args.solver, blocks=_blocks)
         return
 
     # Dispatcher path: fan out one isolated subprocess per (robot, solver).

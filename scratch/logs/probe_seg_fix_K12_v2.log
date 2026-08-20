@@ -1,0 +1,16 @@
+[segments] K=12 d=2 T=30 M=12 budget=8000 solves
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 343, in <module>
+    tyro.cli(main)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/tyro/_cli.py", line 322, in cli
+    out = run_with_args_from_cli()
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 337, in main
+    run(benchmark, n_contexts, n_seeds, n_timesteps, n_iter, budget, k_bumps,
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 201, in run
+    _screen_demos(rel, benchmark, seed, demo_iter)
+  File "/home/sadmin/Work/pyroffi/ioc/bench2d/run.py", line 143, in _screen_demos
+    raise RuntimeError(
+RuntimeError: [segments seed 0] 1/12 demonstrations are not local optima: max relative stationarity = 1.37e-05 > 1e-06 after 4000 inner iterations. The recovered costs would not be valid; raise the demonstration iteration count (ioc.bench2d.run.DEMO_N_ITER).

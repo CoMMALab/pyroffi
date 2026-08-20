@@ -1,0 +1,222 @@
+# Inverse optimal control through a differentiable trajectory optimizer
+
+Study of recovering trajectory-cost weights from demonstrations by
+differentiating the *solution* of a trajectory optimizer, rather than
+resampling it (finite differences, CMA-ES) or avoiding the forward solve
+altogether (Inverse KKT, CIOC).
+
+```
+ioc/
+  inner.py              the inner solver + implicit adjoint and unrolling
+  outer.py              Adam / finite differences / CMA-ES over the weights
+  analytic.py           zero-solve baselines: Inverse KKT, CIOC
+  metrics.py            weight error, regret, cosine agreement
+  robot/                7-DoF Panda: problem.py, bases.py, e1/e2/e3
+  bench2d/              2D benchmarks: problems.py, run.py
+  analysis/             per-experiment aggregation and quick-look plots
+  collect.py            reproduces every result in data/ (stage-selectable)
+  plots.py              generates figures/ at IEEE T-RO sizes
+  data/robot/           7-DoF Panda experiments (E1-E3)
+  data/bench2d/         2D benchmarks (racing, cost field, unicycle, segments)
+  data/deprecated/      superseded runs, kept for provenance -- see below
+  figures/              *.pdf (for LaTeX) and *.png (for review)
+```
+
+Every method's theory is documented where it is implemented: read `inner.py`
+for the implicit function theorem and the unrolling tradeoff, `outer.py` for the
+solve-count accounting that all comparisons are denominated in, and
+`analytic.py` for Inverse KKT and the Laplace approximation.
+
+```bash
+python -m ioc.collect --list                  # show every run and its config
+python -m ioc.collect --stages bench2d_scale  # regenerate one stage
+python -m ioc.plots                           # all figures
+
+# a single experiment, directly
+XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 CUDA_VISIBLE_DEVICES=0 \
+    python -m ioc.robot.e1_identifiability --demo-noise 0.02
+python -m ioc.bench2d.run --benchmark field --k-bumps 8
+```
+
+## Methods compared
+
+| method | forward solves per outer step | source |
+|---|---|---|
+| `implicit` (ours) | 1 | implicit function theorem on the inner KKT point |
+| `unrolled` | 1 | truncated reverse-mode (Domke 2012) |
+| `fd` | K+1 | finite differences on the outer loss |
+| `cmaes` | population | derivative-free bilevel (Mombaur et al. 2010) |
+| `kkt` | 0 | Inverse KKT (Keshavarz et al. 2011; Englert et al. 2017) |
+| `cioc` | 0 | Laplace approximation (Levine & Koltun 2012) |
+
+`K` is the number of cost parameters; `M` the number of demonstration contexts;
+`σ` the demonstration noise in radians.
+
+## Headline results
+
+**Cost scales with K, quality does not differ.** On `segments` (where K grows
+through time-segmented quadratics, leaving the landscape geometry fixed), solves
+to reach outer loss < 1e-2:
+
+| K | implicit | fd | cmaes |
+|---|---|---|---|
+| 5 | 248 | 2 760 (11×) | 288 (1.2×) |
+| 33 | 594 | 26 928 (45×) | 9 240 (15.6×) |
+
+At the tighter 1e-3 target and K=33, implicit finishes in 10 065 solves and
+neither baseline reaches it within 66 000.
+
+**Robustness is where the analytic baselines break.** Inverse KKT is *exact* on
+noiseless demonstrations at zero solves — it wins outright there — and falls
+below random weights by σ=0.05, because it assumes the demonstration is an exact
+stationary point.
+
+**Physical fidelity.** A kinematic cost basis fitted to demonstrations generated
+with a torque term pays ~67× regret and does worse than random weights on the
+correct basis; the effect survives end-to-end float32.
+
+**The limit.** These advantages require x*(θ) to vary continuously with θ. On a
+multimodal inner problem the solution jumps between basins, and derivative-free
+search wins regardless of gradient quality. Multi-start restores gradient
+*correctness* (adjoint-vs-FD cos 0.37 → 1.00) but not optimization performance —
+the outer landscape is multimodal too.
+
+## Demonstration validity
+
+Every number here is a claim about recovering the `theta` that *generated* the
+demonstrations, and that ground truth is only meaningful if the demonstration
+really is a local optimum of the corresponding cost. Inverse KKT assumes it
+exactly. So demonstrations are solved by a separate converged solve
+(`bench2d.run.DEMO_N_ITER`, 400-4000 iterations depending on benchmark) and
+screened before use:
+
+    relative stationarity = ||sum_k th_k grad phi_k|| / sum_k th_k ||grad phi_k||
+
+which is scale-free, unlike the raw gradient norm, and so comparable across
+benchmarks. `_screen_demos` raises above 1e-6.
+
+This was not a hypothetical concern. At the previously shipped iteration counts
+the demonstrations sat at relative stationarity 1.1e-3 (`racing`), 2.0e-3
+(`field`) and **2.5e-2** (`unicycle`) -- the unicycle demonstrations were 2.5%
+away from being optimal for the cost they were labelled with. The diagnostic was
+already being computed and stored in each result file's `_meta`, and was simply
+never read.
+
+Note what the screen is applied to. The *ground truth* is the converged solve,
+and it is a genuine KKT point (relative stationarity ~1e-9). The *observation*
+handed to every method is that solve plus noise, and it is not: at sigma=0.02 the
+observed demonstration sits at relative stationarity **0.49**. That gap is the
+entire reason Inverse KKT degrades with noise while the bilevel methods do not --
+KKT assumes the observation itself is stationary. Screening the noisy
+observation would be wrong, and reporting only the noiseless case would make KKT
+look exact for free.
+
+The learner's inner solver is deliberately *cheaper* than the demonstrator's
+(`--n-iter`), which matches the real setting. It is set so that its truncation
+error contributes well below the sigma=0.02 demonstration-noise floor (8.0e-4 on
+the outer loss). At the previous `--n-iter 80` truncation alone contributed 4.1x
+that floor on `field` and 1.8x on `unicycle`, so fits were being driven by
+solver error rather than by the demonstrations.
+
+### Check `loss(theta*)` before believing any fit
+
+The outer loss at the *true* weights is the cheapest and sharpest diagnostic
+available, and it costs one solve. With noiseless demonstrations it must be ~0,
+because the demonstration is by construction the learner's own solve at
+`theta*`. If it is not, the learner's inner solver is landing somewhere the
+demonstrator's did not, and every number downstream is measuring that gap rather
+than the method.
+
+Measured on the `field` benchmark at bump width 0.9 with `--n-iter 400`:
+`loss(theta*) = 1.41`, while the optimizer reached `0.20`. The fit was not
+recovering the cost, it was *exploiting solver truncation* -- finding weights
+whose under-converged solve happens to match the demonstration better than the
+true weights do. The resulting weight error looks respectable and means nothing.
+Wide bumps need `--n-iter` ~1500-2000; the required value is benchmark- and
+bump-width-dependent, not a constant.
+
+## Practical notes
+
+- **Validate the gradient per context before trusting a run.** Per-context
+  adjoint-vs-FD agreement is the diagnostic that caught every silent failure
+  here; aggregate agreement hides a minority of bad contexts.
+- **Finite differences cannot validate a gradient on a float32 solver.** The
+  solver's noise floor (~1e-6) swamps the probe: FD reads cos 0.13 against a
+  float64 reference that the same adjoint matches at 0.9999.
+- **Hard `min`/`max` reductions in collision code break bilevel differentiation.**
+  The optimizer settles on the non-differentiable ridge, so the cost converges
+  while its gradient never vanishes and x* is not a stationary point. Use a
+  soft-min.
+- **GRiD CUDA inverse dynamics is once-differentiable** (`jax.hessian` raises).
+  Run the forward solve on GRiD and build the adjoint's curvature from the
+  float64 JAX RNEA; a Gauss-Newton adjoint instead carries ~14% magnitude bias.
+
+## Data status
+
+**The `data/bench2d/*.json` files predate the benchmark revision below and must
+be regenerated** (`python -m ioc.collect --stages bench2d_main bench2d_scale
+bench2d_regime`). They were produced on the old geometry, with unconverged
+demonstrations, and with a learner solver truncated hard enough to dominate the
+noise floor. The figures built from them (`fig1_scaling`, `fig4_noise`,
+`fig5_regime`) inherit that and are stale until the sweep is rerun.
+`fig2_environments` and `fig3_recovery` build their own environments and are
+current.
+
+The benchmarks changed in three ways, each to remove a defect rather than to
+make the pictures nicer:
+
+- `racing` is now a closed circuit of *varying* curvature, not an annulus. On a
+  constant-curvature annulus the optimal line is a smaller concentric circle,
+  so the demonstration carries almost no information about the weights.
+- `field` bumps are scattered with varied widths, not a regular grid of
+  equal-width bumps. On the grid at bump width 0.9 -- the configuration the
+  recovery figure used -- the feature Gram was numerically rank-deficient
+  (lambda_2/lambda_K = 9.8e-8), so `theta` was unrecoverable by *any* method and
+  the figure was measuring the benchmark's degeneracy, not the method. The
+  scattered layout restores lambda_2/lambda_K = 5.0e-2 at the same bump width.
+- `unicycle` drives a slalom of alternating obstacles rather than passing one
+  disc. With a single obstacle the demonstrations are nearly straight and the
+  turn and obstacle weights barely act.
+
+## Known limitations of this data
+
+- `data/deprecated/` holds runs that are **confounded, not merely superseded**:
+  `e2_*` swept K with M fixed at 5, so "high K is hard" cannot be separated from
+  "too few demonstrations"; `e2c_*`/`e2d_*` swept M without nested scene sets,
+  and the result tracks how many scenes stop converging at perturbed θ rather
+  than M. They are kept only so the provenance is legible.
+- The robot M-axis identifiability sweep is unresolved for the same reason.
+  Identifiability is instead reported via the Gram-matrix λ_min certificate and
+  the collinear-feature control, both of which are unconfounded.
+- `bench2d_regime_*` uses a 1e-3 target that sits near the σ=0.02 demonstration
+  noise floor (~8e-4), so "not reached" entries there are unreliable; compare
+  final regret instead.
+- **The regime figure's method ordering is not supported by its own spread.**
+  `fig5_regime` previously plotted a bare median per method. With the
+  inter-quartile range drawn, seed-to-seed spread covers 3-5 orders of magnitude
+  and every method's interval overlaps every other's in the multimodal column.
+  The honest reading is that the *regime* moves regret by orders of magnitude
+  while the *method* choice, at this seed count, does not separate. Any claim
+  ranking methods there needs far more seeds.
+- **Report both noise regimes, not the flattering one.** `fig3_recovery`
+  (sigma=0.02) and `fig3b_recovery_highnoise` (sigma=0.05) are the same panel at
+  two noise levels, and the ordering between the bilevel and the analytic
+  methods depends on which you look at. At sigma=0 Inverse KKT is *exact* at
+  zero solves and wins outright. Showing only the high-sigma panel would invite
+  exactly the question it fails to answer; the crossover is the result.
+- **`fig3_recovery` used to fit noiseless demonstrations.** Inverse KKT is exact
+  there by construction, so any recovery panel built that way flatters it and
+  tells the reader nothing about the noisy regime the rest of the study reports.
+  It now uses sigma=0.02, matching the datasets.
+- **The scaling figure is censored.** `fig1_scaling` drops seeds that never
+  reach the 1e-2 target and takes the median over the survivors, which flatters
+  whichever method failed more often. On the current data 6 of 12 (K, method)
+  cells lost a seed this way, so several plotted points are medians of 2 of 3
+  seeds. `fig_scaling` now prints the censoring at generation time; the figure
+  still needs either a completion-rate panel or a censoring-aware estimator.
+- More solve-efficient means **overfitting noisy demonstrations faster** —
+  implicit takes ~6× more optimizer steps per solve budget. Final regret at a
+  fixed budget needs held-out contexts to read as generalization.
+- `racing` demonstrations before the ring-seeding fix were in the wrong homotopy
+  class (a chord seed cuts the infield); results predating that fix are not
+  comparable.

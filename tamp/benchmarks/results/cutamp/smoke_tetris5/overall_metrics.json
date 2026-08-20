@@ -1,0 +1,32 @@
+{
+  "num_optimized_plans": 1,
+  "num_initial_plans": 5,
+  "num_skipped_plans": 0,
+  "num_satisfying_final": 1,
+  "num_particles": 1024,
+  "best_cost": 0.5618552565574646,
+  "best_soft_cost": 0.03119298443198204,
+  "final_plan_skeleton": [
+    "MoveFree(q0, traj1, q1)",
+    "Pick(O_1, grasp1, q1)",
+    "MoveHolding(O_1, grasp1, q1, traj2, q2)",
+    "Place(O_1, grasp1, pose1, goal, q2)",
+    "MoveFree(q2, traj3, q3)",
+    "Pick(L_3, grasp2, q3)",
+    "MoveHolding(L_3, grasp2, q3, traj4, q4)",
+    "Place(L_3, grasp2, pose2, goal, q4)",
+    "MoveFree(q4, traj5, q5)",
+    "Pick(L_1, grasp3, q5)",
+    "MoveHolding(L_1, grasp3, q5, traj6, q6)",
+    "Place(L_1, grasp3, pose3, goal, q6)",
+    "MoveFree(q6, traj7, q7)",
+    "Pick(L_2, grasp4, q7)",
+    "MoveHolding(L_2, grasp4, q7, traj8, q8)",
+    "Place(L_2, grasp4, pose4, goal, q8)",
+    "MoveFree(q8, traj9, q9)",
+    "Pick(L_4, grasp5, q9)",
+    "MoveHolding(L_4, grasp5, q9, traj10, q10)",
+    "Place(L_4, grasp5, pose5, goal, q10)"
+  ],
+  "found_solution": true
+}

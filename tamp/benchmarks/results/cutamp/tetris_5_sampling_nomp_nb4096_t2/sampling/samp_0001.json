@@ -1,0 +1,47 @@
+{
+  "plan_skeleton": [
+    "MoveFree(q0, traj1, q1)",
+    "Pick(L_2, grasp1, q1)",
+    "MoveHolding(L_2, grasp1, q1, traj2, q2)",
+    "Place(L_2, grasp1, pose1, goal, q2)",
+    "MoveFree(q2, traj3, q3)",
+    "Pick(O_1, grasp2, q3)",
+    "MoveHolding(O_1, grasp2, q3, traj4, q4)",
+    "Place(O_1, grasp2, pose2, goal, q4)",
+    "MoveFree(q4, traj5, q5)",
+    "Pick(L_3, grasp3, q5)",
+    "MoveHolding(L_3, grasp3, q5, traj6, q6)",
+    "Place(L_3, grasp3, pose3, goal, q6)",
+    "MoveFree(q6, traj7, q7)",
+    "Pick(L_1, grasp4, q7)",
+    "MoveHolding(L_1, grasp4, q7, traj8, q8)",
+    "Place(L_1, grasp4, pose4, goal, q8)",
+    "MoveFree(q8, traj9, q9)",
+    "Pick(L_4, grasp5, q9)",
+    "MoveHolding(L_4, grasp5, q9, traj10, q10)",
+    "Place(L_4, grasp5, pose5, goal, q10)"
+  ],
+  "num_particles": 4096,
+  "num_resample_attempts": 6,
+  "resample_duration": 71.0738518529106,
+  "num_satisfying_final": 0,
+  "total_num_particles": 28672,
+  "best_cost": Infinity,
+  "best_soft_cost": Infinity,
+  "best_soft_costs": [
+    Infinity,
+    Infinity,
+    Infinity,
+    Infinity,
+    Infinity,
+    Infinity
+  ],
+  "elapsed": [
+    11.816550956107676,
+    23.66507533704862,
+    35.51262380904518,
+    47.36902198009193,
+    59.2298809022177,
+    71.07368991617113
+  ]
+}
