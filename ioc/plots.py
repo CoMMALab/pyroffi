@@ -215,7 +215,9 @@ def fig_scaling():
     ax.set_xticks(Ks)
     tidy(ax)
     panel_label(ax, "(b)")
-    fig.tight_layout(w_pad=1.6)
+    fig.suptitle("Sample Efficiency vs. Cost Dimension", fontsize=9, y=1.0,
+                fontweight="bold")
+    fig.tight_layout(w_pad=1.6, rect=(0, 0, 1, 0.93))
     finish(fig, "fig1_scaling")
 
 
@@ -503,7 +505,9 @@ def fig_environments():
         Line2D([], [], color=DEMO_C, marker="o", ls="", ms=2.8, label="start"),
         Line2D([], [], color=DEMO_C, marker="*", ls="", ms=5.4, label="goal"),
     ], loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.04))
-    fig.tight_layout(w_pad=1.0, rect=(0, 0.05, 1, 1))
+    fig.suptitle("Benchmark Environments and Demonstrations", fontsize=9, y=1.02,
+                fontweight="bold")
+    fig.tight_layout(w_pad=1.0, rect=(0, 0.05, 1, 0.93))
     finish(fig, "fig2_environments")
 
 
@@ -545,7 +549,7 @@ def _tag_inside(ax, text):
 
 
 def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
-                 name="fig3_recovery", n_show=4, n_restarts=7):
+                 name="fig3_recovery", n_show=4, n_restarts=7, fd_eps=1e-4):
     """Recovered cost field, for the implicit method and both zero-solve baselines.
 
     Three things this figure has to get right, none of which are cosmetic:
@@ -620,11 +624,37 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
 
         return jnp.mean(jax.vmap(one)(ctxs, demos, x0))
 
-    gf = jax.jit(jax.value_and_grad(loss))
+    def loss_of(solver):
+        def loss(z):
+            t = jax.nn.softmax(z)
+
+            def one(c, dm, xx):
+                p = b2d.unpack(solver(xx, t, c), c, T, d)[:, :2]
+                return jnp.mean(jnp.sum((p - dm[:, :2]) ** 2, axis=-1))
+
+            return jnp.mean(jax.vmap(one)(ctxs, demos, x0))
+
+        return loss
+
+    per_solve = M * n_restarts
+
+    def fit_adam(solver):
+        li = jax.jit(loss_of(solver))
+        gi = jax.jit(jax.value_and_grad(li))
+        z, _ = outer_opt.adam(gi, jnp.zeros(K), lr=lr, budget_solves=budget,
+                              solves_per_step=per_solve, trace_best=True)
+        return z, li
+
     # Restarts are charged to the solve budget like every other method pays
     # for its extra work (see `ioc.outer` module docstring).
-    z, _ = outer_opt.adam(gf, jnp.zeros(K), lr=lr, budget_solves=budget,
-                          solves_per_step=M * n_restarts, trace_best=True)
+    z, li = fit_adam(si)
+    z_unrolled, _ = fit_adam(inner.solve_unrolled)
+
+    z_fd, _ = outer_opt.adam(outer_opt.fd_grad_fn(li, fd_eps), jnp.zeros(K), lr=lr,
+                             budget_solves=budget, solves_per_step=(K + 1) * per_solve,
+                             trace_best=True)
+    z_cmaes, _ = outer_opt.cma_es(li, jnp.zeros(K), budget_solves=budget,
+                                  solves_per_eval=per_solve, seed=0, trace_best=True)
 
     # The two zero-solve baselines, fitted on exactly the same demonstrations.
     z_kkt = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=600)
@@ -635,6 +665,9 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     ev = np.linalg.eigvalsh(np.asarray(G) / np.trace(np.asarray(G)) * K)
 
     fits = [("implicit", jax.nn.softmax(z)),
+            ("unrolled", jax.nn.softmax(z_unrolled)),
+            ("fd", jax.nn.softmax(z_fd)),
+            ("cmaes", jax.nn.softmax(z_cmaes)),
             ("kkt", jax.nn.softmax(z_kkt)),
             ("cioc", jax.nn.softmax(z_cioc))]
     th_hat = fits[0][1]
@@ -648,15 +681,17 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     errs = {m: float(jnp.sum(jnp.abs(th - env["theta"]))) for m, th in fits}
     best = min(errs, key=errs.get)
 
-    fig = plt.figure(figsize=(COL2, 2.0))
-    # Column 4 is an empty spacer that reserves room for the colorbar's tick
-    # labels; without it they are overdrawn by the trajectory panel.
-    gs = fig.add_gridspec(1, 6, width_ratios=[1, 1, 1, 1, 0.34, 1], wspace=0.10)
-    axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
-    axt = fig.add_subplot(gs[0, 5])
+    fig = plt.figure(figsize=(COL2, 2.15))
+    # 7 field panels (ground truth + all 6 baseline methods); the second-to-
+    # last column is an empty spacer that reserves room for the colorbar's
+    # tick labels, without which they are overdrawn by the trajectory panel.
+    n_panels = len(panels := [(env["theta"], "ground truth", None, False)] + [
+        (th, STYLE[m]["label"], errs[m], m == best) for m, th in fits])
+    gs = fig.add_gridspec(1, n_panels + 2,
+                          width_ratios=[1] * n_panels + [0.34, 1], wspace=0.10)
+    axes = [fig.add_subplot(gs[0, i]) for i in range(n_panels)]
+    axt = fig.add_subplot(gs[0, n_panels + 1])
 
-    panels = [(env["theta"], "ground truth", None, False)] + [
-        (th, STYLE[m]["label"], errs[m], m == best) for m, th in fits]
     for ax, (th, lab, err, is_best) in zip(axes, panels):
         im = _draw_field_background(ax, c0, th, vmax=vmax)
         ax.scatter(np.asarray(c0.centers)[:, 0], np.asarray(c0.centers)[:, 1],
@@ -678,7 +713,7 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     # maps it describes.  A colorbar in its own gridspec column spans the whole
     # figure height instead, which `aspect="equal"` makes much taller than the
     # panels.
-    cb = fig.colorbar(im, cax=axes[3].inset_axes([1.05, 0.0, 0.045, 1.0]))
+    cb = fig.colorbar(im, cax=axes[-1].inset_axes([1.05, 0.0, 0.045, 1.0]))
     cb.set_label("cost", fontsize=6.5, labelpad=1)
     cb.ax.tick_params(labelsize=6, width=0.5, length=2)
     cb.outline.set_linewidth(0.5)
@@ -724,9 +759,13 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
                bbox_to_anchor=(0.005, 0.005), framealpha=0.82, frameon=True)
     axt.get_legend().get_frame().set_linewidth(0)
 
-    for ax, tag in zip(axes + [axt], ("(a)", "(b)", "(c)", "(d)", "(e)")):
+    for ax, tag in zip(axes + [axt],
+                      (f"({c})" for c in "abcdefghijklmnop")):
         _tag_inside(ax, tag)
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.86, bottom=0.16)
+    noise_lab = "High" if "highnoise" in name else "Low"
+    fig.suptitle(f"Recovered Cost Fields Under {noise_lab} Demonstration Noise "
+                f"($\\sigma={demo_noise:g}$)", fontsize=9, y=0.99, fontweight="bold")
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.16)
     print(f"  [{name}] sigma={demo_noise:g}  "
           f"Gram lambda_2/lambda_K = {ev[1] / ev[-1]:.2e}  "
           + "  ".join(f"{m}_L1={errs[m]:.3f}" for m, _ in fits)
@@ -768,7 +807,7 @@ def fig_noise():
         d = json.load(open(f))
         rows[d["demo_noise"]] = d["results"]
     sig = np.array(sorted(rows))
-    methods = ("implicit", "fd", "cmaes", "kkt", "random")
+    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "random")
     # Implicit and finite differences agree to 3-4 significant figures here, so
     # one curve would sit exactly on top of the other and vanish.  Dodge the
     # markers slightly along x so both remain visible; the lines still coincide,
@@ -806,11 +845,13 @@ def fig_noise():
                      color=STYLE["kkt"]["color"],
                      arrowprops=dict(arrowstyle="-", lw=0.5,
                                      color=STYLE["kkt"]["color"]))
-    axes[0].legend(loc="upper left", ncol=2)
+    axes[0].legend(loc="upper left", ncol=2, fontsize=6.5)
     panel_label(axes[0], "(a)")
     panel_label(axes[1], "(b)")
-    fig.tight_layout(w_pad=1.6)
-    finish(fig, "fig4_noise")
+    fig.suptitle("Weight-Recovery Robustness to Demonstration Noise (Robot)",
+                fontsize=9, y=1.03, fontweight="bold")
+    fig.tight_layout(w_pad=1.6, rect=(0, 0, 1, 0.92))
+    finish(fig, "fig4_noise_robot")
 
 
 # ---------------------------------------------------------------------------
@@ -894,9 +935,8 @@ def fig_kkt_seed():
         y1 = axes[i][0].get_position().y1
         fig.text(0.005, (y0 + y1) / 2, regime_name[bw], rotation=90,
                   ha="left", va="center", fontsize=7.5)
-    fig.suptitle("Seeding the implicit fit with Inverse-KKT: a free head start "
-                 "that fades with demonstration noise",
-                 fontsize=8.5, y=0.995)
+    fig.suptitle("Inverse-KKT Seeding: A Head Start That Fades with Noise",
+                 fontsize=8.5, y=0.995, fontweight="bold")
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7,
                bbox_to_anchor=(0.55, 0.94), frameon=False)
@@ -959,8 +999,8 @@ def fig_kkt_seed_trace():
         y1 = axes[i][0].get_position().y1
         fig.text(0.005, (y0 + y1) / 2, regime_name[bw], rotation=90,
                   ha="left", va="center", fontsize=7.5)
-    fig.suptitle("Convergence from each $z_0$ (median seed, noiseless demonstrations)",
-                 fontsize=8.5, y=0.995)
+    fig.suptitle("Convergence from Each Initialization (Noiseless Demonstrations)",
+                 fontsize=8.5, y=0.995, fontweight="bold")
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7,
                bbox_to_anchor=(0.55, 0.94), frameon=False)
@@ -969,71 +1009,142 @@ def fig_kkt_seed_trace():
 
 
 # ---------------------------------------------------------------------------
-# Fig. 5 - regime boundary: smooth vs multimodal inner problems
+# Fig. 5 - the noise/optimality tradeoff on a multimodal 2D field
 # ---------------------------------------------------------------------------
 
+# Same hand-placed, identifiability-friendly layout `fig_recovery` validated:
+# well-separated bumps every demonstration is actually exposed to, plus
+# `topo_restarts=True` structured lateral-detour multistart (the i.i.d.-jitter
+# default was measured to leave `implicit` stuck in outer-loss local minima on
+# this multimodal field regardless of budget -- see the regime-figure retune
+# notes; jitter resamples one basin instead of covering the distinct ones a
+# multimodal context has, per `ioc.inner.InnerSolver.solve`'s docstring).
+_REGIME_CENTERS = [
+    (0.0, 0.0),
+    (0.0, 1.35), (0.0, -1.35),
+    (-1.6, 1.65), (1.6, 1.65),
+    (-1.6, -1.65),
+]
+_REGIME_WIDTHS = [0.45, 0.35, 0.35, 0.4, 0.4, 0.4]
+_REGIME_PAIRS = [
+    ((-2.2, 0.9), (2.2, 0.9)), ((-2.2, 0.6), (2.2, 1.1)),
+    ((-2.2, -0.9), (2.2, -0.9)), ((-2.2, -0.6), (2.2, -1.1)),
+    ((-2.2, 1.3), (2.2, 1.6)), ((-2.2, 1.6), (2.2, 1.3)),
+    ((-2.2, -1.3), (2.2, -1.6)), ((-2.2, -1.6), (2.2, -1.3)),
+]
+_REGIME_THETA = [0.12, 0.08, 0.18, 0.10, 0.14, 0.16, 0.12, 0.10]
 
-def fig_regime():
-    """Regime boundary. Drawn as dots, not bars: a log axis has no zero, so bar
-    length would not be proportional to the value it encodes."""
-    combos = [(bw, R) for bw in ("0.90", "0.45") for R in (1, 4)]
-    got = {}
-    for bw, R in combos:
-        f = os.path.join(DATA, "bench2d", f"bench2d_regime_bw{bw}_R{R}.json")
-        if os.path.exists(f):
-            got[(bw, R)] = json.load(open(f))["results"]
-    if not got:
-        print("  [skip] no regime data")
-        return
-    keys = [c for c in combos if c in got]
-    methods = ("implicit", "fd", "cmaes", "cioc")
-    x = np.arange(len(keys))
 
-    fig, ax = plt.subplots(figsize=(COL1, 2.7))
-    ax.axvspan(-0.5, 1.5, color="#f4f4f4", zorder=0, lw=0)
-    for j, m in enumerate(methods):
-        st = STYLE[m]
-        per = [[t[m]["regret"] for t in got[c].values()] for c in keys]
-        vals = np.array([np.median(v) for v in per])
-        q1 = np.array([np.percentile(v, 25) for v in per])
-        q3 = np.array([np.percentile(v, 75) for v in per])
-        # Regret is a difference of costs and goes very slightly negative when a
-        # fit beats the reference solve by solver noise.  On a log axis that is
-        # not representable: left alone it silently produces a non-positive
-        # ylim and a degenerate canvas.  Clip the whisker to the axis floor.
-        q1 = np.maximum(q1, REGRET_FLOOR)
-        q3 = np.maximum(q3, REGRET_FLOOR)
-        vals = np.maximum(vals, REGRET_FLOOR)
-        off = (j - 1.5) * 0.16
-        # Dots only: on a log axis a stem would start from an arbitrary floor,
-        # so its length would encode nothing.  Position carries the value; the
-        # whisker is the inter-quartile range across seeds, which these
-        # benchmarks need -- run-to-run regret spread is ~40% (see the
-        # contact-solver nondeterminism note), so a bare dot overstates the
-        # separation between methods.
-        ax.errorbar(x + off, vals, yerr=[vals - q1, q3 - vals], ls="",
-                    marker=st["marker"], color=st["color"], ms=4.8,
-                    elinewidth=0.7, capsize=1.6, capthick=0.7,
-                    label=st["label"], zorder=3, clip_on=False)
-    ax.set_yscale("log")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"$R={R}$" for _, R in keys])
-    ax.set_xlim(-0.5, len(keys) - 0.5)
-    lo = min(max(np.percentile([t[m]["regret"] for t in got[c].values()], 25),
-                 REGRET_FLOOR)
-             for c in keys for m in methods)
-    ax.set_ylim(lo * 0.35, None)
-    ax.set_ylabel("cost regret")
-    ax.set_xlabel("inner restarts")
-    tidy(ax)
-    ax.text(0.5, 1.03, "smooth", transform=ax.get_xaxis_transform(),
-            ha="center", fontsize=7.5)
-    ax.text(2.5, 1.03, "multimodal", transform=ax.get_xaxis_transform(),
-            ha="center", fontsize=7.5)
-    ax.legend(loc="upper center", ncol=2, fontsize=6.5,
-              bbox_to_anchor=(0.5, -0.22))
-    fig.tight_layout()
-    finish(fig, "fig5_regime")
+def _regime_trial(seed, demo_noise, budget=8000, n_iter=800, n_restarts=7,
+                  fd_eps=1e-4):
+    """One (sigma, seed) draw: fit all six baseline methods on the multimodal
+    field, identical recipe to `fig_recovery`, varying only the noise
+    seed/level. Returns {method: (theta_l1, regret)}."""
+    M, T = 8, 30
+    env = _make_env("field", 6, M, T, seed, 0.4, theta=_REGIME_THETA,
+                    n_iter=n_iter, demo_noise=demo_noise, n_restarts=n_restarts,
+                    topo_restarts=True, bump_layout=(_REGIME_CENTERS, _REGIME_WIDTHS),
+                    demo_pairs=_REGIME_PAIRS)
+    si, ctxs, demos = env["solver"], env["ctxs"], env["demos"]
+    x0, d, K, inner, theta_star = env["x0"], env["d"], env["K"], env["inner"], env["theta"]
+
+    def loss_of(solver):
+        def loss(z):
+            t = jax.nn.softmax(z)
+
+            def one(c, dm, xx):
+                p = b2d.unpack(solver(xx, t, c), c, T, d)[:, :2]
+                return jnp.mean(jnp.sum((p - dm[:, :2]) ** 2, axis=-1))
+
+            return jnp.mean(jax.vmap(one)(ctxs, demos, x0))
+
+        return loss
+
+    per_solve = M * n_restarts
+
+    def fit_adam(solver):
+        li = jax.jit(loss_of(solver))
+        gi = jax.jit(jax.value_and_grad(li))
+        z, _ = outer_opt.adam(gi, jnp.zeros(K), lr=0.1, budget_solves=budget,
+                              solves_per_step=per_solve, trace_best=True)
+        return z, li
+
+    z, li = fit_adam(si)
+    z_unrolled, _ = fit_adam(inner.solve_unrolled)
+    z_fd, _ = outer_opt.adam(outer_opt.fd_grad_fn(li, fd_eps), jnp.zeros(K), lr=0.1,
+                             budget_solves=budget, solves_per_step=(K + 1) * per_solve,
+                             trace_best=True)
+    z_cmaes, _ = outer_opt.cma_es(li, jnp.zeros(K), budget_solves=budget,
+                                  solves_per_eval=per_solve, seed=seed, trace_best=True)
+    z_kkt = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=600)
+    z_cioc = analytic.cioc_fit(inner.grad_x, inner.gn_system, ctxs, demos, K,
+                               n_steps=600)
+    # Do-nothing baseline: an unfit random draw, not the zeros(K) the other
+    # methods start their optimization from -- matches `bench2d.run`'s own
+    # "random" convention (`z0 = rng.normal(scale=0.5, size=K)`).
+    z_random = 0.5 * jax.random.normal(jax.random.key(seed), (K,))
+    fits = {"implicit": jax.nn.softmax(z), "unrolled": jax.nn.softmax(z_unrolled),
+            "fd": jax.nn.softmax(z_fd), "cmaes": jax.nn.softmax(z_cmaes),
+            "kkt": jax.nn.softmax(z_kkt), "cioc": jax.nn.softmax(z_cioc),
+            "random": jax.nn.softmax(z_random)}
+
+    x_star = jax.vmap(lambda x, c: si(x, theta_star, c))(x0, ctxs)
+    ref = jax.vmap(lambda x, c: inner.cost(x, theta_star, c))(x_star, ctxs)
+    out = {}
+    for m, th in fits.items():
+        xh = jax.vmap(lambda x, c: si(x, th, c))(x0, ctxs)
+        c = jax.vmap(lambda x, cc: inner.cost(x, theta_star, cc))(xh, ctxs)
+        out[m] = (float(jnp.sum(jnp.abs(th - theta_star))), float(jnp.mean(c - ref)))
+    return out
+
+
+def fig_regime(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
+    """Distribution of recovery error vs. demonstration noise, on the same
+    multimodal field `fig_recovery`/`fig_recovery_highnoise` use at two fixed
+    sigma points.  This sweeps sigma continuously (several seeds per point) to
+    show the crossover documented in `fig_recovery_highnoise` as a trend
+    rather than a before/after snapshot: `kkt`/`cioc` fit stationarity/Laplace
+    quantities *at the demonstration itself*, which is only justified while
+    the demonstration stays near-optimal; `implicit` re-solves and fits
+    rollout behaviour, which degrades far more gracefully as sigma grows.
+    """
+    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "random")
+    sig = np.asarray(sigmas, float)
+    per_sigma = []
+    for s in sig:
+        trials = [_regime_trial(seed, float(s)) for seed in range(n_seeds)]
+        per_sigma.append(trials)
+        print(f"  [fig5] sigma={s:g}  " + "  ".join(
+            f"{m}_l1={np.median([t[m][0] for t in trials]):.3f}" for m in methods))
+
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 2.4))
+    for ax, idx, ylab, logy in (
+            (axes[0], 0, r"$\|\hat\theta-\theta^\star\|_1$", False),
+            (axes[1], 1, "cost regret", True)):
+        for m in methods:
+            st = STYLE[m]
+            vals = [[t[m][idx] for t in trials] for trials in per_sigma]
+            med = np.array([np.median(v) for v in vals])
+            q1 = np.array([np.percentile(v, 25) for v in vals])
+            q3 = np.array([np.percentile(v, 75) for v in vals])
+            if logy:
+                med, q1, q3 = (np.maximum(a, REGRET_FLOOR) for a in (med, q1, q3))
+            ax.plot(sig, med, marker=st["marker"], ls=st["ls"], color=st["color"],
+                    label=st["label"], clip_on=False, zorder=3)
+            ax.fill_between(sig, q1, q3, color=st["color"], alpha=0.12, lw=0, zorder=2)
+        ax.set_xlabel(r"demonstration noise $\sigma$")
+        ax.set_ylabel(ylab)
+        ax.set_xticks(sig)
+        tidy(ax)
+    axes[1].set_yscale("log")
+    axes[1].set_ylim(bottom=REGRET_FLOOR)
+    axes[0].legend(loc="upper left", ncol=2, fontsize=6.5)
+    panel_label(axes[0], "(a)")
+    panel_label(axes[1], "(b)")
+    fig.suptitle("Weight-Recovery Robustness to Demonstration Noise (Multimodal Field)",
+                fontsize=9, y=1.03, fontweight="bold")
+    fig.tight_layout(w_pad=1.6, rect=(0, 0, 1, 0.92))
+    finish(fig, "fig5_noise_field")
 
 
 def main(only: str = ""):

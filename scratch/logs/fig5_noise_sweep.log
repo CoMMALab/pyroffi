@@ -1,0 +1,9 @@
+[2026-08-20T19:07:15-04:00] fig5 noise sweep start
+[regime]
+  [fig5] sigma=0  implicit_l1=0.277  kkt_l1=0.000  cioc_l1=0.001
+  [fig5] sigma=0.01  implicit_l1=0.314  kkt_l1=0.640  cioc_l1=0.090
+  [fig5] sigma=0.02  implicit_l1=0.285  kkt_l1=0.992  cioc_l1=0.202
+  [fig5] sigma=0.05  implicit_l1=0.329  kkt_l1=1.105  cioc_l1=0.533
+  [fig5] sigma=0.08  implicit_l1=0.222  kkt_l1=1.111  cioc_l1=0.579
+  wrote figures/fig5_regime.pdf|png
+[2026-08-20T19:26:45-04:00] fig5 noise sweep done rc=0

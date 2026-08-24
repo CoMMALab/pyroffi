@@ -78,6 +78,7 @@ def gradient_check(loss_implicit, loss_unrolled, z0, eps_list=(1e-2, 1e-3, 1e-4,
 def run_trial(
     problem, theta_star, n_contexts, seed, demo_noise, n_newton, damping, n_steps,
     lr, fd_eps, collinear, check_grads, n_unroll_tail, adjoint_ridge, conv_tol,
+    n_restarts=1,
 ):
     residual_fn, names = bases.kinematic(problem, "k3", collinear=collinear)
     K = len(names)
@@ -90,10 +91,18 @@ def run_trial(
         DynamicsTrajOptConfig(n_iters=n_newton, early_stop=False, unroll_tail=n_unroll_tail))
 
     def build(scales):
+        # No `restart_seed_fn`: `pb.make_topo_seed_fn`'s structured lateral
+        # detours are defined only for 2D point-mass benchmarks (see
+        # `ioc.bench2d.problems.make_topo_seed_fn`'s assert). The 7-DOF robot
+        # falls back to i.i.d. jitter multistart -- weaker, but the only
+        # option available in this configuration space; `n_restarts` is still
+        # set to match `fig5_noise_field`'s count so both noise figures are
+        # controlled for multimodality with the same restart budget.
         return make_inner_solver(
             residual_fn, scales, adjoint_ridge=adjoint_ridge,
             forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
+            n_restarts=n_restarts,
         )
 
     # Oversample contexts, then keep only those whose inner solve reaches
@@ -151,7 +160,7 @@ def run_trial(
               f"regret={m['regret']:.3e} ee_rmse={m['ee_rmse']:.4f} "
               f"solves={solves} {wall:.1f}s")
 
-    per_step = n_contexts  # one forward solve per context
+    per_step = n_contexts * n_restarts  # one forward solve per context per restart
 
     for name, solver in (("implicit", inner.solve_implicit),
                          ("unrolled", inner.solve_unrolled)):
@@ -215,6 +224,7 @@ def main(
     n_unroll_tail: int = 2,
     adjoint_ridge: float = 1e-9,
     conv_tol: float = 1e-5,
+    n_restarts: int = 1,
     out: str = "e1_results.json",
 ):
     if not jax.config.jax_enable_x64:
@@ -233,7 +243,7 @@ def main(
             r = run_trial(
                 problem, theta_star, m, seed, demo_noise, n_newton, damping,
                 n_outer_steps, lr, fd_eps, collinear_control, check_grads,
-                n_unroll_tail, adjoint_ridge, conv_tol,
+                n_unroll_tail, adjoint_ridge, conv_tol, n_restarts=n_restarts,
             )
             print(f"    gram: {r['certificate']}")
             all_results[f"M{m}_s{seed}"] = r

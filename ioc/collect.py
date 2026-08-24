@@ -52,8 +52,12 @@ def _b2d(extra, out, note):
 STAGES: dict[str, list[Run]] = {
     # ---- robot experiments -------------------------------------------------
     "e1_noise": [
-        _e1(["--n-seeds", "5", "--demo-noise", s], f"robot/e1_sigma{t}.json",
-            f"E1 demonstration-noise sweep, sigma={s}")
+        # n_restarts=7 matches fig5_noise_field's structured-restart count, so
+        # both noise-sweep figures are controlled for inner-problem
+        # multimodality with the same restart budget (i.i.d. jitter here --
+        # the 7-DOF robot can't use the 2D-only structured detour restarts).
+        _e1(["--n-seeds", "5", "--demo-noise", s, "--n-restarts", "7"],
+            f"robot/e1_sigma{t}.json", f"E1 demonstration-noise sweep, sigma={s}")
         for s, t in (("0.0", "00"), ("0.01", "001"), ("0.02", "002"), ("0.05", "005"))
     ],
     "e1_collinear": [

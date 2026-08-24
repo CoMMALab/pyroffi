@@ -1,0 +1,373 @@
+[2026-08-20T15:48:32-04:00] e1_noise_v2 start
+
+=== stage e1_noise ===
+  /home/sadmin/miniconda3/envs/pyroffi/bin/python -u -m ioc.robot.e1_identifiability --n-timesteps 16 --n-newton 60 --n-contexts 5 --n-outer-steps 30 --n-seeds 5 --demo-noise 0.0 --out /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma00.json
+2026-08-20 15:48:36.669 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-20 15:48:37.581 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+jax devices: [CudaDevice(id=0)]  T=16
+theta* = [0.5 0.3 0.2]  (effort, collision, smooth)
+[M=5 seed=0]
+  gradient check:
+  implicit vs unrolled: cos=0.999643 |gi|=2.355e-04 |gu|=4.694e-05
+  implicit vs fd(eps=0.01): cos=0.940133 rel_err=4.309e-01
+  implicit vs fd(eps=0.001): cos=0.429570 rel_err=2.235e+00
+  implicit vs fd(eps=0.0001): cos=-0.479790 rel_err=1.410e+01
+  implicit vs fd(eps=1e-05): cos=-0.663345 rel_err=2.921e+01
+    implicit  l1=0.022 cos=0.9998 regret=3.324e-07 ee_rmse=0.0002 solves=150 8.0s
+    unrolled  l1=0.007 cos=1.0000 regret=6.464e-07 ee_rmse=0.0003 solves=150 6.0s
+    fd        l1=0.485 cos=0.8769 regret=1.633e-04 ee_rmse=0.0061 solves=600 23.9s
+    cmaes     l1=0.034 cos=0.9994 regret=8.701e-07 ee_rmse=0.0005 solves=245 9.8s
+    kkt       l1=0.000 cos=1.0000 regret=-2.009e-11 ee_rmse=0.0000 solves=0 1.4s
+    cioc      l1=0.001 cos=1.0000 regret=2.409e-09 ee_rmse=0.0000 solves=0 10.8s
+    oracle    l1=0.000 cos=1.0000 regret=-2.776e-18 ee_rmse=0.0000 solves=0 0.0s
+    random    l1=0.485 cos=0.8769 regret=1.633e-04 ee_rmse=0.0061 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 1.2734930878058468e-09, 'gram_cond': 2315489176.582485, 'inner_grad_norm_max': 4.426974262128935e-06, 'inner_grad_norm_med': 2.9584339568250735e-06, 'gradients': {'cos_implicit_unrolled': 0.9996427214070356, 'fd_eps_0.01': {'cos': 0.940132888951995, 'rel_err': 0.4308989851187095}, 'fd_eps_0.001': {'cos': 0.42957004191810155, 'rel_err': 2.235268195271681}, 'fd_eps_0.0001': {'cos': -0.47978983948984205, 'rel_err': 14.099646720341433}, 'fd_eps_1e-05': {'cos': -0.6633449036067868, 'rel_err': 29.211781932767476}}}
+[M=5 seed=1]
+  gradient check:
+  implicit vs unrolled: cos=-0.102618 |gi|=9.924e-05 |gu|=3.101e-05
+  implicit vs fd(eps=0.01): cos=0.945281 rel_err=3.542e-01
+  implicit vs fd(eps=0.001): cos=0.949942 rel_err=3.552e-01
+  implicit vs fd(eps=0.0001): cos=-0.192297 rel_err=5.099e+00
+  implicit vs fd(eps=1e-05): cos=-0.017015 rel_err=4.624e+01
+    implicit  l1=0.038 cos=0.9994 regret=1.828e-07 ee_rmse=0.0002 solves=150 7.9s
+    unrolled  l1=0.040 cos=0.9993 regret=4.730e-07 ee_rmse=0.0002 solves=150 6.0s
+    fd        l1=0.060 cos=0.9983 regret=7.573e-06 ee_rmse=0.0015 solves=600 23.9s
+    cmaes     l1=0.041 cos=0.9992 regret=5.837e-07 ee_rmse=0.0002 solves=245 9.8s
+    kkt       l1=0.000 cos=1.0000 regret=-3.427e-10 ee_rmse=0.0000 solves=0 1.0s
+    cioc      l1=0.001 cos=1.0000 regret=3.523e-09 ee_rmse=0.0000 solves=0 4.1s
+    oracle    l1=0.000 cos=1.0000 regret=3.469e-18 ee_rmse=0.0000 solves=0 0.0s
+    random    l1=0.249 cos=0.9637 regret=1.443e-05 ee_rmse=0.0029 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 3.5208713010970426e-08, 'gram_cond': 83578067.36162682, 'inner_grad_norm_max': 1.3055611293885487e-05, 'inner_grad_norm_med': 3.940326106792938e-06, 'gradients': {'cos_implicit_unrolled': -0.10261791544439261, 'fd_eps_0.01': {'cos': 0.9452805686406678, 'rel_err': 0.35423650578077104}, 'fd_eps_0.001': {'cos': 0.9499418087229369, 'rel_err': 0.3551972265111396}, 'fd_eps_0.0001': {'cos': -0.19229660724946054, 'rel_err': 5.098539381212629}, 'fd_eps_1e-05': {'cos': -0.01701473999959088, 'rel_err': 46.2410943854775}}}
+[M=5 seed=2]
+  gradient check:
+  implicit vs unrolled: cos=0.997210 |gi|=4.413e-04 |gu|=2.368e-04
+  implicit vs fd(eps=0.01): cos=0.961077 rel_err=3.405e-01
+  implicit vs fd(eps=0.001): cos=0.528495 rel_err=9.414e-01
+  implicit vs fd(eps=0.0001): cos=0.975664 rel_err=1.660e+01
+  implicit vs fd(eps=1e-05): cos=0.766257 rel_err=2.122e+02
+    implicit  l1=0.023 cos=0.9997 regret=2.325e-06 ee_rmse=0.0006 solves=150 7.9s
+    unrolled  l1=0.020 cos=0.9998 regret=3.682e-07 ee_rmse=0.0003 solves=150 6.0s
+    fd        l1=0.011 cos=0.9999 regret=7.659e-07 ee_rmse=0.0003 solves=600 23.9s
+    cmaes     l1=0.099 cos=0.9957 regret=1.609e-06 ee_rmse=0.0005 solves=245 9.7s
+    kkt       l1=0.000 cos=1.0000 regret=5.075e-10 ee_rmse=0.0000 solves=0 0.9s
+    cioc      l1=0.000 cos=1.0000 regret=8.750e-11 ee_rmse=0.0000 solves=0 4.1s
+    oracle    l1=0.000 cos=1.0000 regret=2.776e-18 ee_rmse=0.0000 solves=0 0.0s
+    random    l1=0.477 cos=0.8813 regret=5.944e-04 ee_rmse=0.0125 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.7, 'gram_lambda_min': 2.8955313209724396e-08, 'gram_cond': 101676167.08838251, 'inner_grad_norm_max': 2.2363949356878208e-05, 'inner_grad_norm_med': 3.334727828959837e-06, 'gradients': {'cos_implicit_unrolled': 0.9972101194215393, 'fd_eps_0.01': {'cos': 0.9610769326391149, 'rel_err': 0.3404906943650773}, 'fd_eps_0.001': {'cos': 0.5284951525698172, 'rel_err': 0.9413638648363339}, 'fd_eps_0.0001': {'cos': 0.9756642628642103, 'rel_err': 16.599675966965194}, 'fd_eps_1e-05': {'cos': 0.7662570139739201, 'rel_err': 212.18093864983396}}}
+[M=5 seed=3]
+  gradient check:
+  implicit vs unrolled: cos=0.999946 |gi|=9.463e-04 |gu|=1.445e-04
+  implicit vs fd(eps=0.01): cos=0.963129 rel_err=3.079e-01
+  implicit vs fd(eps=0.001): cos=-0.164278 rel_err=4.646e+00
+  implicit vs fd(eps=0.0001): cos=0.283728 rel_err=2.242e+01
+  implicit vs fd(eps=1e-05): cos=0.664964 rel_err=1.952e+02
+    implicit  l1=0.008 cos=1.0000 regret=1.730e-07 ee_rmse=0.0002 solves=150 8.0s
+    unrolled  l1=0.139 cos=0.9904 regret=1.461e-05 ee_rmse=0.0009 solves=150 6.0s
+    fd        l1=0.272 cos=0.9615 regret=1.011e-04 ee_rmse=0.0026 solves=600 23.9s
+    cmaes     l1=0.058 cos=0.9981 regret=5.305e-06 ee_rmse=0.0006 solves=245 9.7s
+    kkt       l1=0.000 cos=1.0000 regret=-6.367e-10 ee_rmse=0.0000 solves=0 0.9s
+    cioc      l1=0.001 cos=1.0000 regret=2.359e-09 ee_rmse=0.0000 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=8.674e-18 ee_rmse=0.0000 solves=0 0.0s
+    random    l1=0.758 cos=0.7210 regret=2.333e-04 ee_rmse=0.0098 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 2.5758260992135132e-08, 'gram_cond': 114497300.35639147, 'inner_grad_norm_max': 2.1011559378512165e-05, 'inner_grad_norm_med': 3.840582242397483e-06, 'gradients': {'cos_implicit_unrolled': 0.9999455285728484, 'fd_eps_0.01': {'cos': 0.9631286040668854, 'rel_err': 0.3078825373422606}, 'fd_eps_0.001': {'cos': -0.1642780307141005, 'rel_err': 4.646198060052778}, 'fd_eps_0.0001': {'cos': 0.28372796336010997, 'rel_err': 22.424168925534545}, 'fd_eps_1e-05': {'cos': 0.6649642030295515, 'rel_err': 195.16352888527788}}}
+[M=5 seed=4]
+  gradient check:
+  implicit vs unrolled: cos=0.983924 |gi|=3.303e-04 |gu|=1.787e-04
+  implicit vs fd(eps=0.01): cos=0.828047 rel_err=5.822e-01
+  implicit vs fd(eps=0.001): cos=0.777980 rel_err=3.982e+00
+  implicit vs fd(eps=0.0001): cos=0.538781 rel_err=4.189e+01
+  implicit vs fd(eps=1e-05): cos=0.649883 rel_err=4.924e+01
+    implicit  l1=0.053 cos=0.9987 regret=8.531e-07 ee_rmse=0.0003 solves=150 7.9s
+    unrolled  l1=0.108 cos=0.9943 regret=1.552e-06 ee_rmse=0.0006 solves=150 6.0s
+    fd        l1=0.622 cos=0.8034 regret=6.529e-05 ee_rmse=0.0051 solves=600 23.9s
+    cmaes     l1=0.060 cos=0.9984 regret=4.829e-06 ee_rmse=0.0011 solves=245 9.7s
+    kkt       l1=0.000 cos=1.0000 regret=1.086e-11 ee_rmse=0.0000 solves=0 0.9s
+    cioc      l1=0.002 cos=1.0000 regret=1.002e-08 ee_rmse=0.0000 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=-5.204e-19 ee_rmse=0.0000 solves=0 0.0s
+    random    l1=0.517 cos=0.8325 regret=1.321e-04 ee_rmse=0.0088 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 6.884970097676182e-09, 'gram_cond': 427658249.907831, 'inner_grad_norm_max': 5.149262409241052e-06, 'inner_grad_norm_med': 4.061958599800018e-06, 'gradients': {'cos_implicit_unrolled': 0.9839235005590202, 'fd_eps_0.01': {'cos': 0.8280473683429116, 'rel_err': 0.582207652615723}, 'fd_eps_0.001': {'cos': 0.7779798588084841, 'rel_err': 3.9823295465658686}, 'fd_eps_0.0001': {'cos': 0.5387810975854461, 'rel_err': 41.88905695800506}, 'fd_eps_1e-05': {'cos': 0.6498831802712256, 'rel_err': 49.24001874987934}}}
+
+wrote /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma00.json
+
+=== median theta_l1 (IQR) over seeds ===
+   M         implicit         unrolled               fd            cmaes              kkt             cioc           random
+   5     0.023(0.016)     0.040(0.088)     0.272(0.425)     0.058(0.018)     0.000(0.000)     0.001(0.001)     0.485(0.040)
+  /home/sadmin/miniconda3/envs/pyroffi/bin/python -u -m ioc.robot.e1_identifiability --n-timesteps 16 --n-newton 60 --n-contexts 5 --n-outer-steps 30 --n-seeds 5 --demo-noise 0.01 --out /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma001.json
+2026-08-20 15:59:05.833 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-20 15:59:06.724 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+jax devices: [CudaDevice(id=0)]  T=16
+theta* = [0.5 0.3 0.2]  (effort, collision, smooth)
+[M=5 seed=0]
+  gradient check:
+  implicit vs unrolled: cos=0.674211 |gi|=2.989e-03 |gu|=1.731e-03
+  implicit vs fd(eps=0.01): cos=0.987674 rel_err=1.644e-01
+  implicit vs fd(eps=0.001): cos=0.710884 rel_err=9.125e-01
+  implicit vs fd(eps=0.0001): cos=-0.397643 rel_err=1.095e+01
+  implicit vs fd(eps=1e-05): cos=0.592690 rel_err=5.273e+01
+    implicit  l1=0.067 cos=0.9973 regret=3.405e-05 ee_rmse=0.0095 solves=150 8.0s
+    unrolled  l1=0.181 cos=0.9838 regret=1.151e-04 ee_rmse=0.0104 solves=150 6.0s
+    fd        l1=0.433 cos=0.8977 regret=6.513e-04 ee_rmse=0.0174 solves=600 24.0s
+    cmaes     l1=0.103 cos=0.9946 regret=4.120e-05 ee_rmse=0.0095 solves=245 9.7s
+    kkt       l1=0.396 cos=0.9464 regret=1.328e-04 ee_rmse=0.0099 solves=0 1.5s
+    cioc      l1=0.391 cos=0.9474 regret=5.228e-05 ee_rmse=0.0101 solves=0 10.8s
+    oracle    l1=0.000 cos=1.0000 regret=-2.776e-18 ee_rmse=0.0095 solves=0 0.0s
+    random    l1=0.586 cos=0.8082 regret=1.390e-03 ee_rmse=0.0293 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 0.04274137083720071, 'gram_cond': 54.49452530760457, 'inner_grad_norm_max': 4.426974262128935e-06, 'inner_grad_norm_med': 2.9584339568250735e-06, 'gradients': {'cos_implicit_unrolled': 0.6742114187130533, 'fd_eps_0.01': {'cos': 0.9876744499162764, 'rel_err': 0.16442375738501627}, 'fd_eps_0.001': {'cos': 0.7108836221185352, 'rel_err': 0.9125316656417941}, 'fd_eps_0.0001': {'cos': -0.3976429297804221, 'rel_err': 10.953821356155077}, 'fd_eps_1e-05': {'cos': 0.5926902028505581, 'rel_err': 52.72877106965069}}}
+[M=5 seed=1]
+  gradient check:
+  implicit vs unrolled: cos=0.999630 |gi|=5.180e-04 |gu|=3.756e-04
+  implicit vs fd(eps=0.01): cos=0.979929 rel_err=2.018e-01
+  implicit vs fd(eps=0.001): cos=0.802100 rel_err=2.069e+00
+  implicit vs fd(eps=0.0001): cos=0.549235 rel_err=8.425e-01
+  implicit vs fd(eps=1e-05): cos=0.298916 rel_err=9.574e+00
+    implicit  l1=0.050 cos=0.9989 regret=2.401e-07 ee_rmse=0.0091 solves=150 7.9s
+    unrolled  l1=0.106 cos=0.9952 regret=1.539e-06 ee_rmse=0.0091 solves=150 6.0s
+    fd        l1=0.112 cos=0.9939 regret=3.083e-06 ee_rmse=0.0091 solves=600 24.0s
+    cmaes     l1=0.056 cos=0.9986 regret=3.423e-06 ee_rmse=0.0091 solves=245 9.8s
+    kkt       l1=0.394 cos=0.9320 regret=1.225e-04 ee_rmse=0.0102 solves=0 0.9s
+    cioc      l1=0.395 cos=0.9456 regret=1.312e-05 ee_rmse=0.0093 solves=0 4.1s
+    oracle    l1=0.000 cos=1.0000 regret=3.469e-18 ee_rmse=0.0091 solves=0 0.0s
+    random    l1=0.328 cos=0.9537 regret=8.486e-04 ee_rmse=0.0152 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 0.04319627115877874, 'gram_cond': 46.79930454122172, 'inner_grad_norm_max': 1.3055611293885487e-05, 'inner_grad_norm_med': 3.940326106792938e-06, 'gradients': {'cos_implicit_unrolled': 0.9996300838113878, 'fd_eps_0.01': {'cos': 0.9799287626461268, 'rel_err': 0.2017739927078066}, 'fd_eps_0.001': {'cos': 0.8020995247277546, 'rel_err': 2.0687092944181087}, 'fd_eps_0.0001': {'cos': 0.5492350176200654, 'rel_err': 0.8425113027571237}, 'fd_eps_1e-05': {'cos': 0.29891555380659157, 'rel_err': 9.574475638324907}}}
+[M=5 seed=2]
+  gradient check:
+  implicit vs unrolled: cos=0.999757 |gi|=4.613e-04 |gu|=4.519e-04
+  implicit vs fd(eps=0.01): cos=0.999335 rel_err=5.645e-02
+  implicit vs fd(eps=0.001): cos=0.966169 rel_err=3.749e-01
+  implicit vs fd(eps=0.0001): cos=0.921051 rel_err=7.915e-01
+  implicit vs fd(eps=1e-05): cos=0.264703 rel_err=4.168e+00
+    implicit  l1=0.185 cos=0.9861 regret=1.372e-05 ee_rmse=0.0089 solves=150 7.9s
+    unrolled  l1=0.020 cos=0.9998 regret=2.039e-06 ee_rmse=0.0089 solves=150 6.0s
+    fd        l1=0.608 cos=0.8217 regret=3.639e-04 ee_rmse=0.0101 solves=600 23.9s
+    cmaes     l1=0.052 cos=0.9986 regret=3.859e-06 ee_rmse=0.0089 solves=245 9.8s
+    kkt       l1=0.395 cos=0.9351 regret=1.763e-04 ee_rmse=0.0096 solves=0 0.9s
+    cioc      l1=0.396 cos=0.9458 regret=2.033e-05 ee_rmse=0.0091 solves=0 4.2s
+    oracle    l1=0.000 cos=1.0000 regret=2.776e-18 ee_rmse=0.0089 solves=0 0.0s
+    random    l1=0.403 cos=0.9038 regret=1.549e-03 ee_rmse=0.0150 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.7, 'gram_lambda_min': 0.039639475325036935, 'gram_cond': 51.876946375634674, 'inner_grad_norm_max': 2.2363949356878208e-05, 'inner_grad_norm_med': 3.334727828959837e-06, 'gradients': {'cos_implicit_unrolled': 0.9997569185587838, 'fd_eps_0.01': {'cos': 0.9993345611438315, 'rel_err': 0.05644569562723409}, 'fd_eps_0.001': {'cos': 0.9661691185029678, 'rel_err': 0.3749215259835922}, 'fd_eps_0.0001': {'cos': 0.9210506851471615, 'rel_err': 0.7915135392137084}, 'fd_eps_1e-05': {'cos': 0.26470276547239174, 'rel_err': 4.1683154852109245}}}
+[M=5 seed=3]
+  gradient check:
+  implicit vs unrolled: cos=0.187363 |gi|=5.326e-04 |gu|=1.003e-04
+  implicit vs fd(eps=0.01): cos=0.990629 rel_err=1.373e-01
+  implicit vs fd(eps=0.001): cos=0.762263 rel_err=1.792e+00
+  implicit vs fd(eps=0.0001): cos=0.217211 rel_err=4.700e+00
+  implicit vs fd(eps=1e-05): cos=0.986107 rel_err=5.376e+01
+    implicit  l1=0.121 cos=0.9937 regret=2.295e-06 ee_rmse=0.0093 solves=150 7.9s
+    unrolled  l1=0.210 cos=0.9818 regret=6.339e-06 ee_rmse=0.0093 solves=150 6.0s
+    fd        l1=0.520 cos=0.8352 regret=6.079e-04 ee_rmse=0.0172 solves=600 23.9s
+    cmaes     l1=0.289 cos=0.9688 regret=1.285e-05 ee_rmse=0.0093 solves=245 9.6s
+    kkt       l1=0.395 cos=0.9441 regret=6.434e-05 ee_rmse=0.0095 solves=0 0.9s
+    cioc      l1=0.395 cos=0.9423 regret=2.883e-05 ee_rmse=0.0095 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=8.674e-18 ee_rmse=0.0093 solves=0 0.0s
+    random    l1=0.523 cos=0.8346 regret=6.110e-04 ee_rmse=0.0173 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 0.03187124451235626, 'gram_cond': 64.92778128653333, 'inner_grad_norm_max': 2.1011559378512165e-05, 'inner_grad_norm_med': 3.840582242397483e-06, 'gradients': {'cos_implicit_unrolled': 0.18736308884286565, 'fd_eps_0.01': {'cos': 0.9906292581815136, 'rel_err': 0.13730343359756547}, 'fd_eps_0.001': {'cos': 0.7622632824001744, 'rel_err': 1.7921941061768416}, 'fd_eps_0.0001': {'cos': 0.2172114900915412, 'rel_err': 4.699904733150338}, 'fd_eps_1e-05': {'cos': 0.9861066596577404, 'rel_err': 53.75923309857512}}}
+[M=5 seed=4]
+  gradient check:
+  implicit vs unrolled: cos=0.999300 |gi|=2.784e-04 |gu|=1.590e-04
+  implicit vs fd(eps=0.01): cos=0.885336 rel_err=4.812e-01
+  implicit vs fd(eps=0.001): cos=-0.097674 rel_err=5.256e+00
+  implicit vs fd(eps=0.0001): cos=0.637095 rel_err=4.526e+00
+  implicit vs fd(eps=1e-05): cos=0.469330 rel_err=3.339e+01
+    implicit  l1=0.118 cos=0.9944 regret=1.808e-05 ee_rmse=0.0092 solves=150 7.9s
+    unrolled  l1=0.095 cos=0.9956 regret=2.909e-05 ee_rmse=0.0092 solves=150 6.0s
+    fd        l1=0.373 cos=0.9295 regret=9.801e-05 ee_rmse=0.0094 solves=600 23.9s
+    cmaes     l1=0.084 cos=0.9963 regret=2.804e-05 ee_rmse=0.0092 solves=245 9.7s
+    kkt       l1=0.393 cos=0.9225 regret=1.627e-04 ee_rmse=0.0115 solves=0 0.9s
+    cioc      l1=0.396 cos=0.9438 regret=1.843e-05 ee_rmse=0.0093 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=-5.204e-19 ee_rmse=0.0095 solves=0 0.0s
+    random    l1=0.349 cos=0.9320 regret=1.151e-04 ee_rmse=0.0128 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 0.038745690753481526, 'gram_cond': 54.063499672584285, 'inner_grad_norm_max': 5.149262409241052e-06, 'inner_grad_norm_med': 4.061958599800018e-06, 'gradients': {'cos_implicit_unrolled': 0.9992995550399697, 'fd_eps_0.01': {'cos': 0.8853357658805968, 'rel_err': 0.4811856265035225}, 'fd_eps_0.001': {'cos': -0.09767350651703274, 'rel_err': 5.256154554437362}, 'fd_eps_0.0001': {'cos': 0.6370946441399884, 'rel_err': 4.5260667231466645}, 'fd_eps_1e-05': {'cos': 0.46933012901235094, 'rel_err': 33.390676280501275}}}
+
+wrote /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma001.json
+
+=== median theta_l1 (IQR) over seeds ===
+   M         implicit         unrolled               fd            cmaes              kkt             cioc           random
+   5     0.118(0.054)     0.106(0.086)     0.433(0.147)     0.084(0.047)     0.395(0.002)     0.395(0.001)     0.403(0.174)
+  /home/sadmin/miniconda3/envs/pyroffi/bin/python -u -m ioc.robot.e1_identifiability --n-timesteps 16 --n-newton 60 --n-contexts 5 --n-outer-steps 30 --n-seeds 5 --demo-noise 0.02 --out /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma002.json
+2026-08-20 16:09:35.321 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-20 16:09:36.207 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+jax devices: [CudaDevice(id=0)]  T=16
+theta* = [0.5 0.3 0.2]  (effort, collision, smooth)
+[M=5 seed=0]
+  gradient check:
+  implicit vs unrolled: cos=0.655566 |gi|=2.868e-03 |gu|=1.780e-03
+  implicit vs fd(eps=0.01): cos=0.986068 rel_err=1.745e-01
+  implicit vs fd(eps=0.001): cos=0.702126 rel_err=1.008e+00
+  implicit vs fd(eps=0.0001): cos=-0.391270 rel_err=1.141e+01
+  implicit vs fd(eps=1e-05): cos=0.630517 rel_err=5.840e+01
+    implicit  l1=0.081 cos=0.9966 regret=5.463e-05 ee_rmse=0.0190 solves=150 8.0s
+    unrolled  l1=0.247 cos=0.9648 regret=1.368e-04 ee_rmse=0.0196 solves=150 6.0s
+    fd        l1=0.586 cos=0.8082 regret=1.390e-03 ee_rmse=0.0331 solves=600 23.9s
+    cmaes     l1=0.042 cos=0.9989 regret=1.346e-05 ee_rmse=0.0190 solves=245 9.7s
+    kkt       l1=0.420 cos=0.9136 regret=8.156e-04 ee_rmse=0.0203 solves=0 1.4s
+    cioc      l1=0.395 cos=0.9466 regret=5.692e-05 ee_rmse=0.0194 solves=0 10.6s
+    oracle    l1=0.000 cos=1.0000 regret=-2.776e-18 ee_rmse=0.0191 solves=0 0.0s
+    random    l1=0.586 cos=0.8082 regret=1.390e-03 ee_rmse=0.0331 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 0.04590105205374853, 'gram_cond': 46.966137780013526, 'inner_grad_norm_max': 4.426974262128935e-06, 'inner_grad_norm_med': 2.9584339568250735e-06, 'gradients': {'cos_implicit_unrolled': 0.6555660738680031, 'fd_eps_0.01': {'cos': 0.9860684739394083, 'rel_err': 0.1744681969133845}, 'fd_eps_0.001': {'cos': 0.702126147226144, 'rel_err': 1.0080113624154092}, 'fd_eps_0.0001': {'cos': -0.3912701889461343, 'rel_err': 11.413628400194604}, 'fd_eps_1e-05': {'cos': 0.6305168679282864, 'rel_err': 58.40071241623014}}}
+[M=5 seed=1]
+  gradient check:
+  implicit vs unrolled: cos=0.999672 |gi|=5.047e-04 |gu|=3.583e-04
+  implicit vs fd(eps=0.01): cos=0.979168 rel_err=2.052e-01
+  implicit vs fd(eps=0.001): cos=0.804398 rel_err=2.070e+00
+  implicit vs fd(eps=0.0001): cos=0.871482 rel_err=8.006e-01
+  implicit vs fd(eps=1e-05): cos=0.457943 rel_err=7.690e+00
+    implicit  l1=0.069 cos=0.9976 regret=1.137e-06 ee_rmse=0.0181 solves=150 8.0s
+    unrolled  l1=0.262 cos=0.9653 regret=1.277e-05 ee_rmse=0.0182 solves=150 6.0s
+    fd        l1=0.154 cos=0.9880 regret=2.624e-06 ee_rmse=0.0182 solves=600 23.9s
+    cmaes     l1=0.111 cos=0.9942 regret=1.837e-06 ee_rmse=0.0181 solves=245 9.7s
+    kkt       l1=0.638 cos=0.8391 regret=5.183e-04 ee_rmse=0.0215 solves=0 0.9s
+    cioc      l1=0.396 cos=0.9437 regret=1.963e-05 ee_rmse=0.0183 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=3.469e-18 ee_rmse=0.0181 solves=0 0.0s
+    random    l1=0.328 cos=0.9537 regret=8.486e-04 ee_rmse=0.0217 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 0.04189099006809371, 'gram_cond': 56.088831402913186, 'inner_grad_norm_max': 1.3055611293885487e-05, 'inner_grad_norm_med': 3.940326106792938e-06, 'gradients': {'cos_implicit_unrolled': 0.9996715452152907, 'fd_eps_0.01': {'cos': 0.979168036406364, 'rel_err': 0.20521117417182222}, 'fd_eps_0.001': {'cos': 0.8043983780278258, 'rel_err': 2.070191836517631}, 'fd_eps_0.0001': {'cos': 0.8714821176390811, 'rel_err': 0.8006476848815834}, 'fd_eps_1e-05': {'cos': 0.4579433968574733, 'rel_err': 7.689944700663842}}}
+[M=5 seed=2]
+  gradient check:
+  implicit vs unrolled: cos=0.999521 |gi|=4.675e-04 |gu|=4.770e-04
+  implicit vs fd(eps=0.01): cos=0.997665 rel_err=8.932e-02
+  implicit vs fd(eps=0.001): cos=0.913354 rel_err=5.235e-01
+  implicit vs fd(eps=0.0001): cos=0.926809 rel_err=1.182e+00
+  implicit vs fd(eps=1e-05): cos=0.787191 rel_err=4.110e+00
+    implicit  l1=0.190 cos=0.9849 regret=2.442e-05 ee_rmse=0.0177 solves=150 7.9s
+    unrolled  l1=0.184 cos=0.9863 regret=5.969e-06 ee_rmse=0.0177 solves=150 6.0s
+    fd        l1=0.632 cos=0.8051 regret=2.131e-04 ee_rmse=0.0182 solves=600 23.9s
+    cmaes     l1=0.052 cos=0.9986 regret=3.859e-06 ee_rmse=0.0177 solves=245 9.7s
+    kkt       l1=0.671 cos=0.8250 regret=8.622e-04 ee_rmse=0.0207 solves=0 0.9s
+    cioc      l1=0.397 cos=0.9455 regret=2.044e-05 ee_rmse=0.0179 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=2.776e-18 ee_rmse=0.0177 solves=0 0.0s
+    random    l1=0.403 cos=0.9038 regret=1.549e-03 ee_rmse=0.0216 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.7, 'gram_lambda_min': 0.03831561626631237, 'gram_cond': 63.176984302052446, 'inner_grad_norm_max': 2.2363949356878208e-05, 'inner_grad_norm_med': 3.334727828959837e-06, 'gradients': {'cos_implicit_unrolled': 0.9995211928070533, 'fd_eps_0.01': {'cos': 0.9976654570900411, 'rel_err': 0.08932156585680086}, 'fd_eps_0.001': {'cos': 0.913354241265084, 'rel_err': 0.5234813353912406}, 'fd_eps_0.0001': {'cos': 0.9268085576014065, 'rel_err': 1.1821450598585568}, 'fd_eps_1e-05': {'cos': 0.7871910696909561, 'rel_err': 4.109597012926555}}}
+[M=5 seed=3]
+  gradient check:
+  implicit vs unrolled: cos=0.753258 |gi|=5.648e-04 |gu|=2.040e-04
+  implicit vs fd(eps=0.01): cos=0.980346 rel_err=2.052e-01
+  implicit vs fd(eps=0.001): cos=0.755812 rel_err=2.115e+00
+  implicit vs fd(eps=0.0001): cos=0.095303 rel_err=4.799e+00
+  implicit vs fd(eps=1e-05): cos=0.715984 rel_err=4.608e+01
+    implicit  l1=0.244 cos=0.9728 regret=1.953e-05 ee_rmse=0.0185 solves=150 7.9s
+    unrolled  l1=0.150 cos=0.9895 regret=1.201e-05 ee_rmse=0.0185 solves=150 6.0s
+    fd        l1=0.181 cos=0.9840 regret=1.140e-05 ee_rmse=0.0185 solves=600 23.9s
+    cmaes     l1=0.226 cos=0.9761 regret=1.932e-05 ee_rmse=0.0185 solves=245 9.7s
+    kkt       l1=0.404 cos=0.9175 regret=2.114e-04 ee_rmse=0.0194 solves=0 0.9s
+    cioc      l1=0.447 cos=0.9319 regret=1.022e-04 ee_rmse=0.0188 solves=0 4.2s
+    oracle    l1=0.000 cos=1.0000 regret=8.674e-18 ee_rmse=0.0186 solves=0 0.0s
+    random    l1=0.523 cos=0.8346 regret=6.110e-04 ee_rmse=0.0242 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 0.03276835977054621, 'gram_cond': 62.140768037336734, 'inner_grad_norm_max': 2.1011559378512165e-05, 'inner_grad_norm_med': 3.840582242397483e-06, 'gradients': {'cos_implicit_unrolled': 0.7532576492695346, 'fd_eps_0.01': {'cos': 0.980345743490438, 'rel_err': 0.2051841284347138}, 'fd_eps_0.001': {'cos': 0.7558116640042085, 'rel_err': 2.1145789665870316}, 'fd_eps_0.0001': {'cos': 0.09530309068798681, 'rel_err': 4.799491710945956}, 'fd_eps_1e-05': {'cos': 0.7159839530353873, 'rel_err': 46.08092112233545}}}
+[M=5 seed=4]
+  gradient check:
+  implicit vs unrolled: cos=0.998045 |gi|=3.442e-04 |gu|=2.235e-04
+  implicit vs fd(eps=0.01): cos=0.879591 rel_err=5.095e-01
+  implicit vs fd(eps=0.001): cos=-0.037081 rel_err=5.650e+00
+  implicit vs fd(eps=0.0001): cos=0.211217 rel_err=7.782e+00
+  implicit vs fd(eps=1e-05): cos=0.455709 rel_err=6.052e+01
+    implicit  l1=0.208 cos=0.9838 regret=7.303e-05 ee_rmse=0.0184 solves=150 7.9s
+    unrolled  l1=0.158 cos=0.9883 regret=1.049e-04 ee_rmse=0.0184 solves=150 6.1s
+    fd        l1=0.368 cos=0.9310 regret=3.533e-05 ee_rmse=0.0189 solves=600 23.9s
+    cmaes     l1=0.160 cos=0.9890 regret=7.416e-05 ee_rmse=0.0184 solves=245 9.7s
+    kkt       l1=0.598 cos=0.8554 regret=4.234e-04 ee_rmse=0.0226 solves=0 0.9s
+    cioc      l1=0.396 cos=0.9382 regret=4.924e-05 ee_rmse=0.0184 solves=0 4.1s
+    oracle    l1=0.000 cos=1.0000 regret=-5.204e-19 ee_rmse=0.0189 solves=0 0.0s
+    random    l1=0.349 cos=0.9320 regret=1.151e-04 ee_rmse=0.0214 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 0.03927044649433047, 'gram_cond': 58.300992231062665, 'inner_grad_norm_max': 5.149262409241052e-06, 'inner_grad_norm_med': 4.061958599800018e-06, 'gradients': {'cos_implicit_unrolled': 0.9980447984351538, 'fd_eps_0.01': {'cos': 0.8795911010661679, 'rel_err': 0.5095498663351368}, 'fd_eps_0.001': {'cos': -0.03708142775826207, 'rel_err': 5.650084260939646}, 'fd_eps_0.0001': {'cos': 0.21121672333125707, 'rel_err': 7.7816374132672435}, 'fd_eps_1e-05': {'cos': 0.4557091770293227, 'rel_err': 60.52187027543151}}}
+
+wrote /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma002.json
+
+=== median theta_l1 (IQR) over seeds ===
+   M         implicit         unrolled               fd            cmaes              kkt             cioc           random
+   5     0.190(0.127)     0.184(0.089)     0.368(0.405)     0.111(0.108)     0.598(0.218)     0.396(0.001)     0.403(0.174)
+  /home/sadmin/miniconda3/envs/pyroffi/bin/python -u -m ioc.robot.e1_identifiability --n-timesteps 16 --n-newton 60 --n-contexts 5 --n-outer-steps 30 --n-seeds 5 --demo-noise 0.05 --out /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma005.json
+2026-08-20 16:20:03.831 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-20 16:20:04.752 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+jax devices: [CudaDevice(id=0)]  T=16
+theta* = [0.5 0.3 0.2]  (effort, collision, smooth)
+[M=5 seed=0]
+  gradient check:
+  implicit vs unrolled: cos=0.595689 |gi|=2.487e-03 |gu|=1.937e-03
+  implicit vs fd(eps=0.01): cos=0.971998 rel_err=2.394e-01
+  implicit vs fd(eps=0.001): cos=0.655808 rel_err=1.465e+00
+  implicit vs fd(eps=0.0001): cos=-0.368100 rel_err=1.344e+01
+  implicit vs fd(eps=1e-05): cos=0.722831 rel_err=7.880e+01
+    implicit  l1=0.173 cos=0.9844 regret=2.656e-04 ee_rmse=0.0474 solves=150 8.0s
+    unrolled  l1=0.393 cos=0.9106 regret=9.803e-05 ee_rmse=0.0478 solves=150 6.0s
+    fd        l1=0.525 cos=0.8572 regret=1.558e-03 ee_rmse=0.0503 solves=600 23.9s
+    cmaes     l1=0.176 cos=0.9828 regret=2.877e-04 ee_rmse=0.0474 solves=245 9.7s
+    kkt       l1=0.888 cos=0.7206 regret=3.180e-03 ee_rmse=0.0505 solves=0 1.4s
+    cioc      l1=0.396 cos=0.9450 regret=4.418e-05 ee_rmse=0.0481 solves=0 11.0s
+    oracle    l1=0.000 cos=1.0000 regret=-2.776e-18 ee_rmse=0.0478 solves=0 0.0s
+    random    l1=0.586 cos=0.8082 regret=1.390e-03 ee_rmse=0.0532 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 0.0451244101511758, 'gram_cond': 57.23422386314644, 'inner_grad_norm_max': 4.426974262128935e-06, 'inner_grad_norm_med': 2.9584339568250735e-06, 'gradients': {'cos_implicit_unrolled': 0.5956886484247836, 'fd_eps_0.01': {'cos': 0.9719981331593044, 'rel_err': 0.2394244807382397}, 'fd_eps_0.001': {'cos': 0.6558075790193273, 'rel_err': 1.4651430807193355}, 'fd_eps_0.0001': {'cos': -0.3681001712210337, 'rel_err': 13.44211381137659}, 'fd_eps_1e-05': {'cos': 0.7228313493703158, 'rel_err': 78.79574580437614}}}
+[M=5 seed=1]
+  gradient check:
+  implicit vs unrolled: cos=0.999765 |gi|=4.702e-04 |gu|=3.141e-04
+  implicit vs fd(eps=0.01): cos=0.976587 rel_err=2.163e-01
+  implicit vs fd(eps=0.001): cos=0.815188 rel_err=2.049e+00
+  implicit vs fd(eps=0.0001): cos=0.132967 rel_err=1.167e+00
+  implicit vs fd(eps=1e-05): cos=0.995757 rel_err=5.280e+00
+    implicit  l1=0.236 cos=0.9769 regret=6.794e-06 ee_rmse=0.0453 solves=150 7.9s
+    unrolled  l1=0.200 cos=0.9795 regret=1.649e-04 ee_rmse=0.0455 solves=150 6.0s
+    fd        l1=0.292 cos=0.9499 regret=4.200e-04 ee_rmse=0.0458 solves=600 23.9s
+    cmaes     l1=0.205 cos=0.9823 regret=4.767e-06 ee_rmse=0.0453 solves=245 9.7s
+    kkt       l1=0.800 cos=0.7645 regret=8.343e-04 ee_rmse=0.0482 solves=0 0.9s
+    cioc      l1=0.436 cos=0.9333 regret=9.442e-05 ee_rmse=0.0455 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=2.776e-18 ee_rmse=0.0453 solves=0 0.0s
+    random    l1=0.328 cos=0.9537 regret=8.486e-04 ee_rmse=0.0467 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 0.0380054646351687, 'gram_cond': 64.99903072581006, 'inner_grad_norm_max': 1.3055611293885487e-05, 'inner_grad_norm_med': 3.940326106792938e-06, 'gradients': {'cos_implicit_unrolled': 0.9997653818838713, 'fd_eps_0.01': {'cos': 0.9765869362108285, 'rel_err': 0.216326633907493}, 'fd_eps_0.001': {'cos': 0.8151879975086492, 'rel_err': 2.0494314739340687}, 'fd_eps_0.0001': {'cos': 0.1329668237414553, 'rel_err': 1.1670074238788075}, 'fd_eps_1e-05': {'cos': 0.9957567283710637, 'rel_err': 5.279566543386113}}}
+[M=5 seed=2]
+  gradient check:
+  implicit vs unrolled: cos=0.998626 |gi|=4.886e-04 |gu|=5.537e-04
+  implicit vs fd(eps=0.01): cos=0.987982 rel_err=1.899e-01
+  implicit vs fd(eps=0.001): cos=0.276871 rel_err=9.708e-01
+  implicit vs fd(eps=0.0001): cos=0.791207 rel_err=3.301e+00
+  implicit vs fd(eps=1e-05): cos=0.574035 rel_err=1.970e+01
+    implicit  l1=0.219 cos=0.9787 regret=5.161e-05 ee_rmse=0.0442 solves=150 7.9s
+    unrolled  l1=0.256 cos=0.9658 regret=1.364e-05 ee_rmse=0.0442 solves=150 6.0s
+    fd        l1=0.306 cos=0.9478 regret=2.142e-05 ee_rmse=0.0442 solves=600 23.9s
+    cmaes     l1=0.116 cos=0.9927 regret=2.676e-05 ee_rmse=0.0442 solves=245 9.8s
+    kkt       l1=0.962 cos=0.6835 regret=1.795e-03 ee_rmse=0.0473 solves=0 0.9s
+    cioc      l1=0.397 cos=0.9448 regret=2.157e-05 ee_rmse=0.0443 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=2.776e-18 ee_rmse=0.0442 solves=0 0.0s
+    random    l1=0.403 cos=0.9038 regret=1.549e-03 ee_rmse=0.0461 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.7, 'gram_lambda_min': 0.03611298073378525, 'gram_cond': 72.77016194044464, 'inner_grad_norm_max': 2.2363949356878208e-05, 'inner_grad_norm_med': 3.334727828959837e-06, 'gradients': {'cos_implicit_unrolled': 0.9986260699282801, 'fd_eps_0.01': {'cos': 0.9879823554915612, 'rel_err': 0.18987814150243276}, 'fd_eps_0.001': {'cos': 0.2768713441513361, 'rel_err': 0.9708414230223353}, 'fd_eps_0.0001': {'cos': 0.7912070959777868, 'rel_err': 3.300687556860333}, 'fd_eps_1e-05': {'cos': 0.5740346020935808, 'rel_err': 19.701793622523063}}}
+[M=5 seed=3]
+  gradient check:
+  implicit vs unrolled: cos=0.921619 |gi|=6.572e-04 |gu|=5.935e-04
+  implicit vs fd(eps=0.01): cos=0.927108 rel_err=3.922e-01
+  implicit vs fd(eps=0.001): cos=0.756338 rel_err=2.960e+00
+  implicit vs fd(eps=0.0001): cos=-0.078234 rel_err=1.109e+01
+  implicit vs fd(eps=1e-05): cos=-0.132084 rel_err=1.404e+02
+    implicit  l1=0.358 cos=0.9557 regret=1.143e-04 ee_rmse=0.0463 solves=150 7.9s
+    unrolled  l1=0.300 cos=0.9688 regret=1.677e-04 ee_rmse=0.0464 solves=150 6.0s
+    fd        l1=0.523 cos=0.8346 regret=6.110e-04 ee_rmse=0.0498 solves=600 23.9s
+    cmaes     l1=0.392 cos=0.9501 regret=1.827e-04 ee_rmse=0.0464 solves=245 9.5s
+    kkt       l1=0.396 cos=0.9466 regret=3.190e-05 ee_rmse=0.0465 solves=0 0.9s
+    cioc      l1=0.707 cos=0.8818 regret=1.435e-03 ee_rmse=0.0471 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=8.674e-18 ee_rmse=0.0466 solves=0 0.0s
+    random    l1=0.523 cos=0.8346 regret=6.110e-04 ee_rmse=0.0498 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.65, 'gram_lambda_min': 0.02590154849497367, 'gram_cond': 74.34581309878996, 'inner_grad_norm_max': 2.1011559378512165e-05, 'inner_grad_norm_med': 3.840582242397483e-06, 'gradients': {'cos_implicit_unrolled': 0.9216185569781116, 'fd_eps_0.01': {'cos': 0.9271080086763324, 'rel_err': 0.39219743896879716}, 'fd_eps_0.001': {'cos': 0.7563383011517395, 'rel_err': 2.9602300081444435}, 'fd_eps_0.0001': {'cos': -0.0782340782459952, 'rel_err': 11.087953214734553}, 'fd_eps_1e-05': {'cos': -0.13208428494264254, 'rel_err': 140.3847247959273}}}
+[M=5 seed=4]
+  gradient check:
+  implicit vs unrolled: cos=0.996912 |gi|=5.353e-04 |gu|=4.059e-04
+  implicit vs fd(eps=0.01): cos=0.860352 rel_err=5.890e-01
+  implicit vs fd(eps=0.001): cos=0.028278 rel_err=6.630e+00
+  implicit vs fd(eps=0.0001): cos=-0.041081 rel_err=1.844e+01
+  implicit vs fd(eps=1e-05): cos=0.338129 rel_err=1.454e+02
+    implicit  l1=0.458 cos=0.9359 regret=6.220e-04 ee_rmse=0.0459 solves=150 7.7s
+    unrolled  l1=0.340 cos=0.9383 regret=7.101e-04 ee_rmse=0.0459 solves=150 6.0s
+    fd        l1=0.452 cos=0.8940 regret=3.399e-05 ee_rmse=0.0474 solves=600 23.9s
+    cmaes     l1=0.327 cos=0.9540 regret=7.972e-04 ee_rmse=0.0459 solves=245 9.7s
+    kkt       l1=0.528 cos=0.8816 regret=3.289e-04 ee_rmse=0.0493 solves=0 0.9s
+    cioc      l1=0.597 cos=0.9056 regret=4.913e-04 ee_rmse=0.0459 solves=0 4.0s
+    oracle    l1=0.000 cos=1.0000 regret=8.674e-19 ee_rmse=0.0471 solves=0 0.0s
+    random    l1=0.349 cos=0.9320 regret=1.151e-04 ee_rmse=0.0490 solves=0 0.0s
+    gram: {'scene_discard_rate': 0.55, 'gram_lambda_min': 0.032562496600116946, 'gram_cond': 67.49704459430978, 'inner_grad_norm_max': 5.149262409241052e-06, 'inner_grad_norm_med': 4.061958599800018e-06, 'gradients': {'cos_implicit_unrolled': 0.99691170583855, 'fd_eps_0.01': {'cos': 0.8603520784082419, 'rel_err': 0.589014180474377}, 'fd_eps_0.001': {'cos': 0.028278439856023237, 'rel_err': 6.629552036167497}, 'fd_eps_0.0001': {'cos': -0.041080636853274594, 'rel_err': 18.442819826478093}, 'fd_eps_1e-05': {'cos': 0.33812924535851996, 'rel_err': 145.39889602736017}}}
+
+wrote /home/sadmin/Work/pyroffi/ioc/data/robot/e1_sigma005.json
+
+=== median theta_l1 (IQR) over seeds ===
+   M         implicit         unrolled               fd            cmaes              kkt             cioc           random
+   5     0.236(0.140)     0.300(0.084)     0.452(0.218)     0.205(0.151)     0.800(0.361)     0.436(0.201)     0.403(0.174)
+
+all requested stages complete
+[2026-08-20T16:30:20-04:00] e1_noise_v2 done rc=0
+[noise]
+  wrote figures/fig4_noise.pdf|png
+[2026-08-20T16:30:23-04:00] e1_noise_v2 fully done

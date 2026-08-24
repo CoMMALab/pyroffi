@@ -1,0 +1,76 @@
+[2026-08-20T15:48:32-04:00] === regime bw=0.45 R=1 budget=2000 ===
+[field] K=8 d=2 T=30 M=8 budget=2000 solves
+  seed 0: implicit=5.99e-04  fd=7.15e-04  cmaes=4.25e-03  kkt=7.49e-04  cioc=4.99e-05  random=1.67e-02
+  seed 1: implicit=9.99e-03  fd=9.18e-03  cmaes=1.62e-02  kkt=3.90e-03  cioc=1.40e-04  random=2.46e-03
+  seed 2: implicit=1.03e-01  fd=8.90e-03  cmaes=6.28e-04  kkt=7.12e-03  cioc=3.65e-03  random=1.58e-02
+  seed 3: implicit=1.10e-02  fd=3.66e-03  cmaes=4.65e-03  kkt=6.14e-03  cioc=2.39e-04  random=1.12e-02
+  seed 4: implicit=2.76e-03  fd=2.45e-02  cmaes=6.02e-03  kkt=2.42e-04  cioc=1.19e-05  random=4.47e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.45_R1.json
+
+    method   theta L1       regret     wall
+  implicit      0.435    9.989e-03    24.5s
+  unrolled      0.855    2.849e-02    26.2s
+        fd      0.537    8.901e-03    26.9s
+     cmaes      0.387    4.646e-03    24.3s
+       kkt      0.505    3.903e-03     1.5s
+      cioc      0.057    1.399e-04     4.1s
+    random      0.813    1.582e-02     0.0s
+[2026-08-20T15:59:39-04:00] bw=0.45 R=1 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.45_R1.json
+[2026-08-20T15:59:39-04:00] === regime bw=0.45 R=4 budget=2000 ===
+[field] K=8 d=2 T=30 M=8 budget=2000 solves
+  seed 0: implicit=8.05e-02  fd=2.22e-02  cmaes=3.84e-03  kkt=-1.86e-03  cioc=5.90e-05  random=5.04e-03
+  seed 1: implicit=5.77e-02  fd=8.09e-03  cmaes=1.84e-02  kkt=2.14e-03  cioc=1.26e-04  random=8.52e-03
+  seed 2: implicit=8.34e-03  fd=1.38e-02  cmaes=4.42e-03  kkt=1.40e-02  cioc=-6.17e-04  random=1.65e-02
+  seed 3: implicit=2.71e-03  fd=1.90e-03  cmaes=6.58e-03  kkt=1.12e-02  cioc=3.93e-05  random=1.80e-03
+  seed 4: implicit=3.09e-02  fd=3.71e-02  cmaes=1.43e-02  kkt=2.04e-04  cioc=1.67e-04  random=6.04e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.45_R4.json
+
+    method   theta L1       regret     wall
+  implicit      0.743    3.089e-02     8.2s
+  unrolled      0.646    1.583e-02     6.5s
+        fd      0.811    1.385e-02     9.7s
+     cmaes      0.461    6.576e-03     7.6s
+       kkt      0.507    2.144e-03     1.8s
+      cioc      0.058    5.903e-05     3.9s
+    random      0.813    8.522e-03     0.0s
+[2026-08-20T16:05:23-04:00] bw=0.45 R=4 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.45_R4.json
+[2026-08-20T16:05:23-04:00] === regime bw=0.90 R=1 budget=2000 ===
+[field] K=8 d=2 T=30 M=8 budget=2000 solves
+  seed 0: implicit=3.67e-02  fd=6.35e-02  cmaes=5.01e-03  kkt=-1.80e-02  cioc=4.25e-05  random=-5.55e-04
+  seed 1: implicit=1.50e-01  fd=1.48e-01  cmaes=1.41e-02  kkt=6.46e-04  cioc=1.40e-02  random=2.99e-02
+  seed 2: implicit=-1.01e-02  fd=-1.02e-03  cmaes=1.31e-02  kkt=-2.18e-03  cioc=1.46e-03  random=-1.00e-02
+  seed 3: implicit=1.87e-02  fd=-1.17e-02  cmaes=6.01e-02  kkt=2.38e-02  cioc=4.29e-05  random=-1.17e-02
+  seed 4: implicit=1.69e-02  fd=2.77e-03  cmaes=7.96e-03  kkt=3.74e-04  cioc=2.97e-05  random=1.11e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.90_R1.json
+
+    method   theta L1       regret     wall
+  implicit      1.155    1.870e-02    26.9s
+  unrolled      0.941    6.144e-02    26.2s
+        fd      0.813    2.768e-03    27.0s
+     cmaes      0.742    1.312e-02    25.2s
+       kkt      0.721    3.743e-04     1.7s
+      cioc      0.072    4.286e-05     4.1s
+    random      0.813   -5.549e-04     0.0s
+[2026-08-20T16:16:44-04:00] bw=0.90 R=1 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.90_R1.json
+[2026-08-20T16:16:44-04:00] === regime bw=0.90 R=4 budget=2000 ===
+[field] K=8 d=2 T=30 M=8 budget=2000 solves
+  seed 0: implicit=1.21e-01  fd=1.66e-02  cmaes=3.51e-03  kkt=-1.70e-02  cioc=9.54e-04  random=4.37e-04
+  seed 1: implicit=6.85e-02  fd=1.98e-02  cmaes=1.24e-02  kkt=2.97e-03  cioc=-7.90e-03  random=3.02e-02
+  seed 2: implicit=-1.02e-02  fd=-1.06e-02  cmaes=6.41e-03  kkt=-5.56e-03  cioc=8.97e-05  random=-1.06e-02
+  seed 3: implicit=5.63e-01  fd=-1.11e-02  cmaes=-7.78e-03  kkt=2.73e-02  cioc=3.94e-05  random=-1.11e-02
+  seed 4: implicit=8.79e-02  fd=4.74e-02  cmaes=7.39e-03  kkt=8.97e-04  cioc=2.14e-05  random=3.54e-02
+wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.90_R4.json
+
+    method   theta L1       regret     wall
+  implicit      0.843    8.786e-02     8.2s
+  unrolled      0.799    1.611e-02     6.5s
+        fd      0.800    1.659e-02     9.6s
+     cmaes      0.704    6.409e-03     7.7s
+       kkt      0.724    8.966e-04     1.5s
+      cioc      0.078    3.944e-05     4.0s
+    random      0.813    4.373e-04     0.0s
+[2026-08-20T16:22:27-04:00] bw=0.90 R=4 wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.90_R4.json
+[2026-08-20T16:22:27-04:00] all four regime configs collected -- rebuilding fig5_regime
+[regime]
+  wrote figures/fig5_regime.pdf|png
+[2026-08-20T16:22:30-04:00] run_regime_v2.sh done, FAIL=0

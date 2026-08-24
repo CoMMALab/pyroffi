@@ -166,7 +166,7 @@ def _screen_demos(rel, benchmark, seed, n_iter):
 
 def run(benchmark, n_contexts, n_seeds, T, n_iter, budget, k_bumps, demo_noise,
         damping, unroll_tail, ridge, fd_eps, lr, cfg, out, n_restarts=1,
-        dynamics=False):
+        dynamics=False, topo_restarts=False):
     res_fn, _, d = pb.BENCHMARKS[benchmark]
     names = pb.benchmark_names(benchmark, k_bumps, cfg)
     if dynamics:
@@ -195,7 +195,8 @@ def run(benchmark, n_contexts, n_seeds, T, n_iter, budget, k_bumps, demo_noise,
         else:
             scales = pb.calibrate(res_fn, ctxs, T, d, cfg, jax.random.key(seed), K)
         inner = build_solver(res_fn, scales, T, d, cfg, n_iter, damping, unroll_tail,
-                             ridge, n_restarts, dynamics=dynamics)
+                             ridge, n_restarts, topo_restarts=topo_restarts,
+                             dynamics=dynamics)
 
         x0s = jax.vmap(lambda c: pb.seed_path(c, T, d, cfg))(ctxs)
 
@@ -334,6 +335,7 @@ def main(
     nonhol_weight: float = 1.0,
     bump_width: float = 0.45,
     n_restarts: int = 1,
+    topo_restarts: bool = False,
     k_segments: int = 2,
     dynamics: bool = False,
     out: str = "",
@@ -342,6 +344,12 @@ def main(
     (`ioc.bench2d.robot2d`) instead of pure kinematics, appending an RNEA
     torque feature and running the forward solve on pyroffi's dynamics_trajopt
     L-BFGS engine.  Demonstrated on `field` only; see `run`'s docstring.
+
+    `topo_restarts` swaps the default i.i.d.-jitter `n_restarts>1` multistart
+    for `pb.make_topo_seed_fn`'s structured lateral-detour seeds (2D
+    benchmarks only) -- the variant `fig_recovery` validated as actually
+    escaping basins on a multimodal field, unlike plain jitter (see
+    `ioc.inner.InnerSolver.solve`'s docstring on why jitter mostly doesn't).
     """
     cfg = pb.default_cfg(
         benchmark, track_radius=track_radius, track_halfwidth=track_halfwidth,
@@ -352,7 +360,8 @@ def main(
         cfg["n_obstacles"] = n_obstacles
     run(benchmark, n_contexts, n_seeds, n_timesteps, n_iter, budget, k_bumps,
         demo_noise, damping, unroll_tail, ridge, fd_eps, lr, cfg,
-        out or f"bench2d_{benchmark}.json", n_restarts, dynamics)
+        out or f"bench2d_{benchmark}.json", n_restarts, dynamics,
+        topo_restarts=topo_restarts)
 
 
 if __name__ == "__main__":

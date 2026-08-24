@@ -1,0 +1,9 @@
+[2026-08-20T22:11:44-04:00] fig5_noise_field (with random) start
+[regime]
+  [fig5] sigma=0  implicit_l1=0.277  unrolled_l1=0.547  fd_l1=0.313  cmaes_l1=0.194  kkt_l1=0.000  cioc_l1=0.001  random_l1=0.331
+  [fig5] sigma=0.01  implicit_l1=0.314  unrolled_l1=0.485  fd_l1=0.315  cmaes_l1=0.194  kkt_l1=0.640  cioc_l1=0.090  random_l1=0.331
+  [fig5] sigma=0.02  implicit_l1=0.285  unrolled_l1=0.841  fd_l1=0.274  cmaes_l1=0.194  kkt_l1=0.992  cioc_l1=0.202  random_l1=0.331
+  [fig5] sigma=0.05  implicit_l1=0.329  unrolled_l1=0.212  fd_l1=0.275  cmaes_l1=0.184  kkt_l1=1.105  cioc_l1=0.533  random_l1=0.331
+  [fig5] sigma=0.08  implicit_l1=0.222  unrolled_l1=0.609  fd_l1=0.275  cmaes_l1=0.230  kkt_l1=1.111  cioc_l1=0.579  random_l1=0.331
+  wrote figures/fig5_noise_field.pdf|png
+[2026-08-20T23:22:14-04:00] fig5_noise_field done rc=0

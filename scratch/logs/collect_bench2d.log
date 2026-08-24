@@ -139,3 +139,7 @@ wrote /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_seg_K33.json
   seed 1: implicit=1.92e-02  fd=2.07e-02  cmaes=1.45e-05  kkt=3.90e-03  cioc=1.40e-04  random=2.46e-03
   seed 2: implicit=5.17e-02  fd=5.19e-02  cmaes=4.00e-06  kkt=3.51e-03  cioc=3.67e-03  random=1.53e-02
   seed 3: implicit=7.48e-03  fd=7.49e-03  cmaes=1.41e-06  kkt=6.76e-04  cioc=1.50e-04  random=1.09e-02
+  FAILED (-15): bench2d/bench2d_regime_bw0.45_R1.json
+  /home/sadmin/miniconda3/envs/pyroffi/bin/python -u -m ioc.bench2d.run --benchmark field --k-bumps 6 --n-contexts 8 --n-seeds 5 --n-timesteps 30 --n-iter 800 --budget 32000 --bump-width 0.45 --n-restarts 4 --out /home/sadmin/Work/pyroffi/ioc/data/bench2d/bench2d_regime_bw0.45_R4.json
+[field] K=8 d=2 T=30 M=8 budget=32000 solves
+  seed 0: implicit=7.40e-02  fd=3.32e-02  cmaes=9.91e-03  kkt=-1.86e-03  cioc=5.90e-05  random=5.04e-03
