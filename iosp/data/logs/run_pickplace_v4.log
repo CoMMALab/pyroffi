@@ -1,0 +1,13 @@
+--- pickplace_seed0 ---
+2026-08-31 08:21:26.194 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 08:21:27.059 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 14.8s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 08:33:38.327245 3829346 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 08:33:41.321739 3829263 slow_operation_alarm.cc:140] The operation took 2m2.994591507s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************

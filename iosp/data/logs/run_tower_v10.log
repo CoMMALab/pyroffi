@@ -1,0 +1,212 @@
+--- blocks3_seed0 ---
+2026-08-31 22:07:04.960 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 22:07:05.787 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 19.2s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+[demos] 178.1s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.156e-06
+[grad] dL/dtheta at z=0: [-9.1412850e-04  9.9783174e-05  2.0922218e-04  2.8119674e-02
+ -2.1424932e-02 -6.0896170e-03]
+[fit] test RMSE 0.00505  move_rel=1.115e+30 reduction=205.27x ok  fit_time=813.2s
+[time] wall=1200.1s  fit=813.2s
+[out] wrote iosp/data/results/tower/blocks3_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.07368     +0.0% vs uniform
+  tower IOSP fit                         0.00505    +93.1% vs uniform
+  oracle theta*                          0.00077    +98.9% vs uniform
+
+param_err (reported, NOT criterion): 0.0490
+  effort         0.0805    0.0757
+  smooth         0.2134    0.2057
+  clearance      0.1415    0.1248
+  orient         0.1060    0.1022
+  z_align        0.1630    0.1524
+  skeleton       0.2955    0.3392
+exit: 0
+--- blocks3_seed1 ---
+2026-08-31 22:27:21.806 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 22:27:22.618 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.4s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+[demos] 176.4s, shape (6, 22, 3)
+[sanity] loss(z_star) = 5.975e-07
+[grad] dL/dtheta at z=0: [ 0.0030994   0.00024095  0.00019289  0.01161093 -0.01144746 -0.00369671]
+[fit] test RMSE 0.00354  move_rel=1.301e+30 reduction=352.98x ok  fit_time=813.3s
+[time] wall=1197.7s  fit=813.3s
+[out] wrote iosp/data/results/tower/blocks3_seed1.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.16872     +0.0% vs uniform
+  tower IOSP fit                         0.00354    +97.9% vs uniform
+  oracle theta*                          0.00075    +99.6% vs uniform
+
+param_err (reported, NOT criterion): 0.0281
+  effort         0.0707    0.0757
+  smooth         0.2311    0.2057
+  clearance      0.1207    0.1248
+  orient         0.0995    0.1022
+  z_align        0.1471    0.1524
+  skeleton       0.3309    0.3392
+exit: 0
+--- blocks3_seed2 ---
+2026-08-31 22:47:36.102 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 22:47:36.881 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.3s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+[demos] 178.1s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.690e-06
+[grad] dL/dtheta at z=0: [ 0.00015239  0.00013417  0.00021159  0.0232444  -0.01816082 -0.00558173]
+E0831 23:11:56.056294  119325 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 23:12:23.333748  119201 slow_operation_alarm.cc:140] The operation took 2m27.277572864s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00364  move_rel=1.095e+00 reduction=174.05x ok  fit_time=812.1s
+[time] wall=1554.7s  fit=812.1s
+[out] wrote iosp/data/results/tower/blocks3_seed2.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.07392     +0.0% vs uniform
+  tower IOSP fit                         0.00364    +95.1% vs uniform
+  oracle theta*                          0.00088    +98.8% vs uniform
+
+param_err (reported, NOT criterion): 0.0412
+  effort         0.0792    0.0757
+  smooth         0.2286    0.2057
+  clearance      0.1148    0.1248
+  orient         0.1079    0.1022
+  z_align        0.1613    0.1524
+  skeleton       0.3084    0.3392
+exit: 0
+--- blocks5_seed0 ---
+2026-08-31 23:13:52.652 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 23:13:53.486 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.4s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=5  fit/test=6/6
+E0831 23:20:28.085680  134173 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 23:21:56.978229  134087 slow_operation_alarm.cc:140] The operation took 3m28.892642625s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1042.7s, shape (6, 22, 3)
+[sanity] loss(z_star) = 5.661e-07
+[grad] dL/dtheta at z=0: [ 1.8820872e-03 -4.3502947e-05  1.2901879e-04  1.2307507e-02
+ -8.9430651e-03 -5.3320462e-03]
+E0901 00:00:55.386767  134173 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0901 00:01:21.233709  134087 slow_operation_alarm.cc:140] The operation took 2m25.847039667s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00526  move_rel=9.209e-01 reduction=74.18x ok  fit_time=853.0s
+[time] wall=2916.1s  fit=853.0s
+[out] wrote iosp/data/results/tower/blocks5_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06517     +0.0% vs uniform
+  tower IOSP fit                         0.00526    +91.9% vs uniform
+  oracle theta*                          0.00081    +98.8% vs uniform
+
+param_err (reported, NOT criterion): 0.1048
+  effort         0.0608    0.0757
+  smooth         0.1920    0.2057
+  clearance      0.2196    0.1248
+  orient         0.0857    0.1022
+  z_align        0.1334    0.1524
+  skeleton       0.3085    0.3392
+exit: 0
+--- blocks5_seed1 ---
+2026-09-01 00:02:56.837 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-09-01 00:02:57.632 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.3s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=5  fit/test=6/6
+E0901 00:09:21.900319  170738 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0901 00:10:45.741110  170652 slow_operation_alarm.cc:140] The operation took 3m23.841199994s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1017.6s, shape (6, 22, 3)
+[sanity] loss(z_star) = 2.422e-07
+[grad] dL/dtheta at z=0: [ 2.1895249e-03 -2.2880754e-06  1.2034850e-04  8.3912304e-03
+ -6.2369010e-03 -4.4619138e-03]
+E0901 00:49:25.275840  170738 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0901 00:49:50.543699  170652 slow_operation_alarm.cc:140] The operation took 2m25.267934872s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00456  move_rel=1.112e+00 reduction=206.35x ok  fit_time=861.8s
+[time] wall=2881.0s  fit=861.8s
+[out] wrote iosp/data/results/tower/blocks5_seed1.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.17826     +0.0% vs uniform
+  tower IOSP fit                         0.00456    +97.4% vs uniform
+  oracle theta*                          0.00057    +99.7% vs uniform
+
+param_err (reported, NOT criterion): 0.0638
+  effort         0.0724    0.0757
+  smooth         0.2583    0.2057
+  clearance      0.0974    0.1248
+  orient         0.1027    0.1022
+  z_align        0.1534    0.1524
+  skeleton       0.3158    0.3392
+exit: 0
+--- blocks5_seed2 ---
+2026-09-01 00:51:25.689 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-09-01 00:51:26.461 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.9s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=5  fit/test=6/6
+E0901 00:57:51.549270  201298 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0901 00:59:19.697777  201212 slow_operation_alarm.cc:140] The operation took 3m28.14859149s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1001.3s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.209e-07
+[grad] dL/dtheta at z=0: [ 1.8033956e-03 -4.4389715e-05  1.1328973e-04  1.1486266e-02
+ -8.0138426e-03 -5.3447196e-03]
+E0901 01:36:39.031858  201298 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0901 01:37:01.888782  201212 slow_operation_alarm.cc:140] The operation took 2m22.857022079s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00189  move_rel=1.117e+00 reduction=724.96x ok  fit_time=853.1s
+[time] wall=2803.4s  fit=853.1s
+[out] wrote iosp/data/results/tower/blocks5_seed2.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06653     +0.0% vs uniform
+  tower IOSP fit                         0.00189    +97.2% vs uniform
+  oracle theta*                          0.00227    +96.6% vs uniform
+
+param_err (reported, NOT criterion): 0.0281
+  effort         0.0768    0.0757
+  smooth         0.1842    0.2057
+  clearance      0.1396    0.1248
+  orient         0.1015    0.1022
+  z_align        0.1490    0.1524
+  skeleton       0.3489    0.3392
+exit: 0
+=== tower done ===

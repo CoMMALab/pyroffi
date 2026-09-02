@@ -1,0 +1,38 @@
+experiment: stage2_ablation
+module: iosp.experiments.e4_three_stage
+description: "Fig 3: stage-2 seeding ablation — with vs without segment warm-start"
+
+defaults:
+  n_iters: 60
+  n_scenes: 6
+  n_steps: 40
+  n_starts: 8
+
+runs:
+  - name: seed0
+    args: {seed: 0}
+    out: iosp/data/results/ablation/seed0.json
+  - name: seed1
+    args: {seed: 1}
+    out: iosp/data/results/ablation/seed1.json
+  - name: seed2
+    args: {seed: 2}
+    out: iosp/data/results/ablation/seed2.json
+  - name: seed3
+    args: {seed: 3}
+    out: iosp/data/results/ablation/seed3.json
+  - name: seed4
+    args: {seed: 4}
+    out: iosp/data/results/ablation/seed4.json
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"
+
+figures:
+  - name: fig3_ablation
+    renderer: iosp.viz.fig_ablation
+    input: iosp/data/results/ablation/
+    out: iosp/figures/fig3_ablation.pdf

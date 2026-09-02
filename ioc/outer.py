@@ -19,8 +19,10 @@ especially at high demonstration noise, where the outer landscape is rough.  The
 loss at z_t is already computed by the gradient function, so this is free.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 
 
 def adam(
@@ -33,8 +35,9 @@ def adam(
     solves_per_step=0,
     max_steps=100_000,
     trace_best=False,
+    weight_decay=0.0,
 ):
-    """Adam on z, returning (best_z, trace).
+    """AdamW (`optax.adamw`) on z, returning (best_z, trace).
 
     Give either `n_steps` (fixed step count) or `budget_solves` (run until the
     next step would exceed a solve budget, which is how methods with different
@@ -45,12 +48,18 @@ def adam(
     `trace_best` records the running best rather than the current loss; the two
     trace conventions are kept because the robot experiments plot per-step loss
     curves and the 2D benchmarks read "solves to reach L < tol" off the trace.
+
+    `weight_decay=0.0` (the default, matching every existing call site) makes
+    this identical to plain Adam; pass a positive value to get AdamW's decoupled
+    decay.
     """
     if (n_steps is None) == (budget_solves is None):
         raise ValueError("pass exactly one of n_steps / budget_solves")
 
-    z, m, v = z0, jnp.zeros_like(z0), jnp.zeros_like(z0)
-    best_val, best_z, trace, used, t = np.inf, z0, [], 0, 0
+    opt = optax.adamw(lr, weight_decay=weight_decay)
+    z, opt_state = z0, opt.init(z0)
+    best_val, best_z = jnp.asarray(np.inf, dtype=z0.dtype), z0
+    trace_vals, trace_used, used, t = [], [], 0, 0
     while True:
         if n_steps is not None:
             if t >= n_steps:
@@ -60,18 +69,57 @@ def adam(
         t += 1
         val, g = loss_and_grad(z)
         used += solves_per_step
-        fval = float(val)
-        if fval < best_val:
-            best_val, best_z = fval, z
-        trace.append((used, best_val if trace_best else fval))
-        m = 0.9 * m + 0.1 * g
-        v = 0.999 * v + 0.001 * g**2
-        mh, vh = m / (1 - 0.9**t), v / (1 - 0.999**t)
-        z = z - lr * mh / (jnp.sqrt(vh) + 1e-8)
+        # best tracked on device.  Measured 1.00x against the old per-step
+        # float(val) on the robot problem -- the sync waits on a solve that has
+        # to happen regardless -- so this is hygiene, not a speedup.  It is
+        # kept because it makes the trace one transfer instead of n_steps.
+        better = val < best_val
+        best_val = jnp.where(better, val, best_val)
+        best_z = jnp.where(better, z, best_z)
+        trace_vals.append(best_val if trace_best else val)
+        trace_used.append(used)
+        updates, opt_state = opt.update(g, opt_state, z)
+        z = optax.apply_updates(z, updates)
+    # single device->host transfer for the whole trace
+    vals = np.asarray(jnp.stack(trace_vals)) if trace_vals else np.zeros(0)
+    trace = list(zip(trace_used, (float(v) for v in vals)))
     return best_z, trace
 
 
-def fd_grad_fn(loss, eps):
+def adam_scan(loss_and_grad, z0, *, lr, n_steps, weight_decay=0.0):
+    """`lax.scan` form of `adam`, so a whole bilevel fit is one vmappable call.
+
+    `adam` above cannot be vmapped: it is a Python loop that appends to a host
+    list and calls `float()` on the trace.  This version carries (z, opt_state)
+    through a fixed-length scan with no host interaction, so
+    `jax.vmap(adam_scan, ...)` runs many INDEPENDENT fits -- different cost
+    seeds, different IK branches -- as one batched program on one device.
+
+    Returns (z_final, losses) with `losses` of shape (n_steps,), the loss AT
+    each iterate.  Deliberately NOT best-of-trajectory: with many candidates
+    fitted in parallel the selection has to happen once, at the end, over
+    converged results, and returning a per-candidate running best here would
+    smuggle a hard argmin back inside the batched program -- exactly the
+    discontinuity that multi-candidate batching exists to avoid.  Callers pick
+    the winner themselves, on TRAINING loss (selecting on held-out loss is
+    test-set leakage).
+    """
+    import optax as _optax
+
+    opt = _optax.adamw(lr, weight_decay=weight_decay)
+
+    def step(carry, _):
+        z, st = carry
+        val, g = loss_and_grad(z)
+        upd, st = opt.update(g, st, z)
+        return (_optax.apply_updates(z, upd), st), val
+
+    (z_final, _), losses = jax.lax.scan(step, (z0, opt.init(z0)), None,
+                                        length=n_steps)
+    return z_final, losses
+
+
+def fd_grad_fn(loss, eps, *, batched=True):
     """Forward finite differences: a (value, gradient) function costing K+1 solves.
 
     This is the baseline the whole study is measured against.  It treats the
@@ -80,12 +128,26 @@ def fd_grad_fn(loss, eps):
     It is also the reference used to *validate* the adjoint, with one caveat
     that recurs throughout: FD cannot validate a gradient on a float32 solver,
     because the solver's noise floor (~1e-6) swamps an eps-sized probe.
+
+
+    The K+1 probes are independent solves, so they are evaluated as ONE
+    batched call rather than a Python loop.  That does not change the method's
+    cost in solves -- still K+1 per step, which is the currency every
+    comparison here is stated in -- but it stops the *wall-clock* from scaling
+    with K for purely implementation reasons.  Pass `batched=False` for a loss
+    that cannot be `vmap`ped.
     """
 
     def grad_fn(z):
-        val = loss(z)
-        g = [(loss(z.at[k].add(eps)) - val) / eps for k in range(z.shape[0])]
-        return val, jnp.stack(g)
+        if not batched:
+            val = loss(z)
+            g = [(loss(z.at[k].add(eps)) - val) / eps for k in range(z.shape[0])]
+            return val, jnp.stack(g)
+        # row 0 is the base point, rows 1..K the coordinate perturbations
+        Z = jnp.broadcast_to(z, (z.shape[0] + 1, z.shape[0])).at[
+            jnp.arange(1, z.shape[0] + 1), jnp.arange(z.shape[0])].add(eps)
+        vals = jax.vmap(loss)(Z)
+        return vals[0], (vals[1:] - vals[0]) / eps
 
     return grad_fn
 
@@ -100,6 +162,7 @@ def cma_es(
     budget_solves=None,
     solves_per_eval=1,
     trace_best=False,
+    batched_eval=True,
 ):
     """Compact (mu/mu_w, lambda)-CMA-ES; avoids a new dependency on `cma`.
 
@@ -152,7 +215,11 @@ def cma_es(
         d = np.sqrt(np.maximum(d, 1e-14))
         Y = rng.standard_normal((lam, n)) @ (B * d).T
         X = mean + sigma * Y
-        fs = np.array([float(loss(jnp.asarray(x))) for x in X])
+        # whole population in one batched call: the candidates are independent
+        # solves, and evaluating them one at a time also forced a host sync per
+        # candidate.  Values are unchanged; only the dispatch differs.
+        fs = np.asarray(jax.vmap(loss)(jnp.asarray(X))) if batched_eval else \
+            np.array([float(loss(jnp.asarray(x))) for x in X])
         used += lam * solves_per_eval
         order = np.argsort(fs)
         if fs[order[0]] < best_val:

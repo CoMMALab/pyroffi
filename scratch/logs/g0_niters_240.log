@@ -1,0 +1,29 @@
+2026-08-28 16:35:58.629 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 16:35:59.460 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+E0828 17:22:58.331988 1650476 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 17:24:49.682274 1650357 slow_operation_alarm.cc:140] The operation took 3m51.350370612s
+
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+  [path A (parametric)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=1.505e-05 over 2 scenes [1.5e-05 7.1e-06]
+    grasp      worst=9.264e-06 over 2 scenes [9.3e-06 9.3e-06]
+    transport  worst=8.072e-06 over 2 scenes [7.4e-06 8.1e-06]
+    place      worst=1.437e-05 over 2 scenes [1.4e-05 1.4e-05]
+
+### n_iters=240  (build 3161s)
+  [parametric n_iters=240] G0 loss-vs-rmse^2 consistency:
+    u0           loss=2.516015e-03  rmse^2=2.502776e-03  rel=5.262e-03
+    ||u||=1 #1   loss=2.950453e-03  rmse^2=2.957084e-03  rel=2.247e-03
+    ||u||=1 #2   loss=4.751672e-03  rmse^2=4.698952e-03  rel=1.109e-02  <-- INCONSISTENT
+    ||u||=1 #3   loss=1.297837e-03  rmse^2=1.298909e-03  rel=8.261e-04
+    ||u||=1 #4   loss=5.625170e-03  rmse^2=5.624701e-03  rel=8.342e-05
+    ||u||=1 #5   loss=3.540420e-03  rmse^2=3.536284e-03  rel=1.168e-03
+  [parametric n_iters=240] G0 FAIL: worst rel gap 1.109e-02 > 1e-02 -- every number below this line is untrustworthy
+### n_iters=240: worst rel gap 1.109e-02
+2026-08-28 18:29:47.068 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 18:29:47.075 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.

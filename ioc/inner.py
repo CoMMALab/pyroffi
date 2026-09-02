@@ -5,8 +5,8 @@ Theory
 The inner problem is a weighted nonlinear least-squares problem in the interior
 waypoints x, parameterized by the cost weights theta and a context c:
 
-    J_theta(x, c) = sum_k (theta_k / s_k) * || r_k(x, c) ||^2,
-    x*(theta, c)  = argmin_x J_theta(x, c).
+    C_theta(x, c) = sum_k (theta_k / s_k) * || r_k(x, c) ||^2,
+    x*(theta, c)  = argmin_x C_theta(x, c).
 
 It is solved by damped Gauss-Newton (Levenberg-Marquardt): each iteration builds
 g = 2 J^T r and H_gn = 2 J^T J from the whitened, theta-weighted residual stack,
@@ -22,11 +22,11 @@ this module implements the two that go through the solver:
 **Implicit adjoint** (`solve_implicit`).  At a stationary point the solution is
 characterized by
 
-    F(x*, theta) = grad_x J_theta(x*, c) = 0.
+    F(x*, theta) = grad_x C_theta(x*, c) = 0.
 
 Differentiating that identity in theta gives the implicit function theorem,
 
-    H dx*/dtheta + B = 0,   H = grad^2_xx J,  B = grad^2_x,theta J
+    H dx*/dtheta + B = 0,   H = grad^2_xx C,  B = grad^2_x,theta C
     =>  dx*/dtheta = -H^-1 B,
 
 so the reverse-mode cotangent of a downstream loss is  -B^T H^-T g_out.  The
@@ -54,7 +54,7 @@ Curvature choices
 -----------------
 `adjoint_hessian` selects the H used by the adjoint:
 
-  "true"  exact grad^2_xx J.  Most accurate, but needs *second* derivatives of
+  "true"  exact grad^2_xx C.  Most accurate, but needs *second* derivatives of
           every feature.
   "gn"    the Gauss-Newton J^T J.  First derivatives only, so it is the only
           option when a feature comes from an FFI kernel that supports a single
@@ -91,14 +91,14 @@ class InnerSolver:
 
     Attributes
     ----------
-    cost           J_theta(x, theta, ctx), whitened by the calibrated scales.
-    grad_x         grad_x J; the object Inverse KKT asserts is zero at a demo.
+    cost           C_theta(x, theta, ctx), whitened by the calibrated scales.
+    grad_x         grad_x C; the object Inverse KKT asserts is zero at a demo.
     gn_system      (g, H_gn) at a point; the PSD curvature CIOC integrates over.
     features       phi(x, ctx) in R^K, unweighted, whitened.
     solve          the raw forward solve (no custom differentiation rule).
     solve_implicit forward solve with the implicit-adjoint VJP attached.
     solve_unrolled forward solve differentiated by truncated unrolling.
-    stationarity   ||grad_x J|| at the returned solution; the screening statistic.
+    stationarity   ||grad_x C|| at the returned solution; the screening statistic.
     """
 
     cost: Callable
@@ -234,7 +234,7 @@ def make_inner_solver(
         return unrolled_forward_solver(x0, lambda x: cost(x, theta, ctx))
 
     def stationarity(x0, theta, ctx):
-        """||grad_x J|| at the solution -- implicit diff assumes this is ~0."""
+        """||grad_x C|| at the solution -- implicit diff assumes this is ~0."""
         return jnp.linalg.norm(grad_x(solve(x0, theta, ctx), theta, ctx))
 
     @jax.custom_vjp
@@ -257,7 +257,7 @@ def make_inner_solver(
         # needs, so it biases H^-1 and corrupts the adjoint.
         H = _damped(H, adjoint_ridge)
         # dx*/dtheta = -H^-1 B, so the cotangent is -B^T H^-T g_out, and B^T u
-        # is one VJP of grad_x J with respect to theta.
+        # is one VJP of grad_x C with respect to theta.
         u = jnp.linalg.solve(H.T, g_out)
         _, vjp_theta = jax.vjp(lambda th: grad_x(xs, th, ctx), theta)
         (g_theta,) = vjp_theta(u)

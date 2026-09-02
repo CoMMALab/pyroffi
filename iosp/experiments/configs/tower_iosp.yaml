@@ -1,0 +1,34 @@
+experiment: tower_iosp
+module: iosp.experiments.e9_tower
+description: "IOSP on SPaSM block stacking: recover trajopt costs from sequential stacking demos"
+
+defaults:
+  n_iters: 60
+  n_steps: 40
+  n_starts: 4
+
+runs:
+  - name: blocks3_seed0
+    args: {stack_level: 3, seed: 0}
+    out: iosp/data/results/tower/blocks3_seed0.npz
+  - name: blocks3_seed1
+    args: {stack_level: 3, seed: 1}
+    out: iosp/data/results/tower/blocks3_seed1.npz
+  - name: blocks3_seed2
+    args: {stack_level: 3, seed: 2}
+    out: iosp/data/results/tower/blocks3_seed2.npz
+  - name: blocks5_seed0
+    args: {stack_level: 5, seed: 0}
+    out: iosp/data/results/tower/blocks5_seed0.npz
+  - name: blocks5_seed1
+    args: {stack_level: 5, seed: 1}
+    out: iosp/data/results/tower/blocks5_seed1.npz
+  - name: blocks5_seed2
+    args: {stack_level: 5, seed: 2}
+    out: iosp/data/results/tower/blocks5_seed2.npz
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

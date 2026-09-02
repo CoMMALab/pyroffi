@@ -1,0 +1,71 @@
+{
+  "optimizer_correctness": {
+    "axis": "optimizer_correctness",
+    "basis": "k3",
+    "K": 3,
+    "names": [
+      "effort",
+      "collision",
+      "smooth"
+    ],
+    "newton_sweep": [
+      {
+        "n_newton": 5,
+        "stationarity_max": 0.08842038159220367,
+        "stationarity_med": 0.028652385003051124,
+        "param_err": 0.06936596871775727,
+        "e_demo": 0.0013375230534505818
+      },
+      {
+        "n_newton": 10,
+        "stationarity_max": 0.043613514643352454,
+        "stationarity_med": 0.015415012178379555,
+        "param_err": 0.17120939052287942,
+        "e_demo": 0.00831091613130767
+      },
+      {
+        "n_newton": 20,
+        "stationarity_max": 0.014466478328755606,
+        "stationarity_med": 0.005869437698450919,
+        "param_err": 0.23692926818492835,
+        "e_demo": 0.014811910701193604
+      },
+      {
+        "n_newton": 40,
+        "stationarity_max": 0.005195382180450158,
+        "stationarity_med": 0.0010511702329052727,
+        "param_err": 0.08214124023939925,
+        "e_demo": 0.005071399899422391
+      },
+      {
+        "n_newton": 80,
+        "stationarity_max": 0.0007172337107107511,
+        "stationarity_med": 3.3363119058552146e-05,
+        "param_err": 0.292930084672113,
+        "e_demo": 0.009574285984993089
+      }
+    ],
+    "fd_check": [
+      {
+        "eps": 0.01,
+        "cos": -0.18979559406132648,
+        "rel_err": 3.7366701125575292
+      },
+      {
+        "eps": 0.001,
+        "cos": -0.20561137064245597,
+        "rel_err": 14.146119681024333
+      },
+      {
+        "eps": 0.0001,
+        "cos": -0.28484028821908913,
+        "rel_err": 228.1232738462105
+      },
+      {
+        "eps": 1e-05,
+        "cos": -0.36223091450002765,
+        "rel_err": 3833.1222648446774
+      }
+    ]
+  }
+}

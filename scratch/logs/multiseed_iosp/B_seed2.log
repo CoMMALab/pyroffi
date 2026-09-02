@@ -1,0 +1,78 @@
+2026-08-29 09:30:42.804 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-29 09:30:43.699 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 1308s  B=3 branches x S=3 starts = 9 candidates  space=joint  scene_b_scale=2.0
+E0829 10:13:34.228403 2111746 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0829 10:14:37.855092 2111645 slow_operation_alarm.cc:140] The operation took 3m3.626825489s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0829 11:27:19.694498 2111746 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0829 11:28:16.526753 2111645 slow_operation_alarm.cc:140] The operation took 2m56.832330664s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[rec] step   0/40  train(min)=0.09619 held@trainargmin=0.08943  |  ee_fit=0.02598 ee_held=0.02368  spread=28.7x
+[rec] step   1/40  train(min)=0.08377 held@trainargmin=0.07772  |  ee_fit=0.02301 ee_held=0.01981  spread=32.8x
+[rec] step   2/40  train(min)=0.07379 held@trainargmin=0.07695  |  ee_fit=0.02136 ee_held=0.01761  spread=32.9x
+[rec] step   3/40  train(min)=0.06579 held@trainargmin=0.06820  |  ee_fit=0.02102 ee_held=0.01606  spread=37.0x
+[rec] step   4/40  train(min)=0.05797 held@trainargmin=0.05743  |  ee_fit=0.02132 ee_held=0.01463  spread=43.8x
+[rec] step   5/40  train(min)=0.04963 held@trainargmin=0.04295  |  ee_fit=0.02204 ee_held=0.01624  spread=58.4x
+[rec] step   6/40  train(min)=0.04443 held@trainargmin=0.07996  |  ee_fit=0.02267 ee_held=0.01762  spread=44.8x
+[rec] step   7/40  train(min)=0.03892 held@trainargmin=0.04903  |  ee_fit=0.02212 ee_held=0.01716  spread=50.8x
+[rec] step   8/40  train(min)=0.03458 held@trainargmin=0.04416  |  ee_fit=0.02137 ee_held=0.01764  spread=56.1x
+[rec] step   9/40  train(min)=0.03148 held@trainargmin=0.04906  |  ee_fit=0.01865 ee_held=0.01767  spread=59.3x
+[rec] step  10/40  train(min)=0.02661 held@trainargmin=0.02914  |  ee_fit=0.01650 ee_held=0.01261  spread=84.7x
+[rec] step  11/40  train(min)=0.02479 held@trainargmin=0.05008  |  ee_fit=0.01477 ee_held=0.01354  spread=86.5x
+[rec] step  12/40  train(min)=0.02539 held@trainargmin=0.02100  |  ee_fit=0.01012 ee_held=0.00984  spread=116.9x
+[rec] step  13/40  train(min)=0.02067 held@trainargmin=0.01669  |  ee_fit=0.00866 ee_held=0.00873  spread=146.7x
+[rec] step  14/40  train(min)=0.02057 held@trainargmin=0.04988  |  ee_fit=0.00575 ee_held=0.00765  spread=65.2x
+[rec] step  15/40  train(min)=0.01700 held@trainargmin=0.03473  |  ee_fit=0.00444 ee_held=0.00630  spread=79.8x
+[rec] step  16/40  train(min)=0.01694 held@trainargmin=0.01535  |  ee_fit=0.00375 ee_held=0.00531  spread=158.3x
+[rec] step  17/40  train(min)=0.01950 held@trainargmin=0.02739  |  ee_fit=0.00446 ee_held=0.01086  spread=88.5x
+[rec] step  18/40  train(min)=0.01979 held@trainargmin=0.03273  |  ee_fit=0.00560 ee_held=0.01271  spread=73.9x
+[rec] step  19/40  train(min)=0.02559 held@trainargmin=0.02222  |  ee_fit=0.00878 ee_held=0.00976  spread=108.8x
+[rec] step  20/40  train(min)=0.02367 held@trainargmin=0.03101  |  ee_fit=0.00755 ee_held=0.01198  spread=77.8x
+[rec] step  21/40  train(min)=0.02143 held@trainargmin=0.02652  |  ee_fit=0.00723 ee_held=0.01031  spread=90.8x
+[rec] step  22/40  train(min)=0.02335 held@trainargmin=0.02131  |  ee_fit=0.00512 ee_held=0.00938  spread=112.8x
+[rec] step  23/40  train(min)=0.02193 held@trainargmin=0.02385  |  ee_fit=0.00490 ee_held=0.00757  spread=100.6x
+[rec] step  24/40  train(min)=0.02039 held@trainargmin=0.02665  |  ee_fit=0.00639 ee_held=0.01020  spread=89.9x
+[rec] step  25/40  train(min)=0.02012 held@trainargmin=0.02474  |  ee_fit=0.00741 ee_held=0.00811  spread=96.1x
+[rec] step  26/40  train(min)=0.01732 held@trainargmin=0.03017  |  ee_fit=0.00721 ee_held=0.01176  spread=79.0x
+[rec] step  27/40  train(min)=0.01638 held@trainargmin=0.02607  |  ee_fit=0.00755 ee_held=0.01116  spread=91.5x
+[rec] step  28/40  train(min)=0.01546 held@trainargmin=0.03561  |  ee_fit=0.00789 ee_held=0.01567  spread=79.2x
+[rec] step  29/40  train(min)=0.01481 held@trainargmin=0.03723  |  ee_fit=0.00806 ee_held=0.01661  spread=77.4x
+[rec] step  30/40  train(min)=0.01390 held@trainargmin=0.02551  |  ee_fit=0.00785 ee_held=0.00897  spread=93.5x
+[rec] step  31/40  train(min)=0.01643 held@trainargmin=0.03372  |  ee_fit=0.00852 ee_held=0.01536  spread=78.8x
+[rec] step  32/40  train(min)=0.01276 held@trainargmin=0.02416  |  ee_fit=0.00694 ee_held=0.00911  spread=98.6x
+[rec] step  33/40  train(min)=0.01277 held@trainargmin=0.04073  |  ee_fit=0.00687 ee_held=0.01267  spread=72.3x
+[rec] step  34/40  train(min)=0.01154 held@trainargmin=0.02117  |  ee_fit=0.00553 ee_held=0.00865  spread=112.3x
+[rec] step  35/40  train(min)=0.01275 held@trainargmin=0.16683  |  ee_fit=0.00567 ee_held=0.04277  spread=91.1x
+[rec] step  36/40  train(min)=0.01152 held@trainargmin=0.04984  |  ee_fit=0.00429 ee_held=0.01048  spread=93.0x
+[rec] step  37/40  train(min)=0.01293 held@trainargmin=0.02232  |  ee_fit=0.00456 ee_held=0.00707  spread=106.7x
+[rec] step  38/40  train(min)=0.01145 held@trainargmin=0.02380  |  ee_fit=0.00329 ee_held=0.00624  spread=99.6x
+[rec] step  39/40  train(min)=0.01166 held@trainargmin=0.02172  |  ee_fit=0.00325 ee_held=0.00739  spread=128.0x
+[rec] step  40/40  train(min)=0.01241 held@trainargmin=0.02344  |  ee_fit=0.00352 ee_held=0.00702  spread=101.3x
+[rec] wrote scratch/viz/multiseed/B_seed2.npz
+
+ cand  branch  start     train      held    ee_fit   ee_held
+    0       0      0   0.01241   0.02344   0.00352   0.00702  <- winner (train argmin)
+    1       0      1   0.01733   0.03463   0.00573   0.00684
+    2       0      2   0.03636   0.02645   0.01213   0.01211
+    3       1      0   0.09322   2.37406   0.01682   0.29486
+    4       1      1   0.09169   0.03208   0.01547   0.01051
+    5       1      2   0.09329   0.03768   0.01985   0.00812
+    6       2      0   0.30209   0.16651   0.07341   0.04901
+    7       2      1   0.31050   0.16433   0.07734   0.04817
+    8       2      2   0.29356   0.18232   0.07090   0.05112
+
+selected on training loss: candidate 0 (branch 0, start 0)
+  EE held-out RMSE = 0.00702
+held-out spread across candidates: 101.3x (0.02344 .. 2.37406)

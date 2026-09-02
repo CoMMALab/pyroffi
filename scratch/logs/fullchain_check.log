@@ -1,0 +1,7 @@
+2026-08-28 22:10:33.293 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 22:10:34.110 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+full-chain loss      : 0.6454465985298157
+full-chain grad norm : 0.02580181695520878
+all finite           : True
+theta_ik block nonzero: True [0.002608 0.002609]
+RESULT: PASS

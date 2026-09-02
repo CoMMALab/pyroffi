@@ -1,0 +1,10 @@
+{
+  "config_hash": "7c5eb39a1fac",
+  "git_sha": "017498d501d632c71cc740a4662adbc5318be4e5",
+  "timestamp": "2026-08-30T05:22:45-0400",
+  "gpu_id": "0",
+  "wall_clock_seconds": 965.7,
+  "returncode": 0,
+  "run": "joint_seed3",
+  "out": "iosp/data/results/multistart/joint_seed3.npz"
+}

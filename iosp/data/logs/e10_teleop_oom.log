@@ -1,0 +1,128 @@
+Unable to resolve filename: meshes/robots/fr3/visual/link0.dae
+Can't find meshes/robots/fr3/visual/link0.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link1.dae
+Can't find meshes/robots/fr3/visual/link1.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link2.dae
+Can't find meshes/robots/fr3/visual/link2.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link3.dae
+Can't find meshes/robots/fr3/visual/link3.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link4.dae
+Can't find meshes/robots/fr3/visual/link4.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link5.dae
+Can't find meshes/robots/fr3/visual/link5.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link6.dae
+Can't find meshes/robots/fr3/visual/link6.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link7.dae
+Can't find meshes/robots/fr3/visual/link7.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/hand.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/hand.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+2026-09-02 10:05:58.108 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 10:05:58.424 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 10:05:59.777 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 37 disabled collision pairs from SRDF
+2026-09-02 10:06:00.549 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 26 links and 288 active self-collision pairs, using spherical collision models.
+[build] 10 episodes (8 fit / 2 held out); standoff prior grasp 0.1051 m, place 0.2463 m
+    fit   ep_20260902_093953
+    fit   ep_20260902_094034
+    fit   ep_20260902_094106
+    fit   ep_20260902_094218
+    fit   ep_20260902_094301
+    fit   ep_20260902_094334
+    fit   ep_20260902_094436
+    fit   ep_20260902_094535
+    held  ep_20260902_094627
+    held  ep_20260902_094649
+[build] 0s  B=4 branches x S=3 starts = 12 candidates, 40 outer steps each
+W0902 10:26:55.492968  423466 bfc_allocator.cc:317] Allocator (GPU_0_bfc) ran out of memory trying to allocate 11.33GiB with freed_by_count=0. The caller indicates that this is not a failure, but this may mean that there could be performance gains if more memory were available.
+W0902 10:27:16.165540  423476 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 11.32GiB (rounded to 12152125440)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:27:16.165848  423476 bfc_allocator.cc:525] *_******************_______________________________________________________________________________*
+E0902 10:27:25.181839  423391 config_assigner.cc:383] Could not get config for HLO: %input_reduce_fusion.527 = f32[120,147,26,23,18,4]{1,5,4,3,2,0} fusion(%wrapped_scatter.528, %constant.606107.0, %loop_transpose_fusion.26), kind=kInput, calls=
+(param_0.607139: f32[120,147,1,26,23,18,4,4], param_1.702874: f32[4], param_2.578837: f32[120,26,23,4]) -> f32[120,147,26,23,18,4] {
+  %param_0.607139 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} parameter(0)
+  %param_2.578837 = f32[120,26,23,4]{3,2,1,0} parameter(2)
+  %broadcast_in_dim.165269.10 = f32[120,26,23,18,4]{4,3,2,1,0} broadcast(%param_2.578837), dimensions={0,1,2,4}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(jvp(jit(at_config)))))))/vmap(jit(multiply))/jit(apply)/broadcast_in_dim" stack_frame_id=711}
+  %param_1.702874 = f32[4]{0} parameter(1)
+  %mul.130356.58 = f32[120,26,23,18,4]{4,3,2,1,0} broadcast(%param_1.702874), dimensions={4}, metadata={op_name="jit(<lambda>)/jvp(vmap())/checkpoint/jvp(jit(at_config))/vmap(jit(multiply))/jit(apply)/jit(inverse)/mul" stack_frame_id=2022}
+  %mul.135451.9 = f32[120,26,23,18,4]{4,3,2,1,0} multiply(%broadcast_in_dim.165269.10, %mul.130356.58), metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(jvp(jit(at_config)))))))/vmap(jit(multiply))/jit(apply)/jit(inverse)/mul" stack_frame_id=711}
+  %broadcast.479485.3 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} broadcast(%mul.135451.9), dimensions={0,3,4,5,7}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/...i,...j->...ij/dot_general" stack_frame_id=711}
+  %multiply.20998.3 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} multiply(%param_0.607139, %broadcast.479485.3), metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/...i,...j->...ij/dot_general" stack_frame_id=711}
+  %bitcast.300325.1 = f32[120,147,26,23,18,4,4]{6,5,4,3,2,1,0} bitcast(%multiply.20998.3)
+  %constant.4678.3571 = f32[] constant(0)
+  ROOT %reduce.25048.1 = f32[120,147,26,23,18,4]{1,5,4,3,2,0} reduce(%bitcast.300325.1, %constant.4678.3571), dimensions={6}, to_apply=
+  (reduce_sum.71373: f32[], reduce_sum.71374: f32[]) -> f32[] {
+    %reduce_sum.71373 = f32[] parameter(0), metadata={op_name="reduce_sum"}
+    %reduce_sum.71374 = f32[] parameter(1), metadata={op_name="reduce_sum"}
+    ROOT %reduce_sum.71375.0 = f32[] add(%reduce_sum.71373, %reduce_sum.71374), metadata={op_name="jit(<lambda>)/jvp()/reduce_sum" stack_frame_id=10}
+  }, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/...i,...j->...ij/dot_general" stack_frame_id=711}
+}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/...i,...j->...ij/dot_general" stack_frame_id=711}. Status: INTERNAL: Autotuning failed for HLO: %input_reduce_fusion.527 = f32[120,147,26,23,18,4]{1,5,4,3,2,0} fusion(%wrapped_scatter.528, %constant.606107.0, %loop_transpose_fusion.26), kind=kInput, calls=%fused_reduce.854, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/...i,...j->...ij/dot_general" stack_frame_id=711}. Failed to profile configs: Out of memory while trying to allocate 11.33GiB.
+W0902 10:27:26.166212  423476 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 11.32GiB (rounded to 12152125440)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:27:26.166484  423476 bfc_allocator.cc:525] *_******************_______________________________________________________________________________*
+E0902 10:27:26.166897  423391 config_assigner.cc:383] Could not get config for HLO: %input_transpose_fusion.12 = f32[16,26,23,18,120,147,1,1,1]{8,7,6,5,4,3,2,1,0} fusion(%constant.606025.0, %loop_add_fusion.1018), kind=kInput, calls=
+(param_0.119812: f32[4,4], param_1.129800: f32[120,26,23,18,1,4,147]) -> f32[16,26,23,18,120,147,1,1,1] {
+  %param_0.119812 = f32[4,4]{1,0} parameter(0)
+  %mul.135526.7 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} broadcast(%param_0.119812), dimensions={6,7}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/mul" stack_frame_id=711}
+  %param_1.129800 = f32[120,26,23,18,1,4,147]{6,5,4,3,2,1,0} parameter(1)
+  %bitcast.206798.3 = f32[120,26,23,18,4,147]{5,4,3,2,1,0} bitcast(%param_1.129800)
+  %transpose.46071.3 = f32[120,147,26,23,18,4]{5,4,3,2,1,0} transpose(%bitcast.206798.3), dimensions={0,5,1,2,3,4}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/transpose" stack_frame_id=711}
+  %broadcast_in_dim.165318.1 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} broadcast(%transpose.46071.3), dimensions={0,1,3,4,5,6}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/broadcast_in_dim" stack_frame_id=711}
+  %mul.135543.3 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} multiply(%mul.135526.7, %broadcast_in_dim.165318.1), metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/mul" stack_frame_id=711}
+  %bitcast.206801.1 = f32[120,147,1,26,23,18,16,1,1]{8,7,6,5,4,3,2,1,0} bitcast(%mul.135543.3)
+  ROOT %transpose.47077.1 = f32[16,26,23,18,120,147,1,1,1]{8,7,6,5,4,3,2,1,0} transpose(%bitcast.206801.1), dimensions={6,3,4,5,0,1,2,7,8}
+}. Status: INTERNAL: Autotuning failed for HLO: %input_transpose_fusion.12 = f32[16,26,23,18,120,147,1,1,1]{8,7,6,5,4,3,2,1,0} fusion(%constant.606025.0, %loop_add_fusion.1018), kind=kInput, calls=%fused_transpose.37. Failed to pick best config: All configs failed during profiling.
+Failures (2):
+EXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 11.32GiB. [tf-allocator-allocation-error='']
+EXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 11.32GiB. [tf-allocator-allocation-error='']
+W0902 10:27:36.891904  423467 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 11.32GiB (rounded to 12152125440)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:27:36.892254  423467 bfc_allocator.cc:525] *__________________________________________________________________________________________________*
+W0902 10:27:46.892698  423467 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 11.32GiB (rounded to 12152125440)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:27:46.892911  423467 bfc_allocator.cc:525] *__________________________________________________________________________________________________*
+E0902 10:27:47.706215  423391 config_assigner.cc:383] Could not get config for HLO: %input_transpose_fusion.11 = f32[16,26,23,120,147,1,1,18,1]{8,7,6,5,4,3,2,1,0} fusion(%constant.606025.0), kind=kInput, calls=
+(param_0.119811: f32[4,4]) -> f32[16,26,23,120,147,1,1,18,1] {
+  %param_0.119811 = f32[4,4]{1,0} parameter(0)
+  %mul.135526.5 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} broadcast(%param_0.119811), dimensions={6,7}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/mul" stack_frame_id=711}
+  %constant.4678.13957 = f32[] constant(0)
+  %broadcast.510907.3 = f32[120,147,1,26,23,18,4]{5,4,2,3,1,0,6} broadcast(%constant.4678.13957), dimensions={}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(from_rotation_and_translation)/split" stack_frame_id=711}
+  %bitcast.206813.3 = f32[4,120,147,26,23,18]{5,4,3,2,1,0} bitcast(%broadcast.510907.3)
+  %transpose.46072.3 = f32[120,147,26,23,18,4]{5,4,3,2,1,0} transpose(%bitcast.206813.3), dimensions={1,2,3,4,5,0}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(from_rotation_and_translation)/split" stack_frame_id=711}
+  %broadcast_in_dim.165327.1 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} broadcast(%transpose.46072.3), dimensions={0,1,3,4,5,6}, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(multiply)/broadcast_in_dim" stack_frame_id=711}
+  %mul.135551.3 = f32[120,147,1,26,23,18,4,4]{7,6,5,4,3,2,1,0} multiply(%mul.135526.5, %broadcast_in_dim.165327.1), metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(multiply)/mul" stack_frame_id=711}
+  %bitcast.206816.1 = f32[120,147,1,26,23,18,16,1,1]{8,7,6,5,4,3,2,1,0} bitcast(%mul.135551.3)
+  ROOT %transpose.47078.1 = f32[16,26,23,120,147,1,1,18,1]{8,7,6,5,4,3,2,1,0} transpose(%bitcast.206816.1), dimensions={6,3,4,0,1,2,8,5,7}
+}. Status: INTERNAL: Autotuning failed for HLO: %input_transpose_fusion.11 = f32[16,26,23,120,147,1,1,18,1]{8,7,6,5,4,3,2,1,0} fusion(%constant.606025.0), kind=kInput, calls=%fused_transpose.36. Failed to pick best config: All configs failed during profiling.
+Failures (2):
+EXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 11.32GiB. [tf-allocator-allocation-error='']
+EXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 11.32GiB. [tf-allocator-allocation-error='']
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e10_teleop.py", line 231, in <module>
+    main(demo_dir=a.demo_dir, n_fit=a.n_fit, seed=a.seed, n_iters=a.n_iters,
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e10_teleop.py", line 205, in main
+    res["multistart"] = run_multistart(
+                        ^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e10_teleop.py", line 106, in run_multistart
+    res = ms.run(seed=seed, n_iters=n_iters, n_branches=n_branches,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/fit/multistart.py", line 384, in run
+    v, g = gf(U)
+           ^^^^^
+jax.errors.JaxRuntimeError: INTERNAL: Failed to get configs for: 3 out of 5590 instructions. See logs for all failures. Example failure: 
+Autotuning failed for HLO: %input_reduce_fusion.527 = f32[120,147,26,23,18,4]{1,5,4,3,2,0} fusion(%wrapped_scatter.528, %constant.606107.0, %loop_transpose_fusion.26), kind=kInput, calls=%fused_reduce.854, metadata={op_name="jit(<lambda>)/transpose(jvp(vmap(vmap(jvp(vmap(transpose(jvp(jit(at_config)))))))))/vmap(jit(multiply))/jit(apply)/jit(multiply)/...i,...j->...ij/dot_general" stack_frame_id=711}. Failed to profile configs: Out of memory while trying to allocate 11.33GiB.
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+ERROR conda.cli.main_run:execute(142): `conda run python -m iosp.experiments.e10_teleop --mode multistart --out iosp/data/e10_teleop.json` failed. (See above for error)

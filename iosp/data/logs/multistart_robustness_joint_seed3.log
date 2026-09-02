@@ -1,0 +1,79 @@
+
+############################################################
+# multistart_robustness: Fig 2 + Table 1: multistart convergence, multi-seed robustness
+############################################################
+
+============================================================
+[run] joint_seed3  GPU=0  module=iosp.record.multistart
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.record.multistart --steps 40 --lr 0.05 --n-iters 60 --n-branches 3 --n-starts 3 --scene-b-scale 1.0 --no-render --space joint --seed 3 --out iosp/data/results/multistart/joint_seed3.npz
+2026-08-30 05:06:45.181 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 05:06:46.063 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 150s  B=3 branches x S=3 starts = 9 candidates  space=joint  scene_b_scale=1.0
+[rec] step   0/40  train(min)=0.10317 held@trainargmin=0.09720  |  ee_fit=0.04527 ee_held=0.04305  spread=35.3x
+[rec] step   1/40  train(min)=0.09917 held@trainargmin=0.09108  |  ee_fit=0.04006 ee_held=0.03821  spread=37.6x
+[rec] step   2/40  train(min)=0.09607 held@trainargmin=0.08840  |  ee_fit=0.03614 ee_held=0.03545  spread=38.6x
+[rec] step   3/40  train(min)=0.09240 held@trainargmin=0.08702  |  ee_fit=0.03420 ee_held=0.03305  spread=39.1x
+[rec] step   4/40  train(min)=0.09178 held@trainargmin=0.08500  |  ee_fit=0.03314 ee_held=0.03149  spread=41.9x
+[rec] step   5/40  train(min)=0.08690 held@trainargmin=0.08374  |  ee_fit=0.03219 ee_held=0.02986  spread=40.5x
+[rec] step   6/40  train(min)=0.08441 held@trainargmin=0.08182  |  ee_fit=0.02895 ee_held=0.02859  spread=42.9x
+[rec] step   7/40  train(min)=0.08207 held@trainargmin=0.07783  |  ee_fit=0.02802 ee_held=0.02832  spread=45.7x
+[rec] step   8/40  train(min)=0.08225 held@trainargmin=0.07833  |  ee_fit=0.02710 ee_held=0.02640  spread=43.1x
+[rec] step   9/40  train(min)=0.08015 held@trainargmin=0.07773  |  ee_fit=0.02632 ee_held=0.02570  spread=47.3x
+[rec] step  10/40  train(min)=0.08012 held@trainargmin=0.07685  |  ee_fit=0.02611 ee_held=0.02491  spread=44.2x
+[rec] step  11/40  train(min)=0.07964 held@trainargmin=0.07431  |  ee_fit=0.02577 ee_held=0.02512  spread=48.0x
+[rec] step  12/40  train(min)=0.07839 held@trainargmin=0.07328  |  ee_fit=0.02613 ee_held=0.02460  spread=48.6x
+[rec] step  13/40  train(min)=0.07919 held@trainargmin=0.07316  |  ee_fit=0.02607 ee_held=0.02505  spread=50.7x
+[rec] step  14/40  train(min)=0.07882 held@trainargmin=0.07354  |  ee_fit=0.02640 ee_held=0.02558  spread=46.0x
+[rec] step  15/40  train(min)=0.07822 held@trainargmin=0.07320  |  ee_fit=0.02651 ee_held=0.02570  spread=46.3x
+[rec] step  16/40  train(min)=0.07838 held@trainargmin=0.07369  |  ee_fit=0.02678 ee_held=0.02604  spread=48.4x
+[rec] step  17/40  train(min)=0.07839 held@trainargmin=0.07208  |  ee_fit=0.02716 ee_held=0.02628  spread=49.4x
+[rec] step  18/40  train(min)=0.07847 held@trainargmin=0.07293  |  ee_fit=0.02732 ee_held=0.02699  spread=46.7x
+[rec] step  19/40  train(min)=0.07845 held@trainargmin=0.07077  |  ee_fit=0.02753 ee_held=0.02572  spread=47.9x
+[rec] step  20/40  train(min)=0.07929 held@trainargmin=0.07283  |  ee_fit=0.02803 ee_held=0.02729  spread=49.0x
+[rec] step  21/40  train(min)=0.07949 held@trainargmin=0.07322  |  ee_fit=0.02849 ee_held=0.02783  spread=47.7x
+[rec] step  22/40  train(min)=0.07896 held@trainargmin=0.07309  |  ee_fit=0.02803 ee_held=0.02804  spread=47.9x
+[rec] step  23/40  train(min)=0.07947 held@trainargmin=0.07313  |  ee_fit=0.02852 ee_held=0.02867  spread=46.5x
+[rec] step  24/40  train(min)=0.07902 held@trainargmin=0.07335  |  ee_fit=0.02783 ee_held=0.02866  spread=47.8x
+[rec] step  25/40  train(min)=0.08005 held@trainargmin=0.07305  |  ee_fit=0.02980 ee_held=0.02902  spread=48.1x
+[rec] step  26/40  train(min)=0.07950 held@trainargmin=0.07202  |  ee_fit=0.02901 ee_held=0.02829  spread=48.6x
+[rec] step  27/40  train(min)=0.08053 held@trainargmin=0.07152  |  ee_fit=0.03022 ee_held=0.02769  spread=49.1x
+[rec] step  28/40  train(min)=0.07954 held@trainargmin=0.07229  |  ee_fit=0.02803 ee_held=0.02773  spread=48.5x
+[rec] step  29/40  train(min)=0.08016 held@trainargmin=0.07274  |  ee_fit=0.02899 ee_held=0.02803  spread=48.4x
+[rec] step  30/40  train(min)=0.08051 held@trainargmin=0.07250  |  ee_fit=0.02917 ee_held=0.02761  spread=48.7x
+[rec] step  31/40  train(min)=0.08079 held@trainargmin=0.07152  |  ee_fit=0.02954 ee_held=0.02711  spread=49.1x
+[rec] step  32/40  train(min)=0.08034 held@trainargmin=0.07241  |  ee_fit=0.02902 ee_held=0.02758  spread=48.6x
+[rec] step  33/40  train(min)=0.08040 held@trainargmin=0.07272  |  ee_fit=0.02897 ee_held=0.02814  spread=48.5x
+[rec] step  34/40  train(min)=0.08117 held@trainargmin=0.07119  |  ee_fit=0.02925 ee_held=0.02723  spread=49.4x
+[rec] step  35/40  train(min)=0.08070 held@trainargmin=0.07188  |  ee_fit=0.02859 ee_held=0.02785  spread=49.0x
+[rec] step  36/40  train(min)=0.08139 held@trainargmin=0.07356  |  ee_fit=0.02929 ee_held=0.02828  spread=47.8x
+[rec] step  37/40  train(min)=0.08120 held@trainargmin=0.07295  |  ee_fit=0.02932 ee_held=0.02827  spread=48.2x
+[rec] step  38/40  train(min)=0.08060 held@trainargmin=0.07337  |  ee_fit=0.02831 ee_held=0.02811  spread=47.9x
+[rec] step  39/40  train(min)=0.08193 held@trainargmin=0.07432  |  ee_fit=0.02925 ee_held=0.02865  spread=47.4x
+[rec] step  40/40  train(min)=0.08046 held@trainargmin=0.07292  |  ee_fit=0.02831 ee_held=0.02802  spread=48.2x
+[rec] wrote iosp/data/results/multistart/joint_seed3.npz
+
+ cand  branch  start     train      held    ee_fit   ee_held
+    0       0      0   0.14193   0.12882   0.04925   0.04746
+    1       0      1   0.08046   0.07292   0.02831   0.02802  <- winner (train argmin)
+    2       0      2   0.12055   0.10713   0.04330   0.03728
+    3       1      0   3.55406   3.51638   0.58904   0.61179
+    4       1      1   3.22775   3.15849   0.59865   0.62113
+    5       1      2   3.15799   3.42656   0.45976   0.61099
+    6       2      0   0.28650   0.13764   0.06581   0.04384
+    7       2      1   0.30867   0.13978   0.05743   0.03580
+    8       2      2   0.29706   0.13387   0.06391   0.03971
+
+selected on training loss: candidate 1 (branch 0, start 1)
+  EE held-out RMSE = 0.02802
+held-out spread across candidates: 48.2x (0.07292 .. 3.51638)
+  wall: 966s  exit: 0
+  manifest: iosp/data/results/multistart/joint_seed3.manifest.json
+
+[figures] fig2_multistart: iosp.viz.fig_multistart -> iosp/figures/fig2_multistart.pdf
+[fig_multistart] wrote iosp/figures/fig2_multistart.pdf + iosp/figures/fig2_multistart.png
+
+[tables] table1_robustness: iosp.analysis.table_robustness -> iosp/figures/table1_robustness.tex
+
+   Space  Mean RMSE      Std    N   Spread  Dom. br.
+   joint    0.02675  0.00925    4     14.9x         0
+[table_robustness] wrote iosp/figures/table1_robustness.tex

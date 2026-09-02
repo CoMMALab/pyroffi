@@ -1,0 +1,27 @@
+2026-08-28 09:23:26.770 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 09:23:27.576 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+transport mass (pinned, same as build_rkhs) = 0.4482
+
+=== forward solver n_iters = 60 ===
+    PATH A control (named library)       worst=2.028e-04 OK   | appro A=5.5e-05 B=7.2e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=7.3e-05 B=2.0e-04 | place A=1.4e-05 B=1.4e-05
+      (55s)
+    current  base M=16  ls=1.0  cos^2    worst=3.651e-03 BAD  | appro A=5.5e-05 B=7.2e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=3.7e-03 B=1.2e-03 | place A=1.4e-05 B=1.4e-05
+      (34s)
+    tuned    base M=64  ls=3.0  cos^2    worst=1.074e-04 OK   | appro A=5.5e-05 B=7.2e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=1.1e-04 B=8.3e-05 | place A=1.4e-05 B=1.4e-05
+      (41s)
+    tuned    base M=256 ls=10   cos^2    worst=5.526e-05 OK   | appro A=5.5e-05 B=7.2e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=2.1e-05 B=1.8e-05 | place A=1.4e-05 B=1.4e-05
+      (72s)
+    tuned    GEOM M=256 ls=10   1-cos    worst=5.526e-05 OK   | appro A=5.5e-05 B=7.2e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=6.0e-06 B=7.5e-06 | place A=1.4e-05 B=1.4e-05
+      (64s)
+
+=== forward solver n_iters = 200 ===
+    PATH A control (named library)       worst=1.437e-05 OK   | appro A=1.2e-05 B=7.0e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=8.1e-06 B=8.5e-06 | place A=1.4e-05 B=1.4e-05
+      (107s)
+    current  base M=16  ls=1.0  cos^2    worst=1.501e-03 BAD  | appro A=1.2e-05 B=7.0e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=1.5e-03 B=1.1e-03 | place A=1.4e-05 B=1.4e-05
+      (108s)
+    tuned    base M=64  ls=3.0  cos^2    worst=8.548e-05 OK   | appro A=1.2e-05 B=7.0e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=8.2e-05 B=8.5e-05 | place A=1.4e-05 B=1.4e-05
+      (121s)
+    tuned    base M=256 ls=10   cos^2    worst=2.224e-05 OK   | appro A=1.2e-05 B=7.0e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=2.2e-05 B=1.6e-05 | place A=1.4e-05 B=1.4e-05
+      (200s)
+    tuned    GEOM M=256 ls=10   1-cos    worst=1.437e-05 OK   | appro A=1.2e-05 B=7.0e-06 | grasp A=9.3e-06 B=9.3e-06 | trans A=5.5e-06 B=5.1e-06 | place A=1.4e-05 B=1.4e-05
+      (206s)

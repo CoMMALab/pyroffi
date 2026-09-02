@@ -1,0 +1,7 @@
+2026-08-27 17:24:34.895 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-27 17:24:35.792 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+K=3, n_scenes=10, n_newton=600
+
+fd_grad_fn  (K+1=4 probes):  old=13.16s  new=9.11s  speedup=1.45x
+cma_es      (lam=7/gen, 2 gens): old=46.09s  new=29.96s  speedup=1.54x
+adam        (20 steps):         old=71.27s  new=71.18s  speedup=1.00x

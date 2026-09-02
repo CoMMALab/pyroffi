@@ -1,0 +1,291 @@
+--- pickplace_seed0 ---
+2026-08-31 08:42:49.023 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 08:42:49.850 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 14.6s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 08:55:36.782334 3836802 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 08:55:38.545927 3836704 slow_operation_alarm.cc:140] The operation took 2m1.763709522s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1616.5s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 1.578e-05
+[grad] dL/dtheta at z=0: [-0.00679984  0.00011333  0.01077143 -0.00408492]
+E0831 09:42:31.506786 3836802 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 09:42:45.615405 3836704 slow_operation_alarm.cc:140] The operation took 2m14.108693985s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00657  move_rel=1.510e+00 reduction=133.82x ok  fit_time=1124.4s
+[time] wall=4706.7s  fit=1124.4s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 321, in <module>
+    _json.dump(out_s, f, indent=2)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type ArrayImpl is not JSON serializable
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06706     +0.0% vs uniform
+  tied three-stage fit                   0.00657    +90.2% vs uniform
+  oracle theta*                          0.00481    +92.8% vs uniform
+
+param_err (reported, NOT the criterion): 0.0318
+  smooth         0.1441    0.1293
+  clearance      0.2154    0.2131
+  upright        0.0877    0.0784
+  skeleton       0.5528    0.5793
+exit: 1
+--- pickplace_seed1 ---
+2026-08-31 10:01:46.855 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 10:01:47.691 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 14.5s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 10:14:27.754466 3887471 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 10:14:33.199645 3887385 slow_operation_alarm.cc:140] The operation took 2m5.445268037s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1626.6s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 6.695e-06
+[grad] dL/dtheta at z=0: [-6.5472494e-03  6.9082045e-05  1.1131993e-02 -4.6538250e-03]
+E0831 11:01:07.535893 3887471 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 11:01:26.192102 3887385 slow_operation_alarm.cc:140] The operation took 2m18.656283494s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00892  move_rel=1.303e+30 reduction=91.93x ok  fit_time=1114.3s
+[time] wall=4704.6s  fit=1114.3s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 321, in <module>
+    _json.dump(out_s, f, indent=2)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type ArrayImpl is not JSON serializable
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06882     +0.0% vs uniform
+  tied three-stage fit                   0.00892    +87.0% vs uniform
+  oracle theta*                          0.00194    +97.2% vs uniform
+
+param_err (reported, NOT the criterion): 0.1333
+  smooth         0.1633    0.1293
+  clearance      0.2728    0.2131
+  upright        0.0973    0.0784
+  skeleton       0.4666    0.5793
+exit: 1
+--- pickplace_seed2 ---
+2026-08-31 11:20:43.472 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 11:20:44.313 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.0s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 11:33:47.678432 3938997 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 11:33:52.997776 3938837 slow_operation_alarm.cc:140] The operation took 2m5.319460139s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1655.5s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 6.409e-06
+[grad] dL/dtheta at z=0: [-6.4238189e-03  4.0807980e-05  1.1473505e-02 -5.0904942e-03]
+E0831 12:21:13.697661 3938997 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 12:21:30.236869 3938837 slow_operation_alarm.cc:140] The operation took 2m16.539319883s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00649  move_rel=4.300e-01 reduction=434.16x ok  fit_time=1125.7s
+[time] wall=4756.2s  fit=1125.7s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 321, in <module>
+    _json.dump(out_s, f, indent=2)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type ArrayImpl is not JSON serializable
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.07099     +0.0% vs uniform
+  tied three-stage fit                   0.00649    +90.9% vs uniform
+  oracle theta*                          0.00310    +95.6% vs uniform
+
+param_err (reported, NOT the criterion): 0.0915
+  smooth         0.1453    0.1293
+  clearance      0.2633    0.2131
+  upright        0.0865    0.0784
+  skeleton       0.5049    0.5793
+exit: 1
+--- pickplace_seed3 ---
+2026-08-31 12:40:29.013 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 12:40:29.808 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 14.1s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 12:52:43.050801 4011623 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 12:52:47.824846 4011540 slow_operation_alarm.cc:140] The operation took 2m4.774154108s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1570.2s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 3.472e-06
+[grad] dL/dtheta at z=0: [-0.00678047  0.00015697  0.01065127 -0.00402776]
+E0831 13:38:38.360280 4011623 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 13:38:53.870139 4011540 slow_operation_alarm.cc:140] The operation took 2m15.509927182s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00508  move_rel=8.326e-01 reduction=3353.69x ok  fit_time=1121.0s
+[time] wall=4589.9s  fit=1121.0s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 321, in <module>
+    _json.dump(out_s, f, indent=2)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type ArrayImpl is not JSON serializable
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06611     +0.0% vs uniform
+  tied three-stage fit                   0.00508    +92.3% vs uniform
+  oracle theta*                          0.00284    +95.7% vs uniform
+
+param_err (reported, NOT the criterion): 0.0735
+  smooth         0.1248    0.1293
+  clearance      0.1650    0.2131
+  upright        0.0756    0.0784
+  skeleton       0.6346    0.5793
+exit: 1
+--- pickplace_seed4 ---
+2026-08-31 13:57:30.006 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 13:57:30.828 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 14.2s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 14:09:59.558664 4054993 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 14:10:01.769662 4054910 slow_operation_alarm.cc:140] The operation took 2m2.211079294s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1601.3s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 3.992e-06
+[grad] dL/dtheta at z=0: [-0.00681614  0.00012382  0.01024058 -0.00354826]
+E0831 14:55:51.121877 4054993 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 14:56:00.876275 4054910 slow_operation_alarm.cc:140] The operation took 2m9.75449844s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00398  move_rel=1.165e+00 reduction=423.63x ok  fit_time=1073.1s
+[time] wall=4555.8s  fit=1073.1s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 321, in <module>
+    _json.dump(out_s, f, indent=2)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type ArrayImpl is not JSON serializable
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06285     +0.0% vs uniform
+  tied three-stage fit                   0.00398    +93.7% vs uniform
+  oracle theta*                          0.00336    +94.6% vs uniform
+
+param_err (reported, NOT the criterion): 0.0460
+  smooth         0.1364    0.1293
+  clearance      0.2394    0.2131
+  upright        0.0819    0.0784
+  skeleton       0.5423    0.5793
+exit: 1
+=== pickplace done ===

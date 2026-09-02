@@ -1,0 +1,21 @@
+2026-08-24 21:03:53.591 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-24 21:03:54.381 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+E0824 21:26:23.538227 3810578 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0824 21:26:29.543378 3810477 slow_operation_alarm.cc:140] The operation took 2m6.005248604s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+theta_ik_star = [0.06 0.04]
+theta_trajopt_star = [0.10363097 0.28169817 0.06285536 0.10363097 0.28169817 0.06285536
+ 0.10363097]  (approach.smooth, approach.clearance, grasp.smooth, transport.smooth, transport.clearance, transport.upright, place.smooth)
+
+  [anchor] transport EE path closest-approach to obstacle surface: 0.0200m (CLEARANCE_MARGIN=0.05m, target ~0.020m)
+free=('transport',)                                          loss0=0.0003  free_param_err=0.2364  ee_rmse=0.0084  (compile 1326.4s, steady 23.1s)
+free=('transport', 'approach')                               loss0=0.0004  free_param_err=0.2473  ee_rmse=0.0099  (compile 1.9s, steady 22.5s)
+free=('transport', 'approach', 'place')                      loss0=0.0003  free_param_err=0.2272  ee_rmse=0.0103  (compile 1.9s, steady 22.5s)
+free=('transport', 'approach', 'place', 'grasp')             loss0=0.0004  free_param_err=0.2321  ee_rmse=0.0100  (compile 1.9s, steady 22.5s)
+free=ALL (+theta_ik)                                    loss0=0.0023  free_param_err=0.2421  ik_err=0.0222  ee_rmse=0.0240  (compile 1.9s, steady 22.6s)

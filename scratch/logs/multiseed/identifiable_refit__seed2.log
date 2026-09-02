@@ -1,0 +1,25 @@
+2026-08-28 06:08:10.363 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 06:08:11.276 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+jax devices: [CudaDevice(id=0)]  T=24  theta*=[0.5 0.3 0.2]
+
+=== identifiable_refit ===
+  eigendirection loadings (|component| >= 0.2, descending eigenvalue):
+    lam= 2.9487e+00  -0.718*effort  +0.696*collision
+    lam= 5.1307e-02  -0.816*smooth  +0.427*collision  +0.390*effort
+    lam= 5.7134e-32  -0.577*effort  -0.577*collision  -0.577*smooth
+    k3: r=2/3 (trace rule would say 1)  gauge_index=2 (want 2)  e_demo wide=0.00012 refit=0.00009  e_global wide=2.163e-08 refit=5.032e-08
+  eigendirection loadings (|component| >= 0.2, descending eigenvalue):
+    lam= 6.0464e+00  -0.583*effort_j2  +0.582*effort_j1  +0.433*effort_j3  -0.360*effort_j0
+    lam= 2.4138e+00  +0.697*effort_j1  -0.662*effort_j3
+    lam= 3.6416e-01  +0.854*collision  -0.338*effort_j3  -0.332*effort_j2
+    lam= 1.2508e-01  -0.806*effort_j0  +0.576*effort_j2
+    k9: r=8/9 (trace rule would say 3)  gauge_index=8 (want 8)  e_demo wide=0.00160 refit=0.00240  e_global wide=1.981e-03 refit=1.926e-03
+  eigendirection loadings (|component| >= 0.2, descending eigenvalue):
+    lam= 9.4563e+00  -0.628*effort_j2  +0.556*effort_j1  +0.450*effort_j3  -0.279*effort_j0
+    lam= 4.5191e+00  +0.718*effort_j1  -0.611*effort_j3  +0.225*effort_j2
+    lam= 1.5738e+00  -0.762*collision  +0.440*effort_j2  +0.422*effort_j3
+    lam= 2.2527e-01  +0.782*effort_j0  -0.429*effort_j2  -0.366*collision  +0.208*posture
+    k16: r=15/16 (trace rule would say 3)  gauge_index=15 (want 15)  e_demo wide=0.00466 refit=0.00503  e_global wide=2.429e-02 refit=2.704e-02
+  done in 1936.8s
+
+wrote /home/sadmin/Work/pyroffi/scratch/logs/multiseed/identifiable_refit__seed2.json

@@ -1,0 +1,99 @@
+Unable to resolve filename: meshes/robots/fr3/visual/link0.dae
+Can't find meshes/robots/fr3/visual/link0.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link1.dae
+Can't find meshes/robots/fr3/visual/link1.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link2.dae
+Can't find meshes/robots/fr3/visual/link2.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link3.dae
+Can't find meshes/robots/fr3/visual/link3.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link4.dae
+Can't find meshes/robots/fr3/visual/link4.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link5.dae
+Can't find meshes/robots/fr3/visual/link5.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link6.dae
+Can't find meshes/robots/fr3/visual/link6.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link7.dae
+Can't find meshes/robots/fr3/visual/link7.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/hand.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/hand.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+2026-09-02 10:57:52.995 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 10:57:53.307 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 10:57:54.635 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 37 disabled collision pairs from SRDF
+2026-09-02 10:57:55.405 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 26 links and 288 active self-collision pairs, using spherical collision models.
+[build] 10 episodes (8 fit / 2 held out); standoff prior grasp 0.1051 m, place 0.2463 m
+    fit   ep_20260902_093953
+    fit   ep_20260902_094034
+    fit   ep_20260902_094106
+    fit   ep_20260902_094218
+    fit   ep_20260902_094301
+    fit   ep_20260902_094334
+    fit   ep_20260902_094436
+    fit   ep_20260902_094535
+    held  ep_20260902_094627
+    held  ep_20260902_094649
+[build] 0s  B=4 branches x S=3 starts = 12 candidates, 40 outer steps each, in chunks of 1
+E0902 11:21:39.079364  437432 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0902 11:22:47.461175  437346 slow_operation_alarm.cc:140] The operation took 3m8.381908263s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] step   0/40  sum-loss=33.165226
+[fit] step   5/40  sum-loss=31.971273
+[fit] step  10/40  sum-loss=30.701418
+[fit] step  15/40  sum-loss=29.305062
+[fit] step  20/40  sum-loss=27.929778
+[fit] step  25/40  sum-loss=26.783153
+[fit] step  30/40  sum-loss=25.637636
+[fit] step  35/40  sum-loss=25.108378
+[fit] step  39/40  sum-loss=25.008142
+[fit] 12 candidates x 40 steps in 3052s (compile incl.)
+
+ cand  branch  start  train rmse  held rmse
+    0       0      0     0.79791    0.68264
+    1       0      1     0.77934    0.69183  <- winner (train argmin)
+    2       0      2     0.78222    0.66833  [held argmin: NOT used]
+    3       1      0     2.62243    2.90162
+    4       1      1     2.25860    2.70104
+    5       1      2     2.60605    2.83914
+    6       2      0     0.87788    0.85837
+    7       2      1     0.85725    0.88039
+    8       2      2     0.86604    0.84410
+    9       3      0     0.83756    0.69067
+   10       3      1     0.85061    0.74142
+   11       3      2     0.82210    0.67118
+
+selected on training loss: candidate 1 (branch 0, start 1)
+  held-out RMSE = 0.69183
+  had we (wrongly) selected on held-out: 0.66833 -- +3.4%, the size of the leakage this guards against
+
+held-out RMSE spread across candidates: 4.3x (0.66833 .. 2.90162)
+best held-out per branch: [0.66833 2.70104 0.8441  0.67118] 
+-> branch choice matters
+
+winner in EE space:  fit 0.1620 m   held-out 0.1391 m
+  (the release-row lateral offset alone floors this at ~0.015 m; see iosp.fit.teleop)
+
+winning cost:
+    grasp.standoff          0.1561
+    place.standoff          0.1174
+    approach.smooth         0.2207
+    approach.clearance      0.1348
+    grasp.smooth            0.1428
+    transport.smooth        0.1608
+    transport.clearance     0.0652
+    transport.upright       0.1595
+    place.smooth            0.1162
+    refine.smooth           0.8283
+    refine.clearance        0.0053
+    refine.upright          0.0066
+    refine.skeleton         0.1598
+
+wrote iosp/data/e10_teleop.json

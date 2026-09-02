@@ -1,0 +1,581 @@
+=== tetris_iosp on GPU 3 ===
+
+############################################################
+# tetris_iosp: IOSP on SPaSM tetris packing: recover trajopt costs from composed pick-place demos
+############################################################
+
+============================================================
+[run] blocks3_seed0  GPU=3  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 0 --out iosp/data/results/tetris/blocks3_seed0.npz
+2026-08-30 13:00:55.686 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 13:00:56.476 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.8s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+[demos] 177.3s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.635e-07
+[grad] dL/dtheta at z=0: [ 5.3862728e-02 -9.2471130e-03  1.2417795e-04  1.7008200e-01
+ -2.1482182e-01]
+[fit] test RMSE 0.01291  move_rel=9.469e-01 reduction=664.30x ok
+[out] wrote iosp/data/results/tetris/blocks3_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.37129     +0.0% vs uniform
+  tetris IOSP fit                        0.01291    +96.5% vs uniform
+  oracle theta*                          0.00047    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.3111
+  effort         0.0630    0.0893
+  smooth         0.1794    0.2427
+  clearance      0.4148    0.1472
+  orient         0.0800    0.1205
+  skeleton       0.2629    0.4002
+  wall: 1200s  exit: 0
+  manifest: iosp/data/results/tetris/blocks3_seed0.manifest.json
+
+============================================================
+[run] blocks3_seed1  GPU=3  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 1 --out iosp/data/results/tetris/blocks3_seed1.npz
+2026-08-30 13:20:55.239 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 13:20:56.027 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 18.2s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+E0830 13:26:41.550096 2857480 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 13:27:51.266010 2857394 slow_operation_alarm.cc:140] The operation took 3m9.716013741s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 877.9s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.960e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 190, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 125, in run
+    assert sanity < 1e-6, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 1.960e-06
+  wall: 1278s  exit: 1
+  manifest: iosp/data/results/tetris/blocks3_seed1.manifest.json
+
+============================================================
+[run] blocks3_seed2  GPU=3  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 2 --out iosp/data/results/tetris/blocks3_seed2.npz
+2026-08-30 13:42:13.541 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 13:42:14.310 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.5s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+E0830 13:47:52.997263 2887738 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 13:48:51.706405 2887652 slow_operation_alarm.cc:140] The operation took 2m58.709241013s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 865.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.000e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 190, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 125, in run
+    assert sanity < 1e-6, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 3.000e-06
+  wall: 1262s  exit: 1
+  manifest: iosp/data/results/tetris/blocks3_seed2.manifest.json
+
+============================================================
+[run] blocks5_seed0  GPU=3  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 5 --seed 0 --out iosp/data/results/tetris/blocks5_seed0.npz
+2026-08-30 14:03:15.511 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 14:03:16.268 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.4s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 174.0s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.635e-07
+[grad] dL/dtheta at z=0: [ 5.3862728e-02 -9.2471130e-03  1.2417795e-04  1.7008200e-01
+ -2.1482182e-01]
+[fit] test RMSE 0.01291  move_rel=9.469e-01 reduction=664.30x ok
+[out] wrote iosp/data/results/tetris/blocks5_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.37129     +0.0% vs uniform
+  tetris IOSP fit                        0.01291    +96.5% vs uniform
+  oracle theta*                          0.00047    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.3111
+  effort         0.0630    0.0893
+  smooth         0.1794    0.2427
+  clearance      0.4148    0.1472
+  orient         0.0800    0.1205
+  skeleton       0.2629    0.4002
+  wall: 1176s  exit: 0
+  manifest: iosp/data/results/tetris/blocks5_seed0.manifest.json
+
+============================================================
+[run] blocks5_seed1  GPU=3  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 5 --seed 1 --out iosp/data/results/tetris/blocks5_seed1.npz
+2026-08-30 14:22:51.238 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 14:22:52.007 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.4s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 174.0s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.960e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 190, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 125, in run
+    assert sanity < 1e-6, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 1.960e-06
+  wall: 274s  exit: 1
+  manifest: iosp/data/results/tetris/blocks5_seed1.manifest.json
+
+============================================================
+[run] blocks5_seed2  GPU=3  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 5 --seed 2 --out iosp/data/results/tetris/blocks5_seed2.npz
+2026-08-30 14:27:25.114 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 14:27:25.888 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.4s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 173.6s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.000e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 190, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 125, in run
+    assert sanity < 1e-6, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 3.000e-06
+  wall: 274s  exit: 1
+  manifest: iosp/data/results/tetris/blocks5_seed2.manifest.json
+
+WARNING: 4/6 runs failed
+=== tower_iosp on GPU 3 ===
+
+############################################################
+# tower_iosp: IOSP on SPaSM block stacking: recover trajopt costs from sequential stacking demos
+############################################################
+
+============================================================
+[run] blocks3_seed0  GPU=3  module=iosp.experiments.e9_tower
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e9_tower --n-iters 60 --n-steps 40 --n-starts 4 --stack-level 3 --seed 0 --out iosp/data/results/tower/blocks3_seed0.npz
+2026-08-30 14:31:58.919 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 14:31:59.695 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.9s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+E0830 14:39:51.866554 2943637 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 14:41:14.615489 2943551 slow_operation_alarm.cc:140] The operation took 3m22.749033102s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 600.4s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.156e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 187, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 122, in run
+    assert sanity < 1e-6, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 1.156e-06
+  wall: 1067s  exit: 1
+  manifest: iosp/data/results/tower/blocks3_seed0.manifest.json
+
+============================================================
+[run] blocks3_seed1  GPU=3  module=iosp.experiments.e9_tower
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e9_tower --n-iters 60 --n-steps 40 --n-starts 4 --stack-level 3 --seed 1 --out iosp/data/results/tower/blocks3_seed1.npz
+2026-08-30 14:49:46.125 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 14:49:46.897 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.9s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+E0830 14:56:00.899210 2953326 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 14:57:26.715326 2953240 slow_operation_alarm.cc:140] The operation took 3m25.81619208s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1013.3s, shape (6, 22, 3)
+[sanity] loss(z_star) = 5.975e-07
+[grad] dL/dtheta at z=0: [ 0.00297698  0.00024003  0.0001959   0.01175178 -0.01149094 -0.00367375]
+E0830 15:24:33.655749 2953326 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 15:25:17.599831 2953240 slow_operation_alarm.cc:140] The operation took 2m43.944155666s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+W0830 15:44:17.337422 2953240 cuda_command_buffer.cc:887] Retry CUDA graph instantiation after OOM error
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 187, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 135, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Underlying backend ran out of memory trying to instantiate command buffer with 184 (total of 2344 alive graphs in the process). You can try to (a) Give more memory to the driver by reducing XLA_CLIENT_MEM_FRACTION (b) Disable command buffers with 'XLA_FLAGS=--xla_gpu_enable_command_buffer=' (empty set). Original error: Failed to instantiate CUDA graph: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+  wall: 3307s  exit: 1
+  manifest: iosp/data/results/tower/blocks3_seed1.manifest.json
+
+============================================================
+[run] blocks3_seed2  GPU=3  module=iosp.experiments.e9_tower
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e9_tower --n-iters 60 --n-steps 40 --n-starts 4 --stack-level 3 --seed 2 --out iosp/data/results/tower/blocks3_seed2.npz
+2026-08-30 15:44:53.001 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 15:44:53.775 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.9s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+E0830 15:51:02.903015 3014050 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 15:52:28.843459 3013964 slow_operation_alarm.cc:140] The operation took 3m25.94053914s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1014.4s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.690e-06
+[grad] dL/dtheta at z=0: [ 0.00015689  0.00013484  0.00021529  0.02329268 -0.01819492 -0.00560478]
+  wall: 1686s  exit: -9
+  manifest: iosp/data/results/tower/blocks3_seed2.manifest.json
+
+============================================================
+[run] blocks5_seed0  GPU=3  module=iosp.experiments.e9_tower
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e9_tower --n-iters 60 --n-steps 40 --n-starts 4 --stack-level 5 --seed 0 --out iosp/data/results/tower/blocks5_seed0.npz
+2026-08-30 16:12:58.980 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 16:12:59.752 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 18.6s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=5  fit/test=6/6
+E0830 16:19:32.839073 3048916 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 16:21:07.695580 3048783 slow_operation_alarm.cc:140] The operation took 3m34.856592036s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1071.3s, shape (6, 22, 3)
+[sanity] loss(z_star) = 4.943e-07
+[grad] dL/dtheta at z=0: [ 1.8965658e-03 -4.3212043e-05  1.2919650e-04  1.2288268e-02
+ -8.9346478e-03 -5.3361715e-03]
+E0830 16:50:04.049667 3048916 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 16:50:49.436798 3048783 slow_operation_alarm.cc:140] The operation took 2m45.387238427s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+W0830 17:10:36.161475 3048783 cuda_command_buffer.cc:887] Retry CUDA graph instantiation after OOM error
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 187, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 135, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Underlying backend ran out of memory trying to instantiate command buffer with 676 (total of 1992 alive graphs in the process). You can try to (a) Give more memory to the driver by reducing XLA_CLIENT_MEM_FRACTION (b) Disable command buffers with 'XLA_FLAGS=--xla_gpu_enable_command_buffer=' (empty set). Original error: Failed to instantiate CUDA graph: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+  wall: 3494s  exit: 1
+  manifest: iosp/data/results/tower/blocks5_seed0.manifest.json
+
+============================================================
+[run] blocks5_seed1  GPU=3  module=iosp.experiments.e9_tower
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e9_tower --n-iters 60 --n-steps 40 --n-starts 4 --stack-level 5 --seed 1 --out iosp/data/results/tower/blocks5_seed1.npz
+2026-08-30 17:11:12.771 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 17:11:13.571 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.6s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=5  fit/test=6/6
+E0830 17:17:41.432550 3140793 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 17:19:15.638885 3140707 slow_operation_alarm.cc:140] The operation took 3m34.206405002s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1073.3s, shape (6, 22, 3)
+[sanity] loss(z_star) = 2.422e-07
+[grad] dL/dtheta at z=0: [ 2.2074943e-03 -2.5025402e-06  1.2122920e-04  8.3556464e-03
+ -6.2274099e-03 -4.4544581e-03]
+E0830 17:47:50.388926 3140793 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 17:48:42.569289 3140707 slow_operation_alarm.cc:140] The operation took 2m52.180463158s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 187, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 135, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: [0] Failed to get module function wrapped_add_44856: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+  wall: 3476s  exit: 1
+  manifest: iosp/data/results/tower/blocks5_seed1.manifest.json
+
+============================================================
+[run] blocks5_seed2  GPU=3  module=iosp.experiments.e9_tower
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e9_tower --n-iters 60 --n-steps 40 --n-starts 4 --stack-level 5 --seed 2 --out iosp/data/results/tower/blocks5_seed2.npz
+2026-08-30 18:09:09.470 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 18:09:10.280 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.6s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=5  fit/test=6/6
+E0830 18:15:52.469491 3227125 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 18:17:34.902401 3226850 slow_operation_alarm.cc:140] The operation took 3m42.433009703s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1085.5s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.209e-07
+[grad] dL/dtheta at z=0: [ 1.7971534e-03 -4.3706248e-05  1.1510559e-04  1.1513330e-02
+ -8.0288853e-03 -5.3529977e-03]
+E0830 18:46:26.471336 3227125 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 18:47:18.862482 3226850 slow_operation_alarm.cc:140] The operation took 2m52.391246734s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+W0830 19:07:13.817186 3226850 cuda_command_buffer.cc:887] Retry CUDA graph instantiation after OOM error
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 187, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e9_tower.py", line 135, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Underlying backend ran out of memory trying to instantiate command buffer with 676 (total of 1992 alive graphs in the process). You can try to (a) Give more memory to the driver by reducing XLA_CLIENT_MEM_FRACTION (b) Disable command buffers with 'XLA_FLAGS=--xla_gpu_enable_command_buffer=' (empty set). Original error: Failed to instantiate CUDA graph: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+  wall: 3521s  exit: 1
+  manifest: iosp/data/results/tower/blocks5_seed2.manifest.json
+
+WARNING: 6/6 runs failed
+=== pickplace_iosp on GPU 3 ===
+
+############################################################
+# pickplace_iosp: IOSP on pick-place: recover trajopt costs from single-object demos (cross-domain table row)
+############################################################
+
+============================================================
+[run] pickplace_seed0  GPU=3  module=iosp.experiments.e4_three_stage
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e4_three_stage --n-iters 60 --n-steps 40 --n-starts 4 --no-ablate-stage2 --seed 0 --out iosp/data/results/pickplace/pickplace_seed0.json
+2026-08-30 19:07:49.691 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 19:07:50.467 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.6s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0830 19:14:29.045923 3366720 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 19:17:25.470052 3366637 slow_operation_alarm.cc:140] The operation took 4m56.424230502s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1259.7s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 6.298e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 301, in <module>
+    out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 205, in run
+    assert sanity < 1e-8, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 6.298e-06
+  wall: 1777s  exit: 1
+  manifest: iosp/data/results/pickplace/pickplace_seed0.manifest.json
+
+============================================================
+[run] pickplace_seed1  GPU=3  module=iosp.experiments.e4_three_stage
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e4_three_stage --n-iters 60 --n-steps 40 --n-starts 4 --no-ablate-stage2 --seed 1 --out iosp/data/results/pickplace/pickplace_seed1.json
+2026-08-30 19:37:26.637 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 19:37:27.415 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.1s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0830 19:43:59.224674 3404066 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 19:46:52.265351 3403980 slow_operation_alarm.cc:140] The operation took 4m53.040762801s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1218.0s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 8.319e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 301, in <module>
+    out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 205, in run
+    assert sanity < 1e-8, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 8.319e-06
+  wall: 1751s  exit: 1
+  manifest: iosp/data/results/pickplace/pickplace_seed1.manifest.json
+
+============================================================
+[run] pickplace_seed2  GPU=3  module=iosp.experiments.e4_three_stage
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e4_three_stage --n-iters 60 --n-steps 40 --n-starts 4 --no-ablate-stage2 --seed 2 --out iosp/data/results/pickplace/pickplace_seed2.json
+2026-08-30 20:06:37.670 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 20:06:38.455 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.4s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0830 20:13:14.457964 3438983 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 20:16:05.594025 3438897 slow_operation_alarm.cc:140] The operation took 4m51.136136721s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1248.9s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 1.727e-05
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 301, in <module>
+    out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 205, in run
+    assert sanity < 1e-8, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 1.727e-05
+  wall: 1790s  exit: 1
+  manifest: iosp/data/results/pickplace/pickplace_seed2.manifest.json
+
+============================================================
+[run] pickplace_seed3  GPU=3  module=iosp.experiments.e4_three_stage
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e4_three_stage --n-iters 60 --n-steps 40 --n-starts 4 --no-ablate-stage2 --seed 3 --out iosp/data/results/pickplace/pickplace_seed3.json
+2026-08-30 20:36:27.898 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 20:36:28.692 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.3s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0830 20:42:59.927386 3475475 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 20:45:40.831645 3475389 slow_operation_alarm.cc:140] The operation took 4m40.904332341s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1229.3s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 1.966e-05
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 301, in <module>
+    out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 205, in run
+    assert sanity < 1e-8, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 1.966e-05
+  wall: 1771s  exit: 1
+  manifest: iosp/data/results/pickplace/pickplace_seed3.manifest.json
+
+============================================================
+[run] pickplace_seed4  GPU=3  module=iosp.experiments.e4_three_stage
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e4_three_stage --n-iters 60 --n-steps 40 --n-starts 4 --no-ablate-stage2 --seed 4 --out iosp/data/results/pickplace/pickplace_seed4.json
+2026-08-30 21:05:59.129 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 21:05:59.918 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.4s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0830 21:12:34.806807 3505024 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 21:15:35.212697 3504938 slow_operation_alarm.cc:140] The operation took 5m0.405991006s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1253.8s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 8.521e-06
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 301, in <module>
+    out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 205, in run
+    assert sanity < 1e-8, f"model does not reproduce its own demo: {sanity:.3e}"
+           ^^^^^^^^^^^^^
+AssertionError: model does not reproduce its own demo: 8.521e-06
+  wall: 1785s  exit: 1
+  manifest: iosp/data/results/pickplace/pickplace_seed4.manifest.json
+
+WARNING: 5/5 runs failed
+=== all domains done ===

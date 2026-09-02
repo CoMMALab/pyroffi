@@ -1,0 +1,153 @@
+--- blocks3_seed0 ---
+2026-08-31 08:42:46.511 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 08:42:47.381 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 18.2s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+[demos] 1400.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 2.038e-07
+[grad] dL/dtheta at z=0: [ 5.38525544e-02 -9.26108938e-03  1.08745466e-04  1.70107394e-01
+ -2.14807615e-01]
+[fit] test RMSE 0.01286  move_rel=9.469e-01 reduction=658.21x ok  fit_time=850.6s
+[time] wall=3984.0s  fit=850.6s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 200, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 163, in run
+    np.savez_compressed(out, **{k: v for k, v in result.items()
+TypeError: numpy.savez_compressed() got multiple values for keyword argument 'wall_s'
+exit: 1
+--- blocks3_seed1 ---
+2026-08-31 09:49:29.448 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 09:49:30.275 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.7s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+[demos] 1398.9s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.426e-06
+[grad] dL/dtheta at z=0: [ 4.3496717e-02 -8.7073836e-03  1.1038387e-04  1.6543479e-01
+ -2.0033452e-01]
+[fit] test RMSE 0.02374  move_rel=1.402e+30 reduction=280.83x ok  fit_time=857.0s
+[time] wall=4001.1s  fit=857.0s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 200, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 163, in run
+    np.savez_compressed(out, **{k: v for k, v in result.items()
+TypeError: numpy.savez_compressed() got multiple values for keyword argument 'wall_s'
+exit: 1
+--- blocks3_seed2 ---
+2026-08-31 10:56:28.678 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 10:56:29.492 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.8s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+[demos] 1385.4s, shape (6, 22, 3)
+[sanity] loss(z_star) = 8.816e-06
+[grad] dL/dtheta at z=0: [ 1.8282201e-02 -6.1457711e-03 -1.3497207e-04  1.3412611e-01
+ -1.4612758e-01]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 200, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 141, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: [0] Failed to get module function input_reduce_fusion_2038: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+exit: 1
+--- blocks5_seed0 ---
+2026-08-31 12:03:55.311 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 12:03:56.156 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.1s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 121.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 2.038e-07
+[grad] dL/dtheta at z=0: [ 5.38525544e-02 -9.26108938e-03  1.08745466e-04  1.70107394e-01
+ -2.14807615e-01]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 200, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 141, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: [0] Failed to get module function input_reduce_fusion_2038: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+exit: 1
+--- blocks5_seed1 ---
+2026-08-31 12:14:35.082 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 12:14:35.943 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.1s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 118.0s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.426e-06
+[grad] dL/dtheta at z=0: [ 4.3496717e-02 -8.7073836e-03  1.1038387e-04  1.6543479e-01
+ -2.0033452e-01]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 200, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 141, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: [0] Failed to get module function input_reduce_fusion_2038: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+exit: 1
+--- blocks5_seed2 ---
+2026-08-31 12:25:10.722 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 12:25:11.584 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.0s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 120.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 8.816e-06
+[grad] dL/dtheta at z=0: [ 1.8282201e-02 -6.1457711e-03 -1.3497207e-04  1.3412611e-01
+ -1.4612758e-01]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 200, in <module>
+    report(run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e8_tetris.py", line 141, in run
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: [0] Failed to get module function input_reduce_fusion_2038: CUDA_ERROR_OUT_OF_MEMORY: out of memory [executable_name='jit_sqrt']
+exit: 1
+=== tetris done ===

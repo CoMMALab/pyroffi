@@ -1,0 +1,56 @@
+--- blocks3_seed0 ---
+2026-08-31 18:56:05.644 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 18:56:06.462 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 19.3s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+E0831 19:02:46.604208 4131722 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 19:04:15.877828 4131463 slow_operation_alarm.cc:140] The operation took 3m29.27392982s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1061.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.156e-06
+[grad] dL/dtheta at z=0: [-9.1412850e-04  9.9783174e-05  2.0922218e-04  2.8119674e-02
+ -2.1424932e-02 -6.0896170e-03]
+E0831 19:43:40.818615 4131722 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 19:44:16.602416 4131463 slow_operation_alarm.cc:140] The operation took 2m35.787898468s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00505  move_rel=1.115e+30 reduction=205.27x ok  fit_time=820.6s
+[time] wall=2960.2s  fit=820.6s
+[out] wrote iosp/data/results/tower/blocks3_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.07368     +0.0% vs uniform
+  tower IOSP fit                         0.00505    +93.1% vs uniform
+  oracle theta*                          0.00077    +98.9% vs uniform
+
+param_err (reported, NOT criterion): 0.0490
+  effort         0.0805    0.0757
+  smooth         0.2134    0.2057
+  clearance      0.1415    0.1248
+  orient         0.1060    0.1022
+  z_align        0.1630    0.1524
+  skeleton       0.2955    0.3392
+exit: 0
+--- blocks3_seed1 ---
+2026-08-31 19:47:24.917 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 19:47:25.726 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.8s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6
+E0831 19:54:01.345162 4181981 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 19:55:36.158578 4181895 slow_operation_alarm.cc:140] The operation took 3m34.813513036s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************

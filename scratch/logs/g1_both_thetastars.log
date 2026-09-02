@@ -1,0 +1,119 @@
+2026-08-28 12:59:47.743 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 12:59:48.606 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+whitened=True
+per-demo, per-feature gradient norms (transport phase only):
+  [clear] {'transport.smooth': 0.276275, 'transport.clearance': 0.076843, 'transport.line_dev': 0.33155}
+  [smooth] {'transport.smooth': 0.000335, 'transport.clearance': 0.0, 'transport.line_dev': 0.000825}
+  [shape] {'transport.smooth': 0.002594, 'transport.clearance': 1e-06, 'transport.line_dev': 0.004354}
+
+combined Gram matrix (averaged over 3 demos):
+[[ 0.0255 -0.0049 -0.0198]
+ [-0.0049  0.002  -0.0009]
+ [-0.0198 -0.0009  0.0366]]
+
+eigenvalues (trace-normalized, ascending): [1.0856538e-04 5.7678056e-01 2.4231110e+00]
+
+pairwise cosines PER DEMO (not averaged -- averaging could hide a
+collinearity that only shows up strongly on one demo):
+  [clear]
+    transport.smooth vs transport.clearance  cos=-0.6897
+    transport.smooth vs transport.line_dev   cos=-0.6489
+    transport.clearance vs transport.line_dev cos=-0.1026
+  [smooth]
+    transport.smooth vs transport.clearance  cos=-0.2568
+    transport.smooth vs transport.line_dev   cos=-0.6868
+    transport.clearance vs transport.line_dev cos=0.0224
+  [shape]
+    transport.smooth vs transport.clearance  cos=-0.3070
+    transport.smooth vs transport.line_dev   cos=-0.9458
+    transport.clearance vs transport.line_dev cos=0.4659
+
+============================================================
+CANONICAL PROCEDURE  theta_star='natural'  alpha0_mode='multistart', nonneg_theta=True, n_steps=40, n_starts=16
+============================================================
+E0828 13:19:03.610138 1314824 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 13:19:09.740460 1314723 slow_operation_alarm.cc:140] The operation took 2m6.130400703s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+  [grad probe] alpha=0:      |grad|=2.061103e+07  (expect ~0, degenerate corner)
+  [grad probe] alpha0=0.001  |grad|=1.260626e+02  ||theta_transport||=0.0007
+  [grad probe] alpha0=0.050  |grad|=3.036505e+00  ||theta_transport||=0.0349
+  [grad probe] alpha0=0.200  |grad|=1.013638e+00  ||theta_transport||=0.1465
+  [multistart] alpha0=[0.2 0.2]  best_loss=0.48231  alpha_hat=[0.2865817  0.12020869]
+  [multistart] alpha0=[0.01867014 0.19912666]  best_loss=0.44543  alpha_hat=[-0.39785433  0.04475485]
+  [multistart] alpha0=[-0.07052884  0.09814457]  best_loss=0.44543  alpha_hat=[-0.1205285  0.0481449]
+  [multistart] alpha0=[ 0.02954856 -0.11441313]  best_loss=0.44543  alpha_hat=[-0.16896936  0.08559192]
+  [multistart] alpha0=[-0.21554247 -0.12494357]  best_loss=0.44543  alpha_hat=[-0.4050628   0.07218709]
+  [multistart] alpha0=[0.2508561  0.09932395]  best_loss=0.19281  alpha_hat=[ 0.2814493  -0.10509669]
+  [multistart] alpha0=[ 0.12461374 -0.18360865]  best_loss=0.13128  alpha_hat=[ 0.2124847  -0.19045407]
+  [multistart] alpha0=[ 0.0148391  -0.29901963]  best_loss=0.44543  alpha_hat=[-0.45642114  0.2586881 ]
+  [multistart] alpha0=[-0.12911874  0.11818811]  best_loss=0.44543  alpha_hat=[-0.1897567   0.17950584]
+  [multistart] alpha0=[-0.10052206 -0.02144614]  best_loss=0.44543  alpha_hat=[-0.3842287  0.2622605]
+  [multistart] alpha0=[0.1331788  0.04813671]  best_loss=0.27989  alpha_hat=[ 0.08317938 -0.00186261]
+  [multistart] alpha0=[-0.08773601  0.07058459]  best_loss=0.44543  alpha_hat=[-0.45980975  0.4493303 ]
+  [multistart] alpha0=[0.15116632 0.13219975]  best_loss=0.14642  alpha_hat=[ 0.67619705 -0.42660838]
+  [multistart] alpha0=[0.02312304 0.11092035]  best_loss=0.44543  alpha_hat=[-0.07659646  0.00304472]
+  [multistart] alpha0=[-0.10411993  0.00311754]  best_loss=0.44543  alpha_hat=[-0.10498773  0.00233877]
+  [multistart] alpha0=[-0.21893094  0.14043665]  best_loss=0.44543  alpha_hat=[-0.12733148  0.04641694]
+  [multistart] BEST start alpha0=[ 0.12461374 -0.18360865]  best_loss=0.13128
+  [adam trace] loss per step: [1.40008, 1.41319, 1.40128, 1.39626, 2.19534, 1.42935, 1.4095, 0.52958, 0.1494, 0.13128, 0.14604, 0.15193, 0.1528, 0.156, 0.15598, 0.16638, 0.17347, 0.16712, 0.15835, 0.16131, 0.16612, 0.18294, 0.16685, 0.16547, 0.1663, 0.18003, 0.18453, 0.17956, 0.19378, 0.19878, 0.20478, 0.21372, 0.21632, 0.21806, 0.24053, 0.22152, 0.24415, 0.24456, 0.27617, 0.27478]
+  [G1 non-degeneracy] ||alpha_hat - alpha0||=8.813720e-02 (rel 3.972e-01);  loss 1.40008 -> 0.13128 (reduction 10.66x)
+  [G1 non-degeneracy] OK -- alpha_hat moved and loss improved
+selected rank k = 2  (eigenvalues: [1.0856538e-04 5.7678056e-01 2.4231110e+00])  alpha0_mode=multistart
+theta_transport_star = [0.10363097 0.28169817 0.06285536]
+theta_transport_hat  = [0.         0.04271352 0.03012824]  (alpha_hat=[ 0.2124847  -0.19045407])
+
+param_err, no-fit baseline (alpha=0, i.e. theta=[0,0,0]): 0.3067
+param_err, after fitting:                                0.2625
+fit RMSE, JOINT SPACE (reconstruction of the FIT-scene demo):  0.3608
+
+held-out generalization RMSE, JOINT SPACE (fitted vs no-fit baseline):
+  [heldout_clear]  fitted=0.4739   no-fit=0.6424
+fit_s=209.39s
+G1 VERDICT [natural]: non-degenerate  move_rel=3.972e-01  loss_reduction=10.66x
+
+============================================================
+CANONICAL PROCEDURE  theta_star='demo'  alpha0_mode='multistart', nonneg_theta=True, n_steps=40, n_starts=16
+theta_star_demo = [0.12080187 0.14659062 0.1217296 ]
+============================================================
+  [grad probe] alpha=0:      |grad|=1.966043e+07  (expect ~0, degenerate corner)
+  [grad probe] alpha0=0.001  |grad|=1.001421e+02  ||theta_transport||=0.0007
+  [grad probe] alpha0=0.050  |grad|=4.240942e+00  ||theta_transport||=0.0349
+  [grad probe] alpha0=0.200  |grad|=1.076827e+00  ||theta_transport||=0.1465
+  [multistart] alpha0=[0.2 0.2]  best_loss=0.41962  alpha_hat=[0.31379688 0.22803427]
+  [multistart] alpha0=[0.05750805 0.19155371]  best_loss=0.11417  alpha_hat=[ 0.6137849  -0.35199624]
+  [multistart] alpha0=[-0.07052884  0.09814457]  best_loss=0.38741  alpha_hat=[-0.1205285  0.0481449]
+  [multistart] alpha0=[ 0.02954856 -0.11441313]  best_loss=0.38741  alpha_hat=[-0.2535658   0.17144236]
+  [multistart] alpha0=[-0.21554247 -0.12494357]  best_loss=0.38741  alpha_hat=[-0.47806877  0.14891957]
+  [multistart] alpha0=[0.2508561  0.09932395]  best_loss=0.42374  alpha_hat=[0.59686166 0.44532818]
+  [multistart] alpha0=[ 0.12461374 -0.18360865]  best_loss=0.10105  alpha_hat=[ 0.21322483 -0.17725593]
+  [multistart] alpha0=[ 0.0148391  -0.29901963]  best_loss=0.38741  alpha_hat=[-0.4461421   0.13792211]
+  [multistart] alpha0=[-0.12911874  0.11818811]  best_loss=0.38741  alpha_hat=[-0.17701423  0.16640553]
+  [multistart] alpha0=[-0.10052206 -0.02144614]  best_loss=0.38741  alpha_hat=[-0.3656869  0.2437186]
+  [multistart] alpha0=[0.1331788  0.04813671]  best_loss=0.27392  alpha_hat=[ 0.08318083 -0.00186061]
+  [multistart] alpha0=[-0.08773601  0.07058459]  best_loss=0.38741  alpha_hat=[-0.4563281   0.44283453]
+  [multistart] alpha0=[0.15116632 0.13219975]  best_loss=0.10733  alpha_hat=[ 0.6114368 -0.3607552]
+  [multistart] alpha0=[0.02312304 0.11092035]  best_loss=0.38741  alpha_hat=[-0.12235734  0.01678892]
+  [multistart] alpha0=[-0.10411993  0.00311754]  best_loss=0.38741  alpha_hat=[-0.0956088  -0.00602333]
+  [multistart] alpha0=[-0.21893094  0.14043665]  best_loss=0.38741  alpha_hat=[-0.58916783  0.51670295]
+  [multistart] BEST start alpha0=[ 0.12461374 -0.18360865]  best_loss=0.10105
+  [adam trace] loss per step: [1.36402, 1.37675, 1.37144, 1.3567, 1.38296, 1.3936, 0.52456, 0.15014, 0.10105, 0.11757, 0.11288, 0.12759, 0.13824, 0.14183, 0.14895, 0.15656, 0.17553, 0.20836, 0.26175, 0.74985, 0.42422, 0.42422, 0.4242, 0.42428, 0.42421, 0.42424, 0.42422, 0.42423, 0.42421, 0.42422, 0.4244, 0.42451, 0.42496, 0.4247, 0.42502, 0.42482, 0.42487, 0.42474, 0.4245, 0.42453]
+  [G1 non-degeneracy] ||alpha_hat - alpha0||=8.883852e-02 (rel 4.003e-01);  loss 1.36402 -> 0.10105 (reduction 13.50x)
+  [G1 non-degeneracy] OK -- alpha_hat moved and loss improved
+selected rank k = 2  (eigenvalues: [1.0856538e-04 5.7678056e-01 2.4231110e+00])  alpha0_mode=multistart
+theta_transport_star = [0.12080187 0.14659062 0.1217296 ]
+theta_transport_hat  = [0.         0.04006374 0.03433686]  (alpha_hat=[ 0.21322483 -0.17725593])
+
+param_err, no-fit baseline (alpha=0, i.e. theta=[0,0,0]): 0.2256
+param_err, after fitting:                                0.1832
+fit RMSE, JOINT SPACE (reconstruction of the FIT-scene demo):  0.3153
+
+held-out generalization RMSE, JOINT SPACE (fitted vs no-fit baseline):
+  [heldout_clear]  fitted=0.4825   no-fit=0.6158
+fit_s=207.82s
+G1 VERDICT [demo]: non-degenerate  move_rel=4.003e-01  loss_reduction=13.50x

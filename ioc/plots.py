@@ -13,6 +13,7 @@ greyscale printing and photocopying, where hue carries nothing.
 
     python -m ioc.plots                 # all figures
     python -m ioc.plots --only scaling
+    python -m ioc.plots --only scaling,ambiguity,recovery   # curated slate
 """
 
 import dataclasses
@@ -122,7 +123,7 @@ def panel_label(ax, text, dx=-0.16, dy=1.04):
 
 
 def tidy(ax):
-    ax.grid(True, alpha=0.7, zorder=0)
+    ax.grid(True, alpha=0.3, lw=0.4, zorder=0)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
@@ -158,10 +159,10 @@ def fig_scaling():
             ok = [v for v in vals if v]
             if len(ok) < len(vals):
                 censored.append((d["K"], m, len(ok), len(vals)))
-            if len(ok) >= 2:
+            if len(ok) >= 1:
                 series[m].append(np.median(ok))
-                lo[m].append(np.percentile(ok, 25))
-                hi[m].append(np.percentile(ok, 75))
+                lo[m].append(np.percentile(ok, 25) if len(ok) >= 2 else np.nan)
+                hi[m].append(np.percentile(ok, 75) if len(ok) >= 2 else np.nan)
             else:
                 series[m].append(np.nan)
                 lo[m].append(np.nan)
@@ -176,16 +177,11 @@ def fig_scaling():
     else:
         print("  [fig1] no censoring: every seed reached the target")
 
-    fig, axes = plt.subplots(1, 2, figsize=(COL2, 2.5))
-    ax = axes[0]
+    fig, ax = plt.subplots(1, 1, figsize=(COL1, 2.5))
     for m in ("fd", "cmaes", "implicit"):
         st = STYLE[m]
         ax.plot(Ks, series[m], marker=st["marker"], ls=st["ls"], color=st["color"],
                 label=st["label"], clip_on=False, zorder=3)
-        # Median with the inter-quartile band across seeds: a bare median line
-        # asserts a precision the 3-seed sample does not have.
-        ax.fill_between(Ks, lo[m], hi[m], color=st["color"], alpha=0.13, lw=0,
-                        zorder=2)
     ax.set_yscale("log")
     ax.set_xlabel("cost parameters $K$")
     ax.set_ylabel(r"solves to reach $L<10^{-2}$")
@@ -194,30 +190,9 @@ def fig_scaling():
     h, l = ax.get_legend_handles_labels()
     order = [l.index(STYLE[m]["label"]) for m in ("implicit", "fd", "cmaes")]
     ax.legend([h[i] for i in order], [l[i] for i in order], loc="upper left", ncol=1)
-    panel_label(ax, "(a)")
-
-    ax = axes[1]
-    base = np.asarray(series["implicit"], float)
-    for m in ("fd", "cmaes"):
-        st = STYLE[m]
-        ratio = np.asarray(series[m], float) / base
-        ax.plot(Ks, ratio, marker=st["marker"], ls=st["ls"], color=st["color"],
-                label=st["label"], clip_on=False)
-        # direct label: identity without relying on hue alone
-        ax.annotate(f"{ratio[-1]:.0f}$\\times$", (Ks[-1], ratio[-1]),
-                    textcoords="offset points", xytext=(-4, 6),
-                    color=st["color"], fontsize=7, ha="right")
-    ax.axhline(1.0, color="0.4", lw=0.6, ls="-")
-    ax.annotate("parity", (Ks[-1], 1.0), textcoords="offset points",
-                xytext=(-2, 4), fontsize=6.5, color="0.4", ha="right")
-    ax.set_xlabel("cost parameters $K$")
-    ax.set_ylabel("solves relative to implicit")
-    ax.set_xticks(Ks)
-    tidy(ax)
-    panel_label(ax, "(b)")
     fig.suptitle("Sample Efficiency vs. Cost Dimension", fontsize=9, y=1.0,
                 fontweight="bold")
-    fig.tight_layout(w_pad=1.6, rect=(0, 0, 1, 0.93))
+    fig.tight_layout()
     finish(fig, "fig1_scaling")
 
 
@@ -512,6 +487,78 @@ def fig_environments():
 
 
 # ---------------------------------------------------------------------------
+# Fig. 2b - IOC ambiguity: one start/goal, several cost-explained paths
+# ---------------------------------------------------------------------------
+
+# theta order is UNICYCLE_NAMES: speed, turn, steer_smooth, obstacle, nonholonomic
+_AMBIG_THETAS = {
+    "aggressive": ([0.60, 0.03, 0.02, 0.05, 0.30], "cuts close, direct"),
+    "smooth":     ([0.05, 0.20, 0.10, 0.55, 0.20], "wide clearance margin"),
+    "balanced":   ([0.20, 0.15, 0.10, 0.35, 0.20], "balanced tradeoff"),
+}
+_AMBIG_STYLE = {
+    "aggressive": dict(color="#D55E00", ls="--"),
+    "smooth":     dict(color="#0072B2", ls="-"),
+    "balanced":   dict(color="#009E73", ls="-."),
+}
+
+
+def fig_ambiguity():
+    """One demonstration scene, several plausible costs.
+
+    The identifiability problem this study addresses is not abstract: the same
+    start, goal and obstacles admit distinct locally-optimal paths depending on
+    the (unknown) weighting between speed, turn, steering-smoothness, obstacle
+    clearance and the nonholonomic residual. Each curve here is a real solve of
+    `bench2d`'s unicycle benchmark under one hand-chosen theta -- not an
+    illustrative sketch -- sharing the scene from `fig_environments`' car panel
+    so the two figures are directly comparable.
+    """
+    T, M = 30, 1
+    start_goal = [((-2.3, 0.0, 0.0), (2.3, 0.0, 0.0))]
+    obstacles = [(-1.05, 0.22, 0.42), (0.0, -0.26, 0.44), (1.05, 0.22, 0.42)]
+
+    fig, ax = plt.subplots(figsize=(COL1, COL1 * 0.78))
+    for ox, oy, orr in obstacles:
+        ax.add_patch(Circle((ox, oy), orr, facecolor=OBS_C, edgecolor="0.5",
+                            lw=0.5, zorder=1))
+
+    for key, (theta, desc) in _AMBIG_THETAS.items():
+        env = _make_env("unicycle", 1, M, T, 2, 0.45, theta=theta,
+                        n_obstacles=3, shared_obstacle=obstacles,
+                        demo_pairs=start_goal)
+        st = _AMBIG_STYLE[key]
+        p, phi = env["demos"][0][:, :2], env["demos"][0][:, 2]
+        ax.plot(p[:, 0], p[:, 1], color=st["color"], ls=st["ls"], lw=1.5,
+                alpha=0.95, zorder=3, solid_capstyle="round", path_effects=HALO,
+                label=f"{key} ({desc})")
+        for t in range(2, len(p) - 2, 9):
+            ax.arrow(p[t, 0], p[t, 1], 0.20 * np.cos(phi[t]), 0.20 * np.sin(phi[t]),
+                     head_width=0.08, head_length=0.08, fc=st["color"],
+                     ec=st["color"], lw=0.4, length_includes_head=True, zorder=4)
+
+    s0, g0 = start_goal[0]
+    ax.plot(*s0[:2], marker="o", ms=4.5, color="#222222", zorder=5)
+    ax.plot(*g0[:2], marker="*", ms=8, color="#222222", zorder=5)
+    ax.annotate("start", s0[:2], xytext=(-4, -12), textcoords="offset points",
+               fontsize=6.5, ha="center")
+    ax.annotate("goal", g0[:2], xytext=(4, -12), textcoords="offset points",
+               fontsize=6.5, ha="center")
+
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlim(-2.6, 2.6)
+    ax.set_ylim(-1.5, 1.5)
+    ax.legend(loc="upper center", fontsize=6, ncol=1,
+             bbox_to_anchor=(0.5, -0.02))
+    fig.suptitle("Cost Ambiguity: Multiple Optima from One Demonstration",
+                fontsize=9, y=1.02, fontweight="bold")
+    fig.tight_layout(rect=(0, 0.08, 1, 0.93))
+    finish(fig, "fig2b_ambiguity")
+
+
+# ---------------------------------------------------------------------------
 # Fig. 3 - recovered reward field and recovered trajectories
 # ---------------------------------------------------------------------------
 
@@ -765,7 +812,7 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     noise_lab = "High" if "highnoise" in name else "Low"
     fig.suptitle(f"Recovered Cost Fields Under {noise_lab} Demonstration Noise "
                 f"($\\sigma={demo_noise:g}$)", fontsize=9, y=0.99, fontweight="bold")
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.82, bottom=0.16)
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.92, bottom=0.16)
     print(f"  [{name}] sigma={demo_noise:g}  "
           f"Gram lambda_2/lambda_K = {ev[1] / ev[-1]:.2e}  "
           + "  ".join(f"{m}_L1={errs[m]:.3f}" for m, _ in fits)
@@ -816,41 +863,25 @@ def fig_noise():
     floor = 1e-7  # KKT is exact at sigma=0 (regret ~1e-19); an unclipped log
     # axis would span 12 decades of empty space and crush the informative range.
 
-    fig, axes = plt.subplots(1, 2, figsize=(COL2, 2.4))
-    for ax, field, ylab, logy in (
-            (axes[0], "theta_l1", r"$\|\hat\theta-\theta^\star\|_1$", False),
-            (axes[1], "regret", "cost regret", True)):
-        for m in methods:
-            st = STYLE[m]
-            vals = [[t["methods"][m][field] for t in rows[s].values()] for s in sig]
-            med = np.array([np.median(v) for v in vals])
-            q1 = np.array([np.percentile(v, 25) for v in vals])
-            q3 = np.array([np.percentile(v, 75) for v in vals])
-            if logy:
-                med, q1, q3 = (np.maximum(a, floor) for a in (med, q1, q3))
-            x = sig + dodge.get(m, 0.0)
-            ax.plot(x, med, marker=st["marker"], ls=st["ls"], color=st["color"],
-                    label=st["label"], clip_on=False, zorder=3)
-            ax.fill_between(x, q1, q3, color=st["color"], alpha=0.12, lw=0, zorder=2)
-        ax.set_xlabel(r"demonstration noise $\sigma$ [rad]")
-        ax.set_ylabel(ylab)
-        ax.set_xticks(sig)
-        tidy(ax)
-    axes[1].set_yscale("log")
-    axes[1].set_ylim(bottom=floor)
-    # KKT is exact on noiseless demonstrations; say so rather than let the
-    # clipped marker imply a finite value.
-    axes[1].annotate("Inverse KKT exact\n($\\approx\\!10^{-19}$)", xy=(sig[0], floor),
-                     xytext=(34, 30), textcoords="offset points", fontsize=6,
-                     color=STYLE["kkt"]["color"],
-                     arrowprops=dict(arrowstyle="-", lw=0.5,
-                                     color=STYLE["kkt"]["color"]))
-    axes[0].legend(loc="upper left", ncol=2, fontsize=6.5)
-    panel_label(axes[0], "(a)")
-    panel_label(axes[1], "(b)")
-    fig.suptitle("Weight-Recovery Robustness to Demonstration Noise (Robot)",
+    fig, ax = plt.subplots(1, 1, figsize=(COL1, 2.4))
+    for m in methods:
+        st = STYLE[m]
+        vals = [[t["methods"][m]["theta_l1"] for t in rows[s].values()] for s in sig]
+        med = np.array([np.median(v) for v in vals])
+        q1 = np.array([np.percentile(v, 25) for v in vals])
+        q3 = np.array([np.percentile(v, 75) for v in vals])
+        x = sig + dodge.get(m, 0.0)
+        ax.plot(x, med, marker=st["marker"], ls=st["ls"], color=st["color"],
+                label=st["label"], clip_on=False, zorder=3)
+        ax.fill_between(x, q1, q3, color=st["color"], alpha=0.12, lw=0, zorder=2)
+    ax.set_xlabel(r"demonstration noise $\sigma$ [rad]")
+    ax.set_ylabel(r"$\|\hat\theta-\theta^\star\|_1$")
+    ax.set_xticks(sig)
+    tidy(ax)
+    ax.legend(loc="upper left", ncol=2, fontsize=6.5)
+    fig.suptitle("Weight Recovery vs. Demonstration Noise (Robot)",
                 fontsize=9, y=1.03, fontweight="bold")
-    fig.tight_layout(w_pad=1.6, rect=(0, 0, 1, 0.92))
+    fig.tight_layout()
     finish(fig, "fig4_noise_robot")
 
 
@@ -902,18 +933,16 @@ def fig_kkt_seed():
             meds = {}
             for arm in ("random", "kkt_seed"):
                 st = _KKT_SEED_STYLE[arm]
-                vals = [[t["arms"][arm]["regret"] for t in parsed[(bw, R, s)].values()]
+                vals = [[t["arms"][arm]["l1"] for t in parsed[(bw, R, s)].values()]
                         for s in sigmas if (bw, R, s) in parsed]
                 med = np.array([np.median(v) for v in vals])
                 q1 = np.array([np.percentile(v, 25) for v in vals])
                 q3 = np.array([np.percentile(v, 75) for v in vals])
-                med, q1, q3 = (np.maximum(a, REGRET_FLOOR) for a in (med, q1, q3))
                 meds[arm] = med
                 ax.plot(sigmas, med, marker=st["marker"], ls=st["ls"],
                         color=st["color"], label=st["label"], clip_on=False, zorder=3)
                 ax.fill_between(sigmas, q1, q3, color=st["color"], alpha=0.15,
                                  lw=0, zorder=2)
-            ax.set_yscale("log")
             ax.set_xticks(sigmas)
             tidy(ax)
             # Headline number per panel: the noiseless-case speedup, where the
@@ -929,17 +958,17 @@ def fig_kkt_seed():
             if i == len(bws) - 1:
                 ax.set_xlabel(r"demonstration noise $\sigma$")
             if j == 0:
-                ax.set_ylabel("cost regret")
+                ax.set_ylabel(r"$\|\hat\theta-\theta^\star\|_1$")
     for i, bw in enumerate(bws):
         y0 = axes[i][0].get_position().y0
         y1 = axes[i][0].get_position().y1
         fig.text(0.005, (y0 + y1) / 2, regime_name[bw], rotation=90,
                   ha="left", va="center", fontsize=7.5)
-    fig.suptitle("Inverse-KKT Seeding: A Head Start That Fades with Noise",
-                 fontsize=8.5, y=0.995, fontweight="bold")
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7,
                bbox_to_anchor=(0.55, 0.94), frameon=False)
+    fig.suptitle("Inverse-KKT Seeding: A Head Start That Fades with Noise",
+                 fontsize=8.5, y=0.995, fontweight="bold")
     fig.tight_layout(rect=(0.03, 0, 1, 0.88))
     finish(fig, "fig4b_kkt_seed")
 
@@ -999,8 +1028,6 @@ def fig_kkt_seed_trace():
         y1 = axes[i][0].get_position().y1
         fig.text(0.005, (y0 + y1) / 2, regime_name[bw], rotation=90,
                   ha="left", va="center", fontsize=7.5)
-    fig.suptitle("Convergence from Each Initialization (Noiseless Demonstrations)",
-                 fontsize=8.5, y=0.995, fontweight="bold")
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7,
                bbox_to_anchor=(0.55, 0.94), frameon=False)
@@ -1117,33 +1144,24 @@ def fig_regime(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
         print(f"  [fig5] sigma={s:g}  " + "  ".join(
             f"{m}_l1={np.median([t[m][0] for t in trials]):.3f}" for m in methods))
 
-    fig, axes = plt.subplots(1, 2, figsize=(COL2, 2.4))
-    for ax, idx, ylab, logy in (
-            (axes[0], 0, r"$\|\hat\theta-\theta^\star\|_1$", False),
-            (axes[1], 1, "cost regret", True)):
-        for m in methods:
-            st = STYLE[m]
-            vals = [[t[m][idx] for t in trials] for trials in per_sigma]
-            med = np.array([np.median(v) for v in vals])
-            q1 = np.array([np.percentile(v, 25) for v in vals])
-            q3 = np.array([np.percentile(v, 75) for v in vals])
-            if logy:
-                med, q1, q3 = (np.maximum(a, REGRET_FLOOR) for a in (med, q1, q3))
-            ax.plot(sig, med, marker=st["marker"], ls=st["ls"], color=st["color"],
-                    label=st["label"], clip_on=False, zorder=3)
-            ax.fill_between(sig, q1, q3, color=st["color"], alpha=0.12, lw=0, zorder=2)
-        ax.set_xlabel(r"demonstration noise $\sigma$")
-        ax.set_ylabel(ylab)
-        ax.set_xticks(sig)
-        tidy(ax)
-    axes[1].set_yscale("log")
-    axes[1].set_ylim(bottom=REGRET_FLOOR)
-    axes[0].legend(loc="upper left", ncol=2, fontsize=6.5)
-    panel_label(axes[0], "(a)")
-    panel_label(axes[1], "(b)")
-    fig.suptitle("Weight-Recovery Robustness to Demonstration Noise (Multimodal Field)",
+    fig, ax = plt.subplots(1, 1, figsize=(COL1, 2.4))
+    for m in methods:
+        st = STYLE[m]
+        vals = [[t[m][0] for t in trials] for trials in per_sigma]
+        med = np.array([np.median(v) for v in vals])
+        q1 = np.array([np.percentile(v, 25) for v in vals])
+        q3 = np.array([np.percentile(v, 75) for v in vals])
+        ax.plot(sig, med, marker=st["marker"], ls=st["ls"], color=st["color"],
+                label=st["label"], clip_on=False, zorder=3)
+        ax.fill_between(sig, q1, q3, color=st["color"], alpha=0.12, lw=0, zorder=2)
+    ax.set_xlabel(r"demonstration noise $\sigma$")
+    ax.set_ylabel(r"$\|\hat\theta-\theta^\star\|_1$")
+    ax.set_xticks(sig)
+    tidy(ax)
+    ax.legend(loc="upper left", ncol=2, fontsize=6.5)
+    fig.suptitle("Weight Recovery vs. Demonstration Noise (Multimodal Field)",
                 fontsize=9, y=1.03, fontweight="bold")
-    fig.tight_layout(w_pad=1.6, rect=(0, 0, 1, 0.92))
+    fig.tight_layout()
     finish(fig, "fig5_noise_field")
 
 
@@ -1152,6 +1170,7 @@ def main(only: str = ""):
     todo = {
         "scaling": fig_scaling,
         "environments": fig_environments,
+        "ambiguity": fig_ambiguity,
         "recovery": fig_recovery,
         "recovery_highnoise": fig_recovery_highnoise,
         "noise": fig_noise,
@@ -1159,8 +1178,15 @@ def main(only: str = ""):
         "kkt_seed_trace": fig_kkt_seed_trace,
         "regime": fig_regime,
     }
+    # `--only` takes a comma-separated list: the curated paper slate is a
+    # subset of `todo`, and regenerating it should be one command.
+    want = [n.strip() for n in only.split(",") if n.strip()] if only else []
+    unknown = [n for n in want if n not in todo]
+    if unknown:
+        raise SystemExit(
+            f"unknown figure(s) {unknown}; available: {list(todo)}")
     for name, fn in todo.items():
-        if only and only != name:
+        if want and name not in want:
             continue
         print(f"[{name}]")
         fn()

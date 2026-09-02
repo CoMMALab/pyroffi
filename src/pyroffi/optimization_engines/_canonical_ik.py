@@ -133,7 +133,21 @@ def _ancestor_tables(robot, link_idx):
     key = (tuple(robot.links.names), tuple(link_idx))
     hit = _ANCESTOR_CACHE.get(key)
     if hit is None:
-        hit = _ANCESTOR_CACHE[key] = ancestor_tables(robot, link_idx)
+        hit = ancestor_tables(robot, link_idx)
+        # NEVER cache a tracer.  The tables are constants -- a numpy walk of the
+        # chain -- but `jnp.asarray` inside an active trace returns a value
+        # BOUND to that trace, and storing it in this module-level dict lets it
+        # outlive the transformation.  A later call reads it back and dies with
+        # UnexpectedTracerError pointing at `ancestor_tables` rather than at the
+        # cache that kept it.  Measured: with `sqp_ik_solve_cuda_batch` now
+        # routed through `custom_vmap`, a plain call AFTER a vmapped one hit
+        # exactly that, because custom_vmap traces its primal even when
+        # unmapped.  The sibling cache in `_implicit_diff._batch_task_jacobians`
+        # carries the same guard; this path is the one `canonical_ik` takes
+        # (CANONICAL_BY_DEFAULT with a cfg_ref returns before reaching that
+        # one), so it needs it too.
+        if not any(isinstance(t, jax.core.Tracer) for t in hit):
+            _ANCESTOR_CACHE[key] = hit
     return hit
 
 

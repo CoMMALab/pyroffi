@@ -1,0 +1,42 @@
+2026-08-27 16:33:05.405 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-27 16:33:06.320 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+features=['effort', 'collision', 'smooth']  theta*=[0.5 0.3 0.2]
+
+single start (old bad z0)  theta_hat=[9.000e-04 3.000e-04 9.989e-01]  param_err=1.5977  e_demo=1.411e-01  wall=170s
+BATCHED multistart x4      theta_hat=[0.426  0.2698 0.3042]  param_err=0.2084  e_demo=1.893e-03  wall=387s
+W0827 16:45:14.914845  396418 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 4.12GiB (rounded to 4428103680)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0827 16:45:14.915058  396418 bfc_allocator.cc:525] *____________*******______________________________**************************_______________________*
+W0827 16:45:29.693010  396413 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 4.12GiB (rounded to 4428103680)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0827 16:45:29.693350  396413 bfc_allocator.cc:525] *_________________________________________________**************************_______________________*
+W0827 16:45:36.954158  396322 hlo_rematerialization.cc:3231] Can't reduce memory use below 16.78GiB (18016318090 bytes) by rematerialization; only reduced to 17.81GiB (19124203365 bytes), down from 18.85GiB (20240871909 bytes) originally
+W0827 16:45:49.521479  396322 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 14.72GiB (rounded to 15803137024)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0827 16:45:49.521685  396322 bfc_allocator.cc:525] ___________________________________________________________________________________________________*
+Traceback (most recent call last):
+  File "/tmp/claude-1000/-home-sadmin-Work-pyroffi/cf86c6ce-7112-49e1-a95b-4d9133cceea4/scratchpad/tms.py", line 21, in <module>
+    z, tr = D.fit(p, inner, 3, sc, demos, x0s, seed=SEED, n_steps=cfg.n_outer_steps,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/ioc/diagnostics.py", line 318, in fit
+    best_Z, best_v, trace = run(Z0, n_steps)
+                            ^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/ioc/diagnostics.py", line 309, in run
+    trace.append((int(used), float(jnp.min(best_v))))
+                             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 14.72GiB. [tf-allocator-allocation-error=''] [executable_name='jit__reduce_min']

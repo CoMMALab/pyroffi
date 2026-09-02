@@ -1,0 +1,13 @@
+=== [18:34:49] study5 retry -> GPU 2
+[build] 8.4s  K=4 ('effort', 'smooth', 'clearance', 'skeleton')  N_FULL=22  pick@7 place@16  fit/test=6/6
+E0828 18:43:17.480297 1718653 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 18:48:24.822395 1718526 slow_operation_alarm.cc:140] The operation took 7m7.342186384s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[sanity] loss(z_star) = 1.499e-12
+[grad] dL/dtheta at z=0: [ 0.00978828 -0.0018382  -0.00040103 -0.00754906]

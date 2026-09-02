@@ -1,0 +1,16 @@
+2026-08-28 09:59:42.812 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 09:59:43.673 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [path B-aligned (M=3, ls=3.0, base/sq)] transport mass at ground truth = 0.4482 (Path A: same); K = 9
+  [path B-aligned (M=3, ls=3.0, base/sq)] inner stationarity ||grad_x C|| per phase:
+    approach   A=1.618e-05  B=7.203e-06
+    grasp      A=9.264e-06  B=9.262e-06
+    transport  A=5.391e-04  B=6.974e-04
+    place      A=1.437e-05  B=1.428e-05
+
+H1 determinism: rmse_a(u0) x4 = [0.05033302, 0.05033302, 0.05033302, 0.05033302]
+H2 consistency: loss(u0)=2.50921119e-03  rmse_a(u0)^2=2.53341284e-03  |grad|=5.4257e-02
+H3 trace: first=2.509211e-03 min=3.101899e-04 last=1.023509e-01 argmin=17/40
+   first 8: ['2.5092e-03', '2.3007e-03', '2.0945e-03', '1.9003e-03', '1.7084e-03', '1.5372e-03', '1.3839e-03', '1.2106e-03']
+   last  4: ['1.0523e-01', '6.4193e-02', '1.0473e-01', '1.0235e-01']
+   rmse_a(u_wide)=0.325045  sqrt(min loss)=0.017612
+   ||u_wide - u0||=1.2616e+00

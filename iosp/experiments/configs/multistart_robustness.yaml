@@ -1,0 +1,62 @@
+experiment: multistart_robustness
+module: iosp.record.multistart
+description: "Fig 2 + Table 1: multistart convergence, multi-seed robustness"
+
+defaults:
+  steps: 40
+  lr: 0.05
+  n_iters: 60
+  n_branches: 3
+  n_starts: 3
+  scene_b_scale: 1.0
+  no_render: true
+
+runs:
+  - name: joint_seed0
+    args: {space: joint, seed: 0}
+    out: iosp/data/results/multistart/joint_seed0.npz
+  - name: joint_seed1
+    args: {space: joint, seed: 1}
+    out: iosp/data/results/multistart/joint_seed1.npz
+  - name: joint_seed2
+    args: {space: joint, seed: 2}
+    out: iosp/data/results/multistart/joint_seed2.npz
+  - name: joint_seed3
+    args: {space: joint, seed: 3}
+    out: iosp/data/results/multistart/joint_seed3.npz
+  - name: joint_seed4
+    args: {space: joint, seed: 4}
+    out: iosp/data/results/multistart/joint_seed4.npz
+  - name: ee_seed0
+    args: {space: ee, seed: 0}
+    out: iosp/data/results/multistart/ee_seed0.npz
+  - name: ee_seed1
+    args: {space: ee, seed: 1}
+    out: iosp/data/results/multistart/ee_seed1.npz
+  - name: ee_seed2
+    args: {space: ee, seed: 2}
+    out: iosp/data/results/multistart/ee_seed2.npz
+  - name: ee_seed3
+    args: {space: ee, seed: 3}
+    out: iosp/data/results/multistart/ee_seed3.npz
+  - name: ee_seed4
+    args: {space: ee, seed: 4}
+    out: iosp/data/results/multistart/ee_seed4.npz
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"
+
+figures:
+  - name: fig2_multistart
+    renderer: iosp.viz.fig_multistart
+    input: iosp/data/results/multistart/joint_seed0.npz
+    out: iosp/figures/fig2_multistart.pdf
+
+tables:
+  - name: table1_robustness
+    renderer: iosp.analysis.table_robustness
+    input_dir: iosp/data/results/multistart/
+    out: iosp/figures/table1_robustness.tex

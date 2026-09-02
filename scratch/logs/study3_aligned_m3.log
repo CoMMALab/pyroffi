@@ -1,0 +1,34 @@
+
+Path B-ALIGNED (Path A with only the transport basis swapped)...
+2026-08-28 09:26:54.028 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 09:26:54.880 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [path B-aligned (M=3, ls=3.0, base/sq)] transport mass at ground truth = 0.4482 (Path A: same); K = 9
+  [path B-aligned (M=3, ls=3.0, base/sq)] inner stationarity ||grad_x C|| per phase:
+    approach   A=1.618e-05  B=7.203e-06
+    grasp      A=9.264e-06  B=9.262e-06
+    transport  A=5.391e-04  B=6.974e-04
+    place      A=1.437e-05  B=1.428e-05
+  [path B-aligned (M=3, ls=3.0, base/sq)] compile 596.7s
+  [path B-aligned (M=3, ls=3.0, base/sq)] jac+svd 635.0s; eigenvalues (desc) = [5.9503e+00 2.6383e+00 4.1134e-01 3.4407e-07 3.4407e-07 2.2988e-07 1.4690e-11 2.0589e-15 1.5766e-15]
+  [path B-aligned (M=3, ls=3.0, base/sq)] r = 3 of K = 9 (>= 95% cumulative trace)
+  eigendirection loadings (|component| >= 0.2, descending eigenvalue):
+    lam= 5.9503e+00  +0.842*kernel[2]  -0.504*kernel[1]
+    lam= 2.6383e+00  -0.765*kernel[1]  +0.438*kernel[0]  -0.336*kernel[2]
+    lam= 4.1134e-01  +0.797*kernel[0]  -0.280*approach.smooth  -0.279*approach.clearance  -0.279*place.smooth  -0.279*grasp.smooth
+    lam= 3.4407e-07  -1.000*place.standoff
+    lam= 3.4407e-07  -1.000*grasp.standoff
+  [path B-aligned (M=3, ls=3.0, base/sq)] |<u_1, gauge>| = 0.0000; gauge lands at eigen-index 7 (lam=2.059e-15)
+
+=== path B-aligned (M=3, ls=3.0, base/sq): r = 3 of K = 9 identifiable directions ===
+                        fit RMSE (A)  gen RMSE (B)
+init (u=0)                    0.0503             -
+wide fit (all K)              0.3250        0.5454
+refit on U_r                  0.0500        0.3391
+
+                        ||dtheta||    ||dz||     top-r      null
+wide                        0.2120    1.5073    0.9605    1.1617
+refit                       0.2101    1.9139    0.6290    1.8076
+
+fraction of (z_star - z_prior) inside span(U_r): 0.319   <- the generalization ceiling this demo supports
+
+wall: wide 58.4s, gram 635.0s, refit 59.4s

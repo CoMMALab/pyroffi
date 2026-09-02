@@ -1,0 +1,10 @@
+{
+  "config_hash": "f243a1f1bc79",
+  "git_sha": "017498d501d632c71cc740a4662adbc5318be4e5",
+  "timestamp": "2026-08-30T13:53:01-0400",
+  "gpu_id": "2",
+  "wall_clock_seconds": 564.0,
+  "returncode": 0,
+  "run": "eigen_projection",
+  "out": "iosp/data/results/identifiability/eigen_projection.npz"
+}

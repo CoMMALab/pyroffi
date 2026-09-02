@@ -41,6 +41,14 @@ def kkt_fit(grad_x, ctxs, demos, K, *, n_steps=400, lr=0.05, return_gram=False):
     some combination of features leaves the demonstrations unchanged, so *no*
     method can recover theta along it and a large L1 error there is a property of
     the data, not of the optimizer.  Set `return_gram` to get it.
+
+    When rank(G) = r < K, G is not just a warning -- it is the object the fit
+    should be *restricted to*: eigendecompose G = U Lambda U^T, keep the r
+    directions above threshold, and refit in the U_r coordinates instead of
+    over all K weights.  See `iosp/THEORY_IDENTIFIABLE_REFIT.md` §1-2 (the
+    feature-gradient construction here is the `g_ik = grad_x phi_k` Gram of
+    that document's §1; the bilevel refit wants the *sensitivity* Gram
+    `S_i = dx_i*/dtheta` instead, since that is what the outer loss can see).
     """
     e = jnp.eye(K)
 

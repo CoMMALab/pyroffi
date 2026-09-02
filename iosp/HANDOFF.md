@@ -1,5 +1,116 @@
 # IOSP handoff — 2026-08-24
 
+## Update 2026-08-25: segment-freeze ablation + eigen-projected recovery
+
+New investigation, parallel to Study 1 (below), asking a different question:
+Study 1 diagnoses the minimal K=3 transport-only model; this asks WHERE in
+the full 4-segment composed chain (`iosp/pickplace.py`) recovery breaks,
+starting from the fact (verified) that `ioc.robot.e1_identifiability`'s
+single-segment point-to-point IOC already works cleanly (theta_cos 0.97-1.00
+across sigma=0-0.05). Two new scripts, both stock components only (no new
+solver code):
+
+- **`iosp/study0_segment_ablation.py`** — freezes all-but-a-growing-subset of
+  `pickplace.py`'s 4 segments at their TRUE ground-truth weights and fits
+  only the free subset, via a mask over a FIXED-SHAPE 9-dim `z` (not a
+  variable-length vector) so the whole schedule shares ONE ~22min compile
+  instead of one per rung (see module docstring for the trick). Also has
+  `anchor_obstacle_to_transport`/`anchor_obstacles_batch` +
+  `main_multidemo()` for the multi-demo coverage check.
+- **`iosp/study0d_eigen_projected_recovery.py`** — rebuilds
+  `identifiability_check.py`'s feature-gradient Gram matrix on a given scene,
+  selects the top-k eigendirections by the same 95%-cumulative-trace rule
+  Study 1 uses, and reports recovery error PROJECTED onto the identifiable
+  vs. null subspace separately, instead of one raw L2 norm that conflates
+  them.
+
+**Finding 1 (ruled out a hypothesis): composition itself is not the problem.**
+Freezing 3 of 4 segments at ground truth and fitting only `transport` gives
+`free_param_err ~ 0.21-0.24`, essentially the SAME magnitude as fitting all 4
+segments + `theta_ik` jointly (~0.21-0.24). Error does not grow as more
+segments are unfrozen. Whatever is wrong is present at N=1 free segment,
+inside `pickplace.py`'s existing per-segment machinery -- not an artifact of
+chaining segments together.
+
+**Finding 2: the demo scene, not the adjoint, is the problem — and it's the
+SAME degeneracy `identifiability_check.py` already certified.**
+`recovery_bench.py`'s fixed `OBS_CENTER=[0.3,0,0.4]` is not anchored to any
+segment's actual path — measured closest approach of the straight
+`transport` EE line to it is 0.091m, past `CLEARANCE_MARGIN=0.05m`, so
+`transport.clearance`'s soft-hinge residual sits inert (near-zero gradient)
+along the whole segment. This is bad ee-space-loss-vs-param-error signature
+(ee_rmse ~0.001-0.007, tiny, while free_param_err ~0.2, large) is the exact
+signature of a flat/null identifiability direction, not a broken gradient.
+
+**Finding 3 (anchoring the obstacle to the SEED path did NOT fix it — a real,
+useful negative result, not a papered-over one).** Anchored the obstacle to
+sit ~0.02m inside the margin relative to the `transport` segment's
+straight-line SEED path (mirroring `ioc.robot.problem.RobotProblem.
+sample_scenes`'s construction). `free_param_err` did not improve (0.21→0.24,
+if anything slightly worse). Root cause, found via
+`study0d_eigen_projected_recovery.py`: the Gram-matrix gradient that
+determines identifiability is evaluated at `x_star`, the CONVERGED solution
+under `theta_star` (whose `transport.clearance` weight is 0.28, not small) —
+not at the seed. A working avoidance term does its job: it pushes the solved
+trajectory away from the obstacle until the constraint is satisfied with
+margin, and once satisfied, the residual's local gradient at that stationary
+point goes back to ~0 ("solved and inactive", not "never engaged").
+Anchoring near the SEED guarantees the problem STARTS engaged; it does not
+guarantee it STAYS engaded post-solve. Measured: `transport.clearance`
+gradient norm is still ~0.0002 after anchoring (`identifiability_check.py`-
+style Gram construction, `study0d`'s `compute_gram`). **Next step, not yet
+tried**: anchor tightly enough that avoidance can't fully clear the margin
+(smaller/negative offset), or anchor iteratively against the SOLVED
+trajectory rather than the seed.
+
+**Finding 4: eigen-projected error confirms the optimizer is behaving
+correctly, not failing.** On the anchored scene, the Gram-matrix spectrum is
+EVEN MORE degenerate than the original (pre-anchoring) certificate: trace-
+normalized eigenvalues `[8.988, 0.0112, 4.3e-4, 1.3e-5, 0, 0, 0, 0, 0]` —
+literally 5 of 9 directions exactly zero (below float precision), only k=1
+clears the 95% threshold, and that one direction is utterly dominated by
+`grasp.standoff` (gradient norm 225.8, next largest `place.standoff` at 8.0
+— i.e. essentially ALL identifiable signal in this one demo comes from
+`theta_ik`, NONE of the 7 trajopt weights are meaningfully identifiable from
+this demo). Projecting `theta_hat - theta_star` onto that 1-dim identifiable
+subspace vs. the 8-dim null subspace: `top-1 err = 0.0202` (small, recovered
+correctly), `null (8-dim) err = 0.2422` (~= the raw 0.2431). **The optimizer
+is doing exactly what an unbiased fit should: nailing the one direction the
+data constrains and drifting freely, with zero gradient, along the eight it
+structurally cannot see.** The raw `free_param_err` metric used throughout
+`study0_segment_ablation.py`/`recovery_bench.py` cannot distinguish this from
+genuine optimizer failure — always read eigen-projected error, not raw L2,
+when judging a composed-chain recovery result.
+
+**Finding 5: multi-demo coverage gives only a mild, noisy improvement (not a
+fix) — consistent with Finding 4, not with the composition hypothesis.**
+`study0_segment_ablation.main_multidemo()`, N in {1,3,5} independently-
+sampled contexts, EACH with its own individually-anchored obstacle
+(`anchor_obstacles_batch` — sharing one obstacle across jittered contexts
+would silently reintroduce the Finding-2 bug for every context but one):
+`free_param_err` transport-only 0.227→0.234→0.215 (N=1,3,5), all-free
+0.215→0.222→0.186. Small and non-monotonic (N=3 worse than N=1 in both
+rows), matching the pre-existing `sweep_demo_count` trend (0.244→0.216,
+N=1→8) and Section 4/7 of THEORY.md's prediction: more demos help only if
+they change the SPAN of the Gram matrix, and `transport.smooth`/`transport.
+upright`'s collinearity was measured to hold "regardless of scene geometry"
+-- so coverage of obstacle placement doesn't touch that degeneracy. The mild
+gain is plausibly just occasional lucky scenes where an anchored obstacle
+happens to still bind post-solve (see Finding 3), not a structural fix.
+
+**Bottom line for whoever picks this up next**: stop trying to fix this by
+tuning `theta_star`/recovery-quality numbers directly. The tools now exist
+(`study0_segment_ablation.py`, `study0d_eigen_projected_recovery.py`) to (a)
+isolate which segment/direction is broken and (b) separate "genuinely
+unidentifiable, optimizer is fine" from "actually broken" via eigen-
+projection -- USE THEM before spending time on a raw `free_param_err`/
+`param_err` number again, on this or any future iosp/ recovery script. The
+concrete open thread is Finding 3's iterative/tighter anchoring fix, and
+whether it can turn `transport.clearance` into a genuinely second
+identifiable direction (currently k=1 of 9).
+
+---
+
 Status snapshot for picking this back up. Written mid-investigation because
 the coordinating session's context is being wound down, not because the work
 is finished. A background subagent (task-id `abe82e171fc04674d` in the prior

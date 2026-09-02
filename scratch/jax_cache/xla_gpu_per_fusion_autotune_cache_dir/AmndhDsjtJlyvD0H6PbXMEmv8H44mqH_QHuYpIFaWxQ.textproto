@@ -1,0 +1,8 @@
+triton {
+  block_m: 64
+  block_n: 16
+  block_k: 32
+  num_stages: 3
+  num_warps: 4
+  num_ctas: 1
+}

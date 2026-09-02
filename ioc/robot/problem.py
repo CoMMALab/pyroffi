@@ -30,7 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 import pyroffi as pk
 
-EE_LINK = "panda_hand"
+EE_LINK = "panda_hand"  # default; `load(ee_link=...)` for a different arm
 CLEARANCE_MARGIN = 0.05  # [m] distance at which the collision feature turns on
 SOFTMIN_TAU = 0.02  # [m] temperature of the soft-min over collision pairs
 SOFTNESS = 60.0  # smoothing of the collision hinge; keeps the Hessian continuous
@@ -72,7 +72,14 @@ class RobotProblem:
     n_timesteps: int
 
     @staticmethod
-    def load(urdf_path, srdf_path, mesh_dir, n_timesteps):
+    def load(urdf_path, srdf_path, mesh_dir, n_timesteps, ee_link=EE_LINK):
+        """`ee_link` names the frame every EE-space quantity is read at.
+
+        Defaulted to the Panda's hand so every existing caller is unchanged; it
+        is a parameter because the teleop demonstrations were recorded on an
+        FR3, whose links are `fr3_*`, and scoring a demo against a forward model
+        with different kinematics would confound the fit with a robot mismatch.
+        """
         import yourdfpy
 
         urdf = yourdfpy.URDF.load(urdf_path, mesh_dir=mesh_dir)
@@ -84,7 +91,7 @@ class RobotProblem:
             robot=robot,
             robot_coll=robot_coll,
             dof=robot.joints.num_actuated_joints,
-            ee_index=robot.links.names.index(EE_LINK),
+            ee_index=robot.links.names.index(ee_link),
             n_timesteps=n_timesteps,
         )
 

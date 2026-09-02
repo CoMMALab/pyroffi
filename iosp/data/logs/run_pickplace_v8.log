@@ -1,0 +1,66 @@
+--- pickplace_seed0 ---
+2026-08-31 18:56:05.703 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 18:56:06.506 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.4s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 19:02:58.558902 4131725 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 19:05:49.395738 4131461 slow_operation_alarm.cc:140] The operation took 4m50.8369179s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1241.1s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 6.298e-06
+[grad] dL/dtheta at z=0: [-0.00681479  0.00011457  0.01082965 -0.00412943]
+E0831 19:46:20.547075 4131725 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 19:47:21.904861 4131461 slow_operation_alarm.cc:140] The operation took 3m1.358014277s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00309  move_rel=1.682e+00 reduction=70.47x ok  fit_time=756.9s
+[time] wall=3151.1s  fit=756.9s
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e4_three_stage.py", line 320, in <module>
+    _json.dump(out_s, f, indent=2)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type ArrayImpl is not JSON serializable
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06619     +0.0% vs uniform
+  tied three-stage fit                   0.00309    +95.3% vs uniform
+  oracle theta*                          0.00291    +95.6% vs uniform
+
+param_err (reported, NOT the criterion): 0.0030
+  smooth         0.1308    0.1293
+  clearance      0.2116    0.2131
+  upright        0.0798    0.0784
+  skeleton       0.5778    0.5793
+exit: 1
+--- pickplace_seed1 ---
+2026-08-31 19:50:11.365 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 19:50:12.154 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.6s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 19:57:02.566765 4184928 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************

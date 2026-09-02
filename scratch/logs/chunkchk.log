@@ -1,0 +1,13 @@
+2026-08-27 17:06:18.272 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-27 17:06:19.170 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+A/B: same 4 starts, batched together vs chunked 1-at-a-time
+  n_ctx=5   starts=4 budget=20  per_chunk=4 nchunks=1 -> theta=[0.491596 0.291328 0.217076] final_loss=2.572839e-07 wall=31s
+  n_ctx=5   starts=4 budget=4   per_chunk=1 nchunks=4 -> theta=[0.491596 0.291328 0.217076] final_loss=2.572839e-07 wall=33s
+  IDENTICAL theta: True   IDENTICAL loss: True
+
+uneven chunk split (4 starts, per_chunk=3 -> 3+1):
+  n_ctx=5   starts=4 budget=15  per_chunk=3 nchunks=2 -> theta=[0.491596 0.291328 0.217076] final_loss=2.572839e-07 wall=39s
+  matches batched: True
+
+the case that used to OOM (n_ctx=20, 4 starts):
+  n_ctx=20  starts=4 budget=20  per_chunk=1 nchunks=4 -> theta=[0.477062 0.292775 0.230164] final_loss=1.281938e-06 wall=59s

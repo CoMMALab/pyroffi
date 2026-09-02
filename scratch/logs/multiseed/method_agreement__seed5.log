@@ -1,0 +1,8 @@
+2026-08-27 22:22:33.848 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-27 22:22:34.808 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+jax devices: [CudaDevice(id=0)]  T=24  theta*=[0.5 0.3 0.2]
+
+=== method_agreement ===
+  done in 2495.4s
+
+wrote /home/sadmin/Work/pyroffi/scratch/logs/multiseed/method_agreement__seed5.json

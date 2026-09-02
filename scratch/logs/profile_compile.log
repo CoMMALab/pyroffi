@@ -1,0 +1,13 @@
+[    0.00s] import jax done
+[    1.24s] iosp imports done
+2026-08-24 15:45:32.093 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-24 15:45:33.006 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[    4.37s] PickPlaceProblem.load done (URDF/collision)
+[    4.37s] make_composed_forward_solver done (just builds a closure, should be instant)
+[    4.38s] scene built
+[   12.36s] _setup done (builds inner_by_phase via make_inner_solver + calibrate_segment -- calibrate_segment itself does forward solves for jitter calibration)
+[   67.31s] FIRST _solve_all (full IK->4-segment forward chain) done -- this is the first real trace+compile of the composed forward solve
+[   99.83s] SECOND _solve_all (same shapes) done -- should be fast if XLA cache is being hit; if still slow, that's a caching/eager-dispatch problem not a one-time compile cost
+[  102.53s] first jax.grad(phi) (one certificate feature-gradient call) done
+[  102.56s] second jax.grad(phi) (same fn/shape) done -- checks cross-call caching for un-jitted grad
+[  102.56s] DONE

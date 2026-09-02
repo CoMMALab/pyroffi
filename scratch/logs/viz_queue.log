@@ -1,0 +1,86 @@
+=== [16:20:36] path a -> GPU 1 (exclusively idle)
+2026-08-28 16:20:40.215 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 16:20:41.033 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+E0828 16:45:23.165528 1643394 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 16:45:46.494235 1643293 slow_operation_alarm.cc:140] The operation took 2m23.328774613s
+
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+  [same-demo] 3 fit + 2 held-out scenes; ONE named-cost demo; A: K=9, B: K=262
+  [path A (named)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=4.256e-05 over 5 scenes [1.8e-05 8.2e-06 7.2e-06 4.3e-05 3.9e-05]
+    grasp      worst=9.314e-06 over 5 scenes [9.3e-06 9.3e-06 9.3e-06 9.3e-06 9.3e-06]
+    transport  worst=2.600e-04 over 5 scenes [1.0e-04 2.1e-04 1.7e-04 2.6e-04 1.5e-04]
+    place      worst=1.439e-05 over 5 scenes [1.4e-05 1.4e-05 1.4e-05 1.4e-05 1.4e-05]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=2.592e-06 over 5 scenes [2.6e-06 1.7e-06 8.6e-07 1.2e-06 1.2e-06]
+    grasp      worst=2.105e-06 over 5 scenes [4.0e-09 2.1e-07 2.8e-07 2.1e-06 5.2e-07]
+    transport  worst=1.259e-03 over 5 scenes [1.9e-05 1.3e-03 9.3e-06 3.2e-05 2.8e-05]  <-- NOT CONVERGED
+    place      worst=1.880e-06 over 5 scenes [2.5e-07 1.8e-06 1.9e-06 1.1e-07 1.6e-07]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] WARNING: worst stationarity 1.259e-03 > 1e-03; the sensitivity spectrum below is NOT trustworthy
+[record] built path A (named) in 1713s
+[record] step   1/40  loss=0.002827
+[record] step   2/40  loss=0.026268
+[record] step   3/40  loss=0.003052
+[record] step   4/40  loss=0.077912
+[record] step   5/40  loss=0.001795
+[record] step   6/40  loss=0.002051
+[record] step   7/40  loss=0.001417
+[record] step   8/40  loss=0.011677
+[record] step   9/40  loss=0.036649
+[record] step  10/40  loss=0.029941
+[record] step  11/40  loss=0.059400
+[record] step  12/40  loss=0.010790
+[record] step  13/40  loss=0.000911
+[record] step  14/40  loss=0.017315
+[record] step  15/40  loss=0.000782
+[record] step  16/40  loss=0.021326
+[record] step  17/40  loss=0.000666
+[record] step  18/40  loss=0.024512
+[record] step  19/40  loss=0.020528
+[record] step  20/40  loss=0.008351
+[record] step  21/40  loss=0.000350
+[record] step  22/40  loss=0.068906
+[record] step  23/40  loss=0.000282
+[record] step  24/40  loss=0.000239
+[record] step  25/40  loss=0.000229
+[record] step  26/40  loss=0.025211
+[record] step  27/40  loss=0.000179
+[record] step  28/40  loss=0.000174
+[record] step  29/40  loss=0.000156
+[record] step  30/40  loss=0.000213
+[record] step  31/40  loss=0.020939
+[record] step  32/40  loss=0.000125
+[record] step  33/40  loss=0.074016
+[record] step  34/40  loss=0.069000
+[record] step  35/40  loss=0.000076
+[record] step  36/40  loss=0.000122
+[record] step  37/40  loss=0.000048
+[record] step  38/40  loss=0.058183
+[record] step  39/40  loss=0.012843
+[record] step  40/40  loss=0.035135
+[record] wrote scratch/viz/fit_a.npz  (0.0 MB)
+[render] wrote scratch/viz/fit_a.gif  (0.3 MB, 41 frames @ 6fps)
+=== [17:18:49] path b -> GPU 1 (exclusively idle)
+2026-08-28 17:18:53.266 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 17:18:54.086 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [same-demo] 3 fit + 2 held-out scenes; ONE named-cost demo; A: K=9, B: K=262
+  [path A (named)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=4.256e-05 over 5 scenes [1.8e-05 8.2e-06 7.2e-06 4.3e-05 3.9e-05]
+    grasp      worst=9.314e-06 over 5 scenes [9.3e-06 9.3e-06 9.3e-06 9.3e-06 9.3e-06]
+    transport  worst=2.600e-04 over 5 scenes [1.0e-04 2.1e-04 1.7e-04 2.6e-04 1.5e-04]
+    place      worst=1.439e-05 over 5 scenes [1.4e-05 1.4e-05 1.4e-05 1.4e-05 1.4e-05]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=2.592e-06 over 5 scenes [2.6e-06 1.7e-06 8.6e-07 1.2e-06 1.2e-06]
+    grasp      worst=2.105e-06 over 5 scenes [4.0e-09 2.1e-07 2.8e-07 2.1e-06 5.2e-07]
+    transport  worst=1.259e-03 over 5 scenes [1.9e-05 1.3e-03 9.3e-06 3.2e-05 2.8e-05]  <-- NOT CONVERGED
+    place      worst=1.880e-06 over 5 scenes [2.5e-07 1.8e-06 1.9e-06 1.1e-07 1.6e-07]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] WARNING: worst stationarity 1.259e-03 > 1e-03; the sensitivity spectrum below is NOT trustworthy
+[record] built path B (RKHS M=256, ls=10.0, geom/lin) in 188s
+Terminated
+=== path b FAILED (exit 143)
+=== [17:24:11] queue done

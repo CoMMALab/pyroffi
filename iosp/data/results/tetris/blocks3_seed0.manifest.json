@@ -1,0 +1,10 @@
+{
+  "config_hash": "a95115ce4bc3",
+  "git_sha": "017498d501d632c71cc740a4662adbc5318be4e5",
+  "timestamp": "2026-08-30T17:02:15-0400",
+  "gpu_id": "1",
+  "wall_clock_seconds": 2900.7,
+  "returncode": 0,
+  "run": "blocks3_seed0",
+  "out": "iosp/data/results/tetris/blocks3_seed0.npz"
+}

@@ -1,0 +1,7 @@
+other {
+  name: "BLOCK_LEVEL_EMITTER"
+  config {
+    type_url: "type.googleapis.com/xla.autotuner.BackendConfig"
+    value: "\032\016\020\004\032\006\n\004\001\004\001\004 \001(\001"
+  }
+}

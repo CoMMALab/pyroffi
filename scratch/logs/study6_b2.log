@@ -1,0 +1,31 @@
+2026-08-28 21:15:36.921 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 21:15:37.734 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 591s  B=2 branches x S=2 starts = 4 candidates, 20 outer steps each
+E0828 21:52:04.231531 1784730 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 21:53:02.894520 1784589 slow_operation_alarm.cc:140] The operation took 2m58.663079345s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] step   0/20  sum-loss=0.832002
+[fit] step   5/20  sum-loss=0.743753
+[fit] step  10/20  sum-loss=0.639438
+[fit] step  15/20  sum-loss=0.619984
+[fit] step  19/20  sum-loss=0.592868
+[fit] 4 candidates x 20 steps in 1718s (compile incl.)
+
+ cand  branch  start  train rmse  held rmse
+    0       0      0     0.00897    0.00773  <- winner (train argmin)
+    1       0      1     0.03585    0.03272
+    2       1      0     0.50955    0.36162
+    3       1      1     0.64437    0.62977
+
+selected on training loss: candidate 0 (branch 0, start 0)
+  held-out RMSE = 0.00773
+
+held-out RMSE spread across candidates: 81.5x (0.00773 .. 0.62977)
+best held-out per branch: [0.00773 0.36162] 
+-> branch choice matters

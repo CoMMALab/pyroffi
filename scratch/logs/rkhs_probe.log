@@ -1,0 +1,26 @@
+n=768  c_true range [0.5195, 2.453]
+descriptor std: q-half 1.333  dq-half 0.03441
+
+control (named library, K=3): R2_free 1.000  R2_nneg 1.000
+
+variant                                  R2_free   R2_nneg     gcos
+cos^2  base  M=16  ls=1.0  (current)       0.635     0.569    0.257
+cos^2  base  M=64  ls=1.0                  0.693     0.702    0.395
+cos^2  base  M=64  ls=3.0                  0.751     0.757    0.625
+cos^2  base  M=64  ls=10                   0.823     0.822    0.653
+cos^2  base  M=64  ls=30                   0.817     0.825    0.667
+cos^2  base  M=256 ls=10                   0.557     0.759    0.617
+1-cos  base  M=64  ls=3.0                  0.790     0.802    0.656
+1-cos  base  M=64  ls=10                   0.780     0.798    0.661
+1-cos  base  M=256 ls=10                   0.793     0.758    0.679
+1-cos  accel M=256 ls=10                   0.646     0.770    0.649
+1-cos  accel M=256 ls=30                   0.808     0.785    0.687
+1-cos  GEOM  M=64  ls=3.0                  0.841     0.831    0.781
+1-cos  GEOM  M=256 ls=3.0                  0.648     0.839    0.774
+cos^2  GEOM  M=256 ls=3.0                  0.609     0.850    0.728
+1-cos  GEOM  M=256 ls=10                   0.928     0.915    0.865
+
+per-term held-out R2 (best variant: 1-cos base M=64 ls=3.0)
+  descriptor=base   smooth free  0.976 / nneg  0.962   clearance free  0.209 / nneg  0.350   upright free  0.868 / nneg  0.815
+  descriptor=accel  smooth free  0.983 / nneg  0.968   clearance free  0.260 / nneg  0.255   upright free  0.763 / nneg  0.781
+  descriptor=geom   smooth free  0.951 / nneg  0.938   clearance free  0.483 / nneg  0.576   upright free  0.849 / nneg  0.800

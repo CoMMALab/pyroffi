@@ -1,0 +1,320 @@
+"""Study 4: inverting spasm's three-stage pick-and-place forward pass.
+
+The forward model
+-----------------
+Three stages, matching spasm:
+
+  1. IK seeds the endpoints:  q_pick, q_place  from the pick/place targets.
+  2. One trajopt per segment (approach, grasp, transport, place), chained
+     through those endpoints as boundary conditions.
+  3. One trajopt over the ENTIRE concatenated trajectory, warm-started at the
+     stage-2 output.
+
+Every earlier iosp experiment inverted stages 1-2 only, against a
+demonstrator that runs all three -- a misspecification present in every iosp
+number recorded before this script.
+
+The tied cost model, and why it is what makes this differentiable
+-----------------------------------------------------------------
+ONE preference vector theta in the simplex over
+`{smooth, clearance, upright, skeleton}` is shared by all four segments and
+by the refine pass; theta_ik is held FIXED and is not estimated.
+
+That is not only a parsimony choice, it is what makes the composition
+differentiable at all.  With a separate weight block per stage, a segment
+block theta_s reaches the loss only through the warm start x_bar, and the
+implicit adjoint gives x0 exactly zero sensitivity (x0 never appears in the
+stationarity condition grad_x C = 0, so a converged argmin genuinely forgets
+its seed).  d(loss)/d(theta_s) would be 0 EXACTLY -- the segment weights would
+be dead parameters sitting at their seed while the fit reported a number.
+Sharing theta puts it directly in stage 3's own stationarity condition, where
+the adjoint can see it:
+
+    dL/dtheta = (dL/dx*_f) (dx*_f/dtheta),    dx*_f/dtheta = -H^-1 B
+
+exactly, via `ioc.inner`'s implicit adjoint.  Fixing theta_ik additionally
+makes every stage's context constant w.r.t. the fitted parameters, which
+matters because `ioc.inner._bwd` returns a hard-coded ZERO cotangent for
+`ctx` -- a real bug (the IFT gives dx*/dc = -H^-1 grad^2_xc C, which is not
+zero), but one this model no longer depends on.
+
+What stage 2 can and cannot contribute
+--------------------------------------
+Read the gradient above literally: stage 2 influences the fit ONLY by choosing
+which basin stage 3 converges in.  If the refine problem is unimodal, x*_f is
+independent of its seed and the segment stage washes out entirely -- in which
+case "inverting spasm" reduces to inverting one global trajopt, and the task
+skeleton survives only through the `skeleton` feature and the clamped
+endpoints.  If it is multimodal, the seed does select the basin, but then
+x*_f(theta) jumps between basins and the IFT precondition fails.  `--ablate-
+stage2` measures which regime this problem is in by refitting with the refine
+pass seeded from a straight line instead of the segments; that is a headline
+result of this script, not a side check.
+
+Success criterion: behavioural
+------------------------------
+Held-out end-effector RMSE against the demonstrator's path.  `param_err` is
+reported but is NOT the criterion: this problem's cost spectrum is
+near-rank-deficient, so a correct fit is expected to drift along null
+directions while reproducing behaviour.
+
+Baselines.  The zero baseline (z=0) is kept for continuity but is WEAK -- it
+sits near the flat-cost corner where the inner solve barely leaves its seed,
+so beating it partly just says "an optimizer ran".  `uniform` (theta = 1/K, a
+real solve from an uninformed prior) is the honest reference, and `oracle`
+(theta*) is the floor.
+"""
+
+import argparse
+import time
+
+import jax
+
+from iosp.config import enable_compilation_cache
+enable_compilation_cache()
+
+import jax.numpy as jnp
+import numpy as np
+
+from ioc import outer as outer_opt
+from ioc.inner import make_inner_solver
+from iosp.model import pickplace as pp
+from iosp.config import MESH_DIR, SRDF_PATH, URDF_PATH
+from iosp.model.scenes import sample_pickplace_scenes
+
+# Fixed, NOT estimated: IK is a seeding step, not a preference.
+THETA_IK = jnp.array([0.06, 0.04], dtype=jnp.float32)
+
+# Ground truth, pre-softmax.  `skeleton` highest: a demonstrator that mostly
+# honours the task skeleton but will trade some fidelity for global smoothness
+# -- that exchange rate is what this study recovers.
+Z_STAR = jnp.array([1.0, 1.5, 0.5, 2.5], dtype=jnp.float32)
+PARAM_NAMES = list(pp.THETA_SHARED_NAMES)
+
+
+def build(seed=0, n_iters=60, n_scenes=6):
+    """Assemble the tied three-stage model and the fit/test scene split.
+
+    `soft_line_search`/`soft_curvature_gate` are OFF, unlike
+    `make_composed_forward_solver`'s default: on the single-segment problem
+    those were measured to buy landscape smoothness at the cost of FD
+    agreement (cos 0.906 -> 0.324), i.e. the adjoint answering a question
+    about a slightly different solve than the one that ran.  This study's
+    claim is behavioural fidelity, so that is the wrong trade.
+    """
+    prob = pp.PickPlaceProblem.load(str(URDF_PATH), str(SRDF_PATH), str(MESH_DIR))
+    forward_solver = pp.make_composed_forward_solver(
+        n_iters=n_iters, soft_line_search=False, soft_curvature_gate=False)
+
+    rng = np.random.default_rng(seed)
+    scenes_all = sample_pickplace_scenes(rng, 2 * n_scenes)
+    fit = jax.tree.map(lambda a: a[:n_scenes], scenes_all)
+    test = jax.tree.map(lambda a: a[n_scenes:], scenes_all)
+
+    # Whitening scales are calibrated ONCE per stage and frozen across every
+    # arm and baseline: re-calibrating per arm would let one win by rescaling
+    # its features rather than by fitting them.  They stay PER-STAGE even
+    # though theta is shared -- sigma carries units, theta carries preference.
+    x0_star, phase_scenes_star, q_pick, q_place = prob.seeds(fit, THETA_IK)
+    key = jax.random.PRNGKey(seed)
+    inner_by_phase = {}
+    for p in pp.PHASES:
+        rf = prob.shared_segment_residual_fn(p)
+        scales = prob.calibrate_segment(p, rf, phase_scenes_star[p], key)
+        inner_by_phase[p] = make_inner_solver(rf, scales, forward_solver=forward_solver)
+
+    full_rf = prob.shared_full_residual_fn()
+    full_scales = prob.calibrate_full(full_rf, prob.full_scenes(fit, q_pick, q_place), key)
+    refine = make_inner_solver(full_rf, full_scales, forward_solver=forward_solver)
+
+    return dict(prob=prob, fit=fit, test=test, inner_by_phase=inner_by_phase,
+                refine=refine, seed=seed)
+
+
+def ee_paths(built, scenes, z, *, stage2=True):
+    """(B, T, 3) end-effector paths of the refined trajectory under theta=softmax(z).
+
+    `stage2=False` seeds the refine pass from a straight line instead of the
+    segment solutions -- the ablation that measures whether the segment stage
+    contributes anything the fit can see.
+    """
+    prob, refine = built["prob"], built["refine"]
+    theta = jax.nn.softmax(z)
+    theta_seg, theta_full = prob.split_shared(theta)
+    x0, phase_scenes, q_pick, q_place = prob.seeds(scenes, THETA_IK)
+    full_sc = prob.full_scenes(scenes, q_pick, q_place)
+    if stage2:
+        _, _, xs, ps = prob.solve(THETA_IK, {p: theta_seg for p in pp.PHASES},
+                                  scenes, built["inner_by_phase"], x0,
+                                  refine=refine, theta_full=theta_full)
+        x_full, sc_full = xs["full"], ps["full"]
+    else:
+        x0_full = jax.vmap(prob.seg["full"].seed)(full_sc)
+        x_full = jax.vmap(refine.solve_implicit, in_axes=(0, None, 0))(
+            x0_full, theta_full, full_sc)
+        sc_full = full_sc
+    q = jax.vmap(prob.seg["full"].unpack)(x_full, sc_full)
+    return jax.vmap(prob.ee_positions)(q)
+
+
+def make_loss(built, scenes, demos, *, stage2=True):
+    def loss(z):
+        p = ee_paths(built, scenes, z, stage2=stage2)
+        return jnp.mean(jnp.sum((p - demos) ** 2, axis=-1))
+    return loss
+
+
+def fit_z(loss_and_grad, starts, *, lr=0.05, n_steps=40):
+    best = None
+    for z0 in starts:
+        z, trace = outer_opt.adam(loss_and_grad, z0, lr=lr, n_steps=n_steps)
+        lN = min(v for _, v in trace)
+        if best is None or lN < best["lN"]:
+            best = dict(z=z, z0=z0, l0=trace[0][1], lN=lN, trace=trace)
+    a0, ah = np.asarray(best["z0"], float), np.asarray(best["z"], float)
+    mv = float(np.linalg.norm(ah - a0) / (np.linalg.norm(a0) + 1e-30))
+    red = best["l0"] / max(best["lN"], 1e-30)
+    best.update(move_rel=mv, loss_reduction=red,
+                degenerate=(not np.isfinite(mv)) or mv < 1e-3 or red < 1.05)
+    return best
+
+
+def run(seed=0, n_iters=60, n_scenes=6, n_steps=40, n_starts=8, ablate_stage2=True):
+    t_wall_start = time.perf_counter()
+    t0 = time.perf_counter()
+    built = build(seed=seed, n_iters=n_iters, n_scenes=n_scenes)
+    fit, test = built["fit"], built["test"]
+    print(f"[build] {time.perf_counter()-t0:.1f}s  K={pp.K_SHARED} {PARAM_NAMES}  "
+          f"N_FULL={pp.N_FULL}  fit/test = {n_scenes}/{n_scenes}  "
+          f"theta_ik FIXED at {np.asarray(THETA_IK)}", flush=True)
+
+    t0 = time.perf_counter()
+    demos_fit = jax.jit(lambda: ee_paths(built, fit, Z_STAR))()
+    demos_test = jax.jit(lambda: ee_paths(built, test, Z_STAR))()
+    jax.block_until_ready((demos_fit, demos_test))
+    print(f"[demos] {time.perf_counter()-t0:.1f}s (compile incl.), "
+          f"shape {tuple(demos_fit.shape)}", flush=True)
+
+    gf = jax.jit(jax.value_and_grad(make_loss(built, fit, demos_fit)))
+    jt = jax.jit(make_loss(built, test, demos_test))
+
+    sanity_val, sanity_grad = gf(Z_STAR)
+    sanity = float(sanity_val)
+    print(f"[sanity] loss(z_star) = {sanity:.3e}", flush=True)
+    assert sanity < 1e-4, f"model does not reproduce its own demo: {sanity:.3e}"
+
+    _, g0 = gf(jnp.zeros(pp.K_SHARED, jnp.float32))
+    g0 = np.asarray(g0)
+    print(f"[grad] dL/dtheta at z=0: {g0}", flush=True)
+    assert np.all(np.abs(g0) > 1e-12), f"dead parameter(s): {g0}"
+
+    rng = np.random.default_rng(seed + 1)
+    z_zero = jnp.zeros(pp.K_SHARED, dtype=jnp.float32)
+    starts = [z_zero] + [jnp.asarray(rng.normal(0, 1, pp.K_SHARED), jnp.float32)
+                         for _ in range(n_starts - 1)]
+
+    out = {}
+    t_fit = time.perf_counter()
+    b = fit_z(gf, starts, n_steps=n_steps)
+    t_fit = time.perf_counter() - t_fit
+    b["test_rmse"] = float(jnp.sqrt(jt(b["z"])))
+    out["fit"] = b
+    print(f"[fit] test RMSE {b['test_rmse']:.5f}  move_rel={b['move_rel']:.3e} "
+          f"reduction={b['loss_reduction']:.2f}x "
+          f"{'DEGENERATE' if b['degenerate'] else 'ok'}  "
+          f"fit_time={t_fit:.1f}s", flush=True)
+
+    out["baseline_zero"] = float(jnp.sqrt(jt(z_zero)))
+    out["baseline_uniform"] = out["baseline_zero"]  # softmax(0) IS uniform here
+    out["oracle"] = float(jnp.sqrt(jt(Z_STAR)))
+
+    if ablate_stage2:
+        gf2 = jax.jit(jax.value_and_grad(make_loss(built, fit, demos_fit, stage2=False)))
+        jt2 = jax.jit(make_loss(built, test, demos_test, stage2=False))
+        b2 = fit_z(gf2, starts, n_steps=n_steps)
+        b2["test_rmse"] = float(jnp.sqrt(jt2(b2["z"])))
+        out["no_stage2"] = b2
+        print(f"[ablate] refine-only (straight-line seed): test RMSE "
+              f"{b2['test_rmse']:.5f}", flush=True)
+
+    th, ths = np.asarray(jax.nn.softmax(b["z"])), np.asarray(jax.nn.softmax(Z_STAR))
+    out["theta_hat"], out["theta_star"] = th, ths
+    out["param_err"] = float(np.linalg.norm(th - ths))
+
+    t_wall = time.perf_counter() - t_wall_start
+    out["wall_s"] = float(t_wall)
+    out["fit_s"] = float(t_fit)
+    print(f"[time] wall={t_wall:.1f}s  fit={t_fit:.1f}s", flush=True)
+    return out
+
+
+def report(out):
+    print("\n=== held-out behavioural recovery (EE RMSE, m) ===")
+    ref = out["baseline_uniform"]
+    rows = [("baseline uniform (theta = 1/K)", ref),
+            ("tied three-stage fit", out["fit"]["test_rmse"])]
+    if "no_stage2" in out:
+        rows.append(("  ablation: refine only, no stage 2", out["no_stage2"]["test_rmse"]))
+    rows.append(("oracle theta*", out["oracle"]))
+    for n, v in rows:
+        print(f"  {n:36s} {v:9.5f}   {100*(1-v/ref):+6.1f}% vs uniform")
+
+    if out["fit"]["degenerate"]:
+        print(f"\nNO VERDICT: the fit is degenerate (move_rel="
+              f"{out['fit']['move_rel']:.2e}, reduction="
+              f"{out['fit']['loss_reduction']:.2f}x) -- its RMSE is its seed's.")
+        return
+    if "no_stage2" in out:
+        a, b = out["fit"]["test_rmse"], out["no_stage2"]["test_rmse"]
+        rel = abs(a - b) / max(b, 1e-30)
+        verdict = ("stage 2 is load-bearing: seeding the refine pass from the "
+                   "segments changes held-out RMSE by "
+                   f"{100*(1-a/b):+.1f}%" if rel > 0.05 else
+                   "stage 2 washes out: the refine pass reaches the same basin "
+                   "from a straight line, so on this problem inverting spasm "
+                   "reduces to inverting one global trajopt")
+        print(f"\n{verdict}.")
+    print(f"\nparam_err (reported, NOT the criterion): {out['param_err']:.4f}")
+    for n, h, s in zip(PARAM_NAMES, out["theta_hat"], out["theta_star"]):
+        print(f"  {n:12s} {h:8.4f}  {s:8.4f}")
+
+
+def _serializable(obj):
+    """Make nested dicts with numpy arrays JSON-serializable."""
+    if isinstance(obj, dict):
+        return {k: _serializable(v) for k, v in obj.items()
+                if k != "trace"}
+    if isinstance(obj, (np.ndarray, jnp.ndarray)):
+        return np.asarray(obj).tolist()
+    if isinstance(obj, (np.floating, np.integer)):
+        return float(obj)
+    if hasattr(obj, 'item'):
+        return obj.item()
+    return obj
+
+
+if __name__ == "__main__":
+    import json as _json
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--n-iters", type=int, default=60)
+    ap.add_argument("--n-scenes", type=int, default=6)
+    ap.add_argument("--n-steps", type=int, default=40)
+    ap.add_argument("--n-starts", type=int, default=8)
+    ap.add_argument("--no-ablate-stage2", action="store_true")
+    ap.add_argument("--out", default=None, help="Save results to JSON")
+    a = ap.parse_args()
+    out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
+              n_steps=a.n_steps, n_starts=a.n_starts,
+              ablate_stage2=not a.no_ablate_stage2)
+    report(out)
+    if a.out:
+        import os as _os
+        _os.makedirs(_os.path.dirname(a.out) or ".", exist_ok=True)
+        out_s = _serializable(out)
+        out_s["wall_s"] = out["wall_s"]
+        out_s["fit_s"] = out["fit_s"]
+        with open(a.out, "w") as f:
+            _json.dump(out_s, f, indent=2)
+        print(f"\nwrote {a.out}")

@@ -1,0 +1,20 @@
+
+############################################################
+# tetris_iosp: IOSP on SPaSM tetris packing: recover trajopt costs from composed pick-place demos
+############################################################
+
+============================================================
+[run] blocks3_seed0  GPU=2  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 0 --out iosp/data/results/tetris/blocks3_seed0.npz
+2026-08-30 09:03:04.393 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 09:03:05.263 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 19.2s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+E0830 09:08:57.367700 2613259 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 09:10:03.752635 2612914 slow_operation_alarm.cc:140] The operation took 3m6.385041461s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************

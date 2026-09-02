@@ -1,0 +1,596 @@
+[field+dynamics] bw0.45_R1_sigma0.0
+2026-08-30 12:10:38.245 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:10:38.339 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:10:55.381 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:10:55.382 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:10:57.133 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:10:57.133 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=1.243 regret=1.04e-01  kkt_seed: l1=0.165 regret=3.71e-09 (kkt z0 l1=0.165)
+2026-08-30 12:12:08.967 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:12:08.968 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:12:10.513 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:12:10.514 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:12:12.024 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:12:12.025 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.496 regret=3.09e-02  kkt_seed: l1=0.975 regret=1.67e-02 (kkt z0 l1=0.421)
+2026-08-30 12:13:15.919 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:13:15.920 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:13:17.463 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:13:17.464 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:13:19.037 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:13:19.038 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.955 regret=3.63e-02  kkt_seed: l1=0.355 regret=5.64e-04 (kkt z0 l1=0.326)
+2026-08-30 12:14:23.166 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:14:23.167 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:14:24.810 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:14:24.811 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:14:26.363 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:14:26.364 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.732 regret=1.30e-02  kkt_seed: l1=0.249 regret=1.88e-04 (kkt z0 l1=0.249)
+2026-08-30 12:15:31.552 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:15:31.552 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:15:33.108 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:15:33.110 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:15:34.605 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:15:34.606 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.146 regret=3.90e-04  kkt_seed: l1=0.025 regret=2.51e-11 (kkt z0 l1=0.025)
+[field+dynamics] bw0.45_R1_sigma0.01
+2026-08-30 12:16:39.603 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:16:39.604 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:16:41.194 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:16:41.195 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:16:42.737 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:16:42.738 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.524 regret=7.66e-03  kkt_seed: l1=0.173 regret=5.84e-07 (kkt z0 l1=0.215)
+2026-08-30 12:17:46.910 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:17:46.911 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:17:48.424 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:17:48.425 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:17:49.932 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:17:49.933 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.755 regret=3.03e-02  kkt_seed: l1=0.559 regret=1.11e-03 (kkt z0 l1=0.559)
+2026-08-30 12:18:53.790 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:18:53.791 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:18:55.259 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:18:55.259 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:18:56.758 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:18:56.759 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.779 regret=1.52e-02  kkt_seed: l1=1.208 regret=2.97e-02 (kkt z0 l1=0.675)
+2026-08-30 12:20:02.183 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:20:02.184 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:20:03.740 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:20:03.741 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:20:05.231 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:20:05.232 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.644 regret=1.25e-02  kkt_seed: l1=0.328 regret=1.38e-03 (kkt z0 l1=0.300)
+2026-08-30 12:21:10.542 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:21:10.543 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:21:12.122 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:21:12.123 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:21:13.696 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:21:13.697 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.671 regret=8.11e-03  kkt_seed: l1=0.081 regret=2.01e-04 (kkt z0 l1=0.072)
+[field+dynamics] bw0.45_R1_sigma0.02
+2026-08-30 12:22:17.863 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:22:17.864 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:22:19.475 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:22:19.476 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:22:21.044 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:22:21.045 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.546 regret=7.80e-03  kkt_seed: l1=0.291 regret=8.31e-04 (kkt z0 l1=0.283)
+2026-08-30 12:23:25.779 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:23:25.780 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:23:27.328 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:23:27.328 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:23:28.851 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:23:28.852 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.763 regret=2.81e-02  kkt_seed: l1=0.765 regret=2.60e-02 (kkt z0 l1=0.774)
+2026-08-30 12:24:33.975 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:24:33.976 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:24:35.728 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:24:35.730 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:24:37.368 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:24:37.369 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.866 regret=7.05e-02  kkt_seed: l1=0.722 regret=6.59e-02 (kkt z0 l1=1.335)
+2026-08-30 12:25:43.528 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:25:43.528 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:25:45.063 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:25:45.064 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:25:46.558 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:25:46.559 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.687 regret=9.92e-03  kkt_seed: l1=0.513 regret=-1.00e-02 (kkt z0 l1=0.389)
+2026-08-30 12:26:51.654 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:26:51.655 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:26:53.240 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:26:53.241 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:26:54.692 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:26:54.692 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.657 regret=7.09e-03  kkt_seed: l1=0.045 regret=2.37e-05 (kkt z0 l1=0.144)
+[field+dynamics] bw0.45_R1_sigma0.05
+2026-08-30 12:28:00.682 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:28:00.682 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:28:02.258 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:28:02.259 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:28:03.810 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:28:03.811 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.551 regret=7.81e-03  kkt_seed: l1=0.227 regret=1.40e-04 (kkt z0 l1=0.376)
+2026-08-30 12:29:09.185 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:29:09.186 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:29:10.737 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:29:10.738 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:29:12.261 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:29:12.262 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.777 regret=2.90e-02  kkt_seed: l1=0.704 regret=1.37e-02 (kkt z0 l1=1.016)
+2026-08-30 12:30:17.205 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:30:17.206 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:30:18.807 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:30:18.808 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:30:20.313 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:30:20.314 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=1.083 regret=1.38e-02  kkt_seed: l1=0.671 regret=3.90e-02 (kkt z0 l1=1.392)
+2026-08-30 12:31:26.700 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:31:26.701 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:31:28.357 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:31:28.358 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:31:29.857 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:31:29.858 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.646 regret=1.31e-02  kkt_seed: l1=0.557 regret=5.41e-03 (kkt z0 l1=0.622)
+2026-08-30 12:32:35.897 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:32:35.897 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:32:37.480 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:32:37.481 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:32:39.004 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:32:39.005 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.807 regret=9.88e-03  kkt_seed: l1=0.063 regret=6.33e-05 (kkt z0 l1=0.430)
+[field+dynamics] bw0.45_R4_sigma0.0
+2026-08-30 12:33:45.066 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:33:45.067 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:33:46.720 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:33:46.721 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:33:48.295 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:33:48.296 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.443 regret=2.35e-03  kkt_seed: l1=0.165 regret=6.95e-10 (kkt z0 l1=0.165)
+2026-08-30 12:34:27.474 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:34:27.475 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:34:29.122 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:34:29.123 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:34:30.739 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:34:30.740 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.643 regret=2.59e-01  kkt_seed: l1=0.421 regret=1.58e-06 (kkt z0 l1=0.421)
+2026-08-30 12:35:05.497 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:35:05.498 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:35:07.195 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:35:07.196 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:35:08.799 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:35:08.799 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.321 regret=5.82e-03  kkt_seed: l1=0.424 regret=2.00e-04 (kkt z0 l1=0.319)
+2026-08-30 12:35:46.202 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:35:46.203 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:35:47.827 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:35:47.828 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:35:49.412 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:35:49.413 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.767 regret=8.09e-03  kkt_seed: l1=0.315 regret=6.11e-05 (kkt z0 l1=0.249)
+2026-08-30 12:36:25.839 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:36:25.839 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:36:27.463 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:36:27.464 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:36:29.010 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:36:29.011 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.640 regret=4.30e-03  kkt_seed: l1=0.027 regret=8.85e-08 (kkt z0 l1=0.027)
+[field+dynamics] bw0.45_R4_sigma0.01
+2026-08-30 12:37:03.525 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:37:03.526 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:37:05.055 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:37:05.056 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:37:06.517 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:37:06.518 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.149 regret=1.54e-06  kkt_seed: l1=0.183 regret=2.07e-06 (kkt z0 l1=0.485)
+2026-08-30 12:37:42.237 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:37:42.238 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:37:43.801 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:37:43.802 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:37:45.314 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:37:45.315 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.899 regret=3.40e-03  kkt_seed: l1=0.993 regret=3.36e-03 (kkt z0 l1=1.000)
+2026-08-30 12:38:19.411 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:38:19.412 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:38:20.959 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:38:20.960 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:38:22.447 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:38:22.448 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.708 regret=3.38e-03  kkt_seed: l1=1.379 regret=5.57e-03 (kkt z0 l1=1.383)
+2026-08-30 12:38:57.087 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:38:57.088 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:38:58.649 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:38:58.651 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:39:00.163 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:39:00.164 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.969 regret=1.15e-02  kkt_seed: l1=0.901 regret=5.82e-03 (kkt z0 l1=0.900)
+2026-08-30 12:39:35.775 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:39:35.776 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:39:37.372 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:39:37.372 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:39:38.904 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:39:38.906 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.624 regret=2.65e-03  kkt_seed: l1=0.202 regret=1.22e-04 (kkt z0 l1=0.202)
+[field+dynamics] bw0.45_R4_sigma0.02
+2026-08-30 12:40:14.549 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:40:14.550 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:40:16.127 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:40:16.127 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:40:17.652 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:40:17.653 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.165 regret=5.08e-06  kkt_seed: l1=0.188 regret=3.04e-06 (kkt z0 l1=0.678)
+2026-08-30 12:40:50.975 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:40:50.978 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:40:52.511 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:40:52.512 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:40:53.943 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:40:53.944 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.899 regret=3.39e-03  kkt_seed: l1=1.035 regret=3.49e-03 (kkt z0 l1=1.019)
+2026-08-30 12:41:28.007 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:41:28.008 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:41:29.558 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:41:29.559 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:41:31.086 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:41:31.087 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.708 regret=3.37e-03  kkt_seed: l1=1.381 regret=5.48e-03 (kkt z0 l1=1.392)
+2026-08-30 12:42:04.553 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:42:04.553 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:42:06.110 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:42:06.111 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:42:07.590 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:42:07.591 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.969 regret=1.15e-02  kkt_seed: l1=0.733 regret=4.20e-04 (kkt z0 l1=0.949)
+2026-08-30 12:42:42.209 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:42:42.210 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:42:43.815 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:42:43.816 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:42:45.337 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:42:45.338 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.625 regret=2.66e-03  kkt_seed: l1=0.720 regret=1.53e-02 (kkt z0 l1=0.449)
+[field+dynamics] bw0.45_R4_sigma0.05
+2026-08-30 12:43:17.846 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:43:17.847 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:43:19.406 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:43:19.407 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:43:20.960 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:43:20.961 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.217 regret=3.16e-05  kkt_seed: l1=0.412 regret=3.68e-04 (kkt z0 l1=0.945)
+2026-08-30 12:43:55.137 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:43:55.138 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:43:56.725 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:43:56.726 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:43:58.214 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:43:58.215 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=0.899 regret=3.39e-03  kkt_seed: l1=0.945 regret=2.45e-03 (kkt z0 l1=1.129)
+2026-08-30 12:44:31.777 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:44:31.778 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:44:33.309 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:44:33.310 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:44:34.780 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:44:34.781 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.708 regret=3.38e-03  kkt_seed: l1=0.925 regret=4.21e-03 (kkt z0 l1=1.410)
+2026-08-30 12:45:08.816 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:45:08.817 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:45:10.403 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:45:10.404 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:45:12.003 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:45:12.008 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.969 regret=1.15e-02  kkt_seed: l1=0.610 regret=2.30e-04 (kkt z0 l1=0.891)
+2026-08-30 12:45:44.816 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:45:44.817 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:45:46.320 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:45:46.321 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:45:47.831 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:45:47.832 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.627 regret=2.67e-03  kkt_seed: l1=0.891 regret=1.93e-02 (kkt z0 l1=0.870)
+[field+dynamics] bw0.9_R1_sigma0.0
+2026-08-30 12:46:20.648 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:46:20.649 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:46:22.178 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:46:22.179 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:46:23.684 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:46:23.685 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=1.344 regret=1.31e-02  kkt_seed: l1=1.273 regret=1.72e-02 (kkt z0 l1=0.165)
+2026-08-30 12:47:29.270 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:47:29.273 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:47:30.947 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:47:30.948 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:47:32.467 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:47:32.468 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.524 regret=1.50e-01  kkt_seed: l1=0.455 regret=1.48e-03 (kkt z0 l1=0.421)
+2026-08-30 12:48:39.629 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:48:39.630 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:48:41.240 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:48:41.241 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:48:42.738 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:48:42.739 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=1.289 regret=2.31e-02  kkt_seed: l1=0.319 regret=7.91e-04 (kkt z0 l1=0.319)
+2026-08-30 12:49:49.801 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:49:49.802 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:49:51.369 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:49:51.370 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:49:52.878 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:49:52.879 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.608 regret=4.50e-03  kkt_seed: l1=0.374 regret=1.30e-03 (kkt z0 l1=0.249)
+2026-08-30 12:50:59.496 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:50:59.497 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:51:01.160 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:51:01.161 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:51:02.730 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:51:02.731 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=1.110 regret=1.67e-01  kkt_seed: l1=0.025 regret=9.34e-12 (kkt z0 l1=0.025)
+[field+dynamics] bw0.9_R1_sigma0.01
+2026-08-30 12:52:09.047 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:52:09.048 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:52:10.632 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:52:10.633 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:52:12.195 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:52:12.196 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=1.549 regret=1.99e-02  kkt_seed: l1=0.350 regret=1.68e-03 (kkt z0 l1=0.342)
+2026-08-30 12:53:18.994 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:53:18.995 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:53:20.619 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:53:20.619 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:53:22.212 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:53:22.213 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.590 regret=1.64e-01  kkt_seed: l1=0.832 regret=3.47e-03 (kkt z0 l1=0.832)
+2026-08-30 12:54:28.839 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:54:28.840 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:54:30.476 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:54:30.477 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:54:32.011 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:54:32.011 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.869 regret=6.06e-02  kkt_seed: l1=0.976 regret=-2.46e-03 (kkt z0 l1=0.976)
+2026-08-30 12:55:40.810 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:55:40.811 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:55:42.453 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:55:42.454 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:55:43.990 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:55:43.991 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.862 regret=1.10e-02  kkt_seed: l1=0.565 regret=-1.84e-03 (kkt z0 l1=0.573)
+2026-08-30 12:56:51.545 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:56:51.546 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:56:53.082 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:56:53.083 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:56:54.641 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:56:54.642 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.643 regret=7.54e-02  kkt_seed: l1=0.083 regret=8.72e-05 (kkt z0 l1=0.083)
+[field+dynamics] bw0.9_R1_sigma0.02
+2026-08-30 12:58:00.888 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:58:00.889 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:58:02.405 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:58:02.406 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:58:03.858 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:58:03.859 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=1.524 regret=1.26e-02  kkt_seed: l1=1.400 regret=2.37e-02 (kkt z0 l1=0.445)
+2026-08-30 12:59:09.906 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:59:09.907 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:59:11.459 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:59:11.460 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 12:59:12.976 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 12:59:12.977 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.588 regret=1.63e-01  kkt_seed: l1=1.016 regret=1.21e-02 (kkt z0 l1=1.016)
+2026-08-30 13:00:20.657 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:00:20.658 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:00:22.203 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:00:22.204 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:00:23.706 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:00:23.706 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.818 regret=6.15e-03  kkt_seed: l1=1.390 regret=2.49e-03 (kkt z0 l1=1.391)
+2026-08-30 13:01:33.016 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:01:33.017 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:01:34.568 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:01:34.569 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:01:36.023 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:01:36.024 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.869 regret=9.80e-03  kkt_seed: l1=0.709 regret=1.14e-02 (kkt z0 l1=0.733)
+2026-08-30 13:02:42.537 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:02:42.538 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:02:44.079 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:02:44.080 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:02:45.563 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:02:45.564 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.985 regret=5.97e-02  kkt_seed: l1=0.155 regret=2.91e-04 (kkt z0 l1=0.104)
+[field+dynamics] bw0.9_R1_sigma0.05
+2026-08-30 13:03:53.332 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:03:53.333 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:03:54.983 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:03:54.984 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:03:56.484 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:03:56.485 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=1.507 regret=1.96e-02  kkt_seed: l1=1.380 regret=1.13e-02 (kkt z0 l1=0.708)
+2026-08-30 13:05:03.098 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:05:03.099 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:05:04.662 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:05:04.663 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:05:06.210 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:05:06.211 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.590 regret=1.64e-01  kkt_seed: l1=1.025 regret=-4.42e-03 (kkt z0 l1=1.013)
+2026-08-30 13:06:13.587 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:06:13.588 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:06:15.223 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:06:15.224 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:06:16.778 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:06:16.779 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.866 regret=7.40e-02  kkt_seed: l1=1.391 regret=1.33e-02 (kkt z0 l1=1.391)
+2026-08-30 13:07:28.894 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:07:28.895 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:07:30.695 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:07:30.696 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:07:32.374 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:07:32.375 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.862 regret=1.10e-02  kkt_seed: l1=0.901 regret=1.07e-02 (kkt z0 l1=0.821)
+2026-08-30 13:08:39.915 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:08:39.916 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:08:41.579 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:08:41.580 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:08:43.201 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:08:43.202 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.655 regret=7.81e-02  kkt_seed: l1=0.174 regret=7.69e-04 (kkt z0 l1=0.236)
+[field+dynamics] bw0.9_R4_sigma0.0
+2026-08-30 13:09:48.942 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:09:48.943 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:09:50.510 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:09:50.511 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:09:52.066 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:09:52.067 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.072 regret=1.78e-05  kkt_seed: l1=0.165 regret=5.81e-09 (kkt z0 l1=0.165)
+2026-08-30 13:10:24.249 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:10:24.250 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:10:25.784 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:10:25.785 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:10:27.273 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:10:27.273 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.757 regret=3.54e-01  kkt_seed: l1=0.429 regret=4.36e-06 (kkt z0 l1=0.421)
+2026-08-30 13:11:01.015 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:11:01.016 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:11:02.646 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:11:02.647 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:11:04.230 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:11:04.231 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.300 regret=9.87e-04  kkt_seed: l1=0.458 regret=6.55e-04 (kkt z0 l1=0.319)
+2026-08-30 13:11:40.326 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:11:40.331 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:11:41.978 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:11:41.979 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:11:43.553 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:11:43.554 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.824 regret=1.87e-02  kkt_seed: l1=0.249 regret=9.69e-05 (kkt z0 l1=0.249)
+2026-08-30 13:12:17.615 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:12:17.615 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:12:19.241 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:12:19.242 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:12:20.771 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:12:20.772 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.036 regret=3.63e-06  kkt_seed: l1=0.025 regret=-1.06e-12 (kkt z0 l1=0.025)
+[field+dynamics] bw0.9_R4_sigma0.01
+2026-08-30 13:12:55.018 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:12:55.019 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:12:56.609 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:12:56.610 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:12:58.234 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:12:58.238 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.138 regret=2.48e-06  kkt_seed: l1=0.178 regret=4.67e-06 (kkt z0 l1=0.356)
+2026-08-30 13:13:31.537 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:13:31.538 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:13:33.146 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:13:33.147 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:13:34.711 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:13:34.712 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.191 regret=7.19e-02  kkt_seed: l1=0.971 regret=3.23e-03 (kkt z0 l1=0.971)
+2026-08-30 13:14:06.991 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:14:06.992 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:14:08.552 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:14:08.553 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:14:10.057 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:14:10.058 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.692 regret=1.17e-03  kkt_seed: l1=0.704 regret=2.51e-03 (kkt z0 l1=1.309)
+2026-08-30 13:14:45.363 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:14:45.364 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:14:46.932 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:14:46.933 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:14:48.447 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:14:48.448 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.816 regret=1.96e-03  kkt_seed: l1=0.502 regret=3.02e-03 (kkt z0 l1=0.539)
+2026-08-30 13:15:21.921 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:15:21.922 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:15:23.510 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:15:23.511 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:15:25.097 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:15:25.097 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.629 regret=3.11e-03  kkt_seed: l1=0.030 regret=5.50e-07 (kkt z0 l1=0.106)
+[field+dynamics] bw0.9_R4_sigma0.02
+2026-08-30 13:15:59.498 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:15:59.499 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:16:01.212 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:16:01.219 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:16:02.794 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:16:02.795 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.143 regret=5.93e-06  kkt_seed: l1=0.186 regret=8.60e-06 (kkt z0 l1=0.396)
+2026-08-30 13:16:36.482 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:16:36.483 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:16:38.013 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:16:38.014 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:16:39.549 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:16:39.550 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.191 regret=7.19e-02  kkt_seed: l1=1.046 regret=5.70e-03 (kkt z0 l1=1.016)
+2026-08-30 13:17:13.466 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:17:13.467 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:17:15.082 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:17:15.083 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:17:16.643 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:17:16.644 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.690 regret=9.60e-04  kkt_seed: l1=0.689 regret=2.59e-03 (kkt z0 l1=1.394)
+2026-08-30 13:17:52.458 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:17:52.459 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:17:54.051 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:17:54.052 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:17:55.585 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:17:55.586 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.816 regret=2.00e-03  kkt_seed: l1=0.641 regret=1.29e-02 (kkt z0 l1=0.645)
+2026-08-30 13:18:29.001 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:18:29.005 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:18:30.644 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:18:30.645 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:18:32.164 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:18:32.165 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.629 regret=3.12e-03  kkt_seed: l1=0.044 regret=4.51e-06 (kkt z0 l1=0.306)
+[field+dynamics] bw0.9_R4_sigma0.05
+2026-08-30 13:19:05.707 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:19:05.708 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:19:07.410 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:19:07.411 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:19:08.946 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:19:08.947 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=0 random: l1=0.147 regret=6.08e-06  kkt_seed: l1=0.188 regret=1.17e-05 (kkt z0 l1=0.557)
+2026-08-30 13:19:44.095 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:19:44.096 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:19:45.682 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:19:45.683 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:19:47.272 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:19:47.277 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=1 random: l1=1.191 regret=7.19e-02  kkt_seed: l1=1.026 regret=6.18e-03 (kkt z0 l1=1.067)
+2026-08-30 13:20:22.120 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:20:22.121 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:20:23.656 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:20:23.657 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:20:25.129 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:20:25.130 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=2 random: l1=0.710 regret=1.48e-03  kkt_seed: l1=0.571 regret=1.53e-03 (kkt z0 l1=1.387)
+2026-08-30 13:21:03.305 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:21:03.306 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:21:04.971 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:21:04.972 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:21:06.568 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:21:06.569 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=3 random: l1=0.816 regret=1.95e-03  kkt_seed: l1=0.680 regret=1.07e-02 (kkt z0 l1=0.681)
+2026-08-30 13:21:41.752 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:21:41.753 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:21:43.307 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:21:43.308 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+2026-08-30 13:21:44.820 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_x' has no origin, assuming identity transform.
+2026-08-30 13:21:44.821 | DEBUG    | pyroffi._robot_urdf_parser:_get_T_parent_joint:662 - Joint 'joint_y' has no origin, assuming identity transform.
+    seed=4 random: l1=0.621 regret=3.12e-03  kkt_seed: l1=0.077 regret=2.97e-05 (kkt z0 l1=0.747)
+
+wrote ioc/data/bench2d/bench2d_kkt_seed_dynamics.json
+
+                regime  random L1     kkt L1   random rg      kkt rg
+    bw0.45_R1_sigma0.0      0.732      0.249    3.09e-02    1.88e-04
+   bw0.45_R1_sigma0.01      0.671      0.328    1.25e-02    1.11e-03
+   bw0.45_R1_sigma0.02      0.687      0.513    9.92e-03    8.31e-04
+   bw0.45_R1_sigma0.05      0.777      0.557    1.31e-02    5.41e-03
+    bw0.45_R4_sigma0.0      0.640      0.315    5.82e-03    1.58e-06
+   bw0.45_R4_sigma0.01      0.708      0.901    3.38e-03    3.36e-03
+   bw0.45_R4_sigma0.02      0.708      0.733    3.37e-03    3.49e-03
+   bw0.45_R4_sigma0.05      0.708      0.891    3.38e-03    2.45e-03
+     bw0.9_R1_sigma0.0      1.289      0.374    2.31e-02    1.30e-03
+    bw0.9_R1_sigma0.01      0.869      0.565    6.06e-02    8.72e-05
+    bw0.9_R1_sigma0.02      0.985      1.016    1.26e-02    1.14e-02
+    bw0.9_R1_sigma0.05      0.866      1.025    7.40e-02    1.07e-02
+     bw0.9_R4_sigma0.0      0.300      0.249    9.87e-04    4.36e-06
+    bw0.9_R4_sigma0.01      0.692      0.502    1.96e-03    2.51e-03
+    bw0.9_R4_sigma0.02      0.690      0.641    2.00e-03    2.59e-03
+    bw0.9_R4_sigma0.05      0.710      0.571    1.95e-03    1.53e-03

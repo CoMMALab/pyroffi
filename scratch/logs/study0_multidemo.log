@@ -1,0 +1,25 @@
+2026-08-24 21:37:39.652 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-24 21:37:40.457 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+E0824 22:02:54.785620 3820289 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0824 22:03:04.009084 3820188 slow_operation_alarm.cc:140] The operation took 2m9.223558475s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+theta_ik_star = [0.06 0.04]
+theta_trajopt_star = [0.10363097 0.28169817 0.06285536 0.10363097 0.28169817 0.06285536
+ 0.10363097]  (approach.smooth, approach.clearance, grasp.smooth, transport.smooth, transport.clearance, transport.upright, place.smooth)
+
+  [anchor-batch] per-scene closest-approach: [-0.0499 -0.0023 -0.0065  0.0182  0.02  ] (CLEARANCE_MARGIN=0.05m, target ~0.020m)
+
+N=1 free=('transport',)                       free_param_err=0.2271  ik_err=0.0000  ee_rmse=0.0063  (compile 1486.2s, steady 19.7s)
+N=3 free=('transport',)                       free_param_err=0.2337  ik_err=0.0000  ee_rmse=0.0076  (compile 1.6s, steady 19.1s)
+N=5 free=('transport',)                       free_param_err=0.2145  ik_err=0.0000  ee_rmse=0.0074  (compile 1.6s, steady 19.1s)
+
+N=1 free=('approach', 'grasp', 'transport', 'place')+ik free_param_err=0.2145  ik_err=0.0217  ee_rmse=0.0153  (compile 1.6s, steady 19.4s)
+N=3 free=('approach', 'grasp', 'transport', 'place')+ik free_param_err=0.2218  ik_err=0.0225  ee_rmse=0.0176  (compile 1.6s, steady 19.4s)
+N=5 free=('approach', 'grasp', 'transport', 'place')+ik free_param_err=0.1855  ik_err=0.0206  ee_rmse=0.0148  (compile 1.6s, steady 19.4s)
+

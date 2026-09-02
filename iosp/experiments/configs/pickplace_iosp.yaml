@@ -1,0 +1,32 @@
+experiment: pickplace_iosp
+module: iosp.experiments.e4_three_stage
+description: "IOSP on pick-place: recover trajopt costs from single-object demos (cross-domain table row)"
+
+defaults:
+  n_iters: 60
+  n_steps: 40
+  n_starts: 4
+  no_ablate_stage2: true
+
+runs:
+  - name: pickplace_seed0
+    args: {seed: 0}
+    out: iosp/data/results/pickplace/pickplace_seed0.json
+  - name: pickplace_seed1
+    args: {seed: 1}
+    out: iosp/data/results/pickplace/pickplace_seed1.json
+  - name: pickplace_seed2
+    args: {seed: 2}
+    out: iosp/data/results/pickplace/pickplace_seed2.json
+  - name: pickplace_seed3
+    args: {seed: 3}
+    out: iosp/data/results/pickplace/pickplace_seed3.json
+  - name: pickplace_seed4
+    args: {seed: 4}
+    out: iosp/data/results/pickplace/pickplace_seed4.json
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

@@ -1,0 +1,27 @@
+2026-08-28 10:03:52.071 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 10:03:52.914 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [same-demo] ONE demo from the named cost; A: K=9, B: K=70
+  [path A (named, shared demo)] inner stationarity ||grad_x C|| per phase:
+    approach   A=3.081e-04  B=6.958e-06
+    grasp      A=9.264e-06  B=9.262e-06
+    transport  A=1.297e-04  B=1.633e-04
+    place      A=1.437e-05  B=1.428e-05
+  [path B (RKHS M=64, ls=3.0, base/sq, shared demo)] inner stationarity ||grad_x C|| per phase:
+    approach   A=5.857e-06  B=2.340e-06
+    grasp      A=2.877e-06  B=2.884e-06
+    transport  A=1.387e-04  B=1.700e-04
+    place      A=2.880e-06  B=2.911e-06
+
+=== path A (named, shared demo)  (K=9) ===
+  u0                 loss=2.528456e-03  rmse^2=2.552950e-03  rel_diff=9.687e-03
+  rand0 (|u|=1.26)   loss=8.218168e-03  rmse^2=8.203348e-03  rel_diff=1.803e-03
+  rand1 (|u|=1.26)   loss=5.564251e-03  rmse^2=5.619503e-03  rel_diff=9.930e-03
+  rand2 (|u|=1.26)   loss=2.079707e-02  rmse^2=5.435273e-03  rel_diff=7.387e-01
+  worst rel_diff = 7.387e-01  -> UNSTABLE -- reported RMSE is unreliable
+
+=== path B (RKHS M=64, ls=3.0, base/sq, shared demo)  (K=70) ===
+  u0                 loss=2.089568e-01  rmse^2=2.089690e-01  rel_diff=5.834e-05
+  rand0 (|u|=1.26)   loss=3.036237e-01  rmse^2=1.960868e-01  rel_diff=3.542e-01
+  rand1 (|u|=1.26)   loss=1.977026e-01  rmse^2=1.982403e-01  rel_diff=2.719e-03
+  rand2 (|u|=1.26)   loss=2.250893e-01  rmse^2=2.218056e-01  rel_diff=1.459e-02
+  worst rel_diff = 3.542e-01  -> UNSTABLE -- reported RMSE is unreliable

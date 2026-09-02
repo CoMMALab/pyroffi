@@ -1,0 +1,47 @@
+2026-08-28 12:55:47.862 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 12:55:48.720 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [path A (parametric)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=3.081e-04 over 2 scenes [3.1e-04 7.0e-06]
+    grasp      worst=9.264e-06 over 2 scenes [9.3e-06 9.3e-06]
+    transport  worst=1.633e-04 over 2 scenes [1.3e-04 1.6e-04]
+    place      worst=1.437e-05 over 2 scenes [1.4e-05 1.4e-05]
+
+### n_iters=60  (build 117s)
+  [parametric n_iters=60] G0 loss-vs-rmse^2 consistency:
+    u0           loss=2.528456e-03  rmse^2=2.552950e-03  rel=9.687e-03
+    ||u||=1 #1   loss=2.992921e-03  rmse^2=2.958501e-03  rel=1.150e-02  <-- INCONSISTENT
+    ||u||=1 #2   loss=4.816107e-03  rmse^2=4.791190e-03  rel=5.174e-03
+    ||u||=1 #3   loss=1.257827e-03  rmse^2=1.222854e-03  rel=2.780e-02  <-- INCONSISTENT
+    ||u||=1 #4   loss=5.683116e-03  rmse^2=5.680810e-03  rel=4.058e-04
+    ||u||=1 #5   loss=3.619040e-03  rmse^2=3.582781e-03  rel=1.002e-02  <-- INCONSISTENT
+  [parametric n_iters=60] G0 FAIL: worst rel gap 2.780e-02 > 1e-02 -- every number below this line is untrustworthy
+### n_iters=60: worst rel gap 2.780e-02
+2026-08-28 12:59:14.034 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 12:59:14.041 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+E0828 13:21:31.861436 1310057 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 13:21:49.834887 1309959 slow_operation_alarm.cc:140] The operation took 2m17.973548421s
+
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+  [path A (parametric)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=1.903e-05 over 2 scenes [1.9e-05 7.2e-06]
+    grasp      worst=9.264e-06 over 2 scenes [9.3e-06 9.3e-06]
+    transport  worst=7.042e-06 over 2 scenes [7.0e-06 4.0e-06]
+    place      worst=1.437e-05 over 2 scenes [1.4e-05 1.4e-05]
+
+### n_iters=120  (build 1501s)
+  [parametric n_iters=120] G0 loss-vs-rmse^2 consistency:
+    u0           loss=2.548675e-03  rmse^2=2.547582e-03  rel=4.287e-04
+    ||u||=1 #1   loss=2.911911e-03  rmse^2=2.932162e-03  rel=6.955e-03
+    ||u||=1 #2   loss=4.626565e-03  rmse^2=4.625551e-03  rel=2.191e-04
+    ||u||=1 #3   loss=1.298198e-03  rmse^2=1.296219e-03  rel=1.524e-03
+    ||u||=1 #4   loss=5.508843e-03  rmse^2=5.565264e-03  rel=1.024e-02  <-- INCONSISTENT
+    ||u||=1 #5   loss=3.540616e-03  rmse^2=3.542094e-03  rel=4.172e-04
+  [parametric n_iters=120] G0 FAIL: worst rel gap 1.024e-02 > 1e-02 -- every number below this line is untrustworthy
+### n_iters=120: worst rel gap 1.024e-02
+2026-08-28 13:50:35.869 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 13:50:35.878 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.

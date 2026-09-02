@@ -1,0 +1,148 @@
+
+SAME-DEMO pair: one named-cost demo, both hypothesis classes...
+2026-08-28 14:36:50.841 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 14:36:51.650 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [same-demo] 3 fit + 2 held-out scenes; ONE named-cost demo; A: K=9, B: K=262
+  [path A (named)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=4.256e-05 over 5 scenes [1.8e-05 8.2e-06 7.2e-06 4.3e-05 3.9e-05]
+    grasp      worst=9.314e-06 over 5 scenes [9.3e-06 9.3e-06 9.3e-06 9.3e-06 9.3e-06]
+    transport  worst=2.600e-04 over 5 scenes [1.0e-04 2.1e-04 1.7e-04 2.6e-04 1.5e-04]
+    place      worst=1.439e-05 over 5 scenes [1.4e-05 1.4e-05 1.4e-05 1.4e-05 1.4e-05]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=2.592e-06 over 5 scenes [2.6e-06 1.7e-06 8.6e-07 1.2e-06 1.2e-06]
+    grasp      worst=2.105e-06 over 5 scenes [4.0e-09 2.1e-07 2.8e-07 2.1e-06 5.2e-07]
+    transport  worst=1.259e-03 over 5 scenes [1.9e-05 1.3e-03 9.3e-06 3.2e-05 2.8e-05]  <-- NOT CONVERGED
+    place      worst=1.880e-06 over 5 scenes [2.5e-07 1.8e-06 1.9e-06 1.1e-07 1.6e-07]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] WARNING: worst stationarity 1.259e-03 > 1e-03; the sensitivity spectrum below is NOT trustworthy
+  [path B (RKHS M=256, ls=10.0, geom/lin)] compile 81.0s
+  [path B (RKHS M=256, ls=10.0, geom/lin)] G0 loss-vs-rmse^2 consistency:
+E0828 15:33:06.880302 1354813 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0828 15:34:21.886207 1354540 slow_operation_alarm.cc:140] The operation took 3m15.005984691s
+
+********************************
+[Compiling module jit_paths for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+    u0           loss=2.962025e-01  rmse^2=2.961983e-01  rel=1.387e-05
+    ||u||=1 #1   loss=2.973907e-01  rmse^2=2.975422e-01  rel=5.094e-04
+    ||u||=1 #2   loss=2.953759e-01  rmse^2=2.953728e-01  rel=1.059e-05
+    ||u||=1 #3   loss=2.944437e-01  rmse^2=2.944295e-01  rel=4.838e-05
+  [path B (RKHS M=256, ls=10.0, geom/lin)] G0 PASS (worst rel gap 5.094e-04)
+  [path B (RKHS M=256, ls=10.0, geom/lin)] jac+svd 3268.1s; eigenvalues (desc) = [1.0284e+02 4.1026e+01 1.9292e+01 1.5805e+01 7.2148e+00 4.7138e+00 4.1471e+00 2.6288e+00 1.6675e+00
+ 1.3749e+00 1.3749e+00 1.3212e+00 9.4364e-01 8.7102e-01 5.4007e-01 3.1252e-01 2.3565e-01 1.7495e-01
+ 1.4277e-01 1.0813e-01 6.6440e-02 4.4739e-02 4.0555e-02 2.8776e-02 2.1863e-02 1.2571e-02 1.0110e-02
+ 9.0620e-03 7.3103e-03 4.6797e-03 3.8351e-03 3.1145e-03 2.3893e-03 2.3399e-03 1.3218e-03 1.2374e-03
+ 1.0215e-03 9.5866e-04 5.6943e-04 4.3071e-04 3.0241e-04 2.8562e-04 2.6323e-04 2.2045e-04 1.8055e-04
+ 1.1954e-04 9.5679e-05 6.8754e-05 6.4213e-05 5.1570e-05 3.4203e-05 2.9844e-05 2.3534e-05 1.5697e-05
+ 1.3851e-05 1.1712e-05 8.8078e-06 7.5513e-06 5.6033e-06 4.8048e-06 2.7975e-06 2.0828e-06 1.7133e-06
+ 1.1202e-06 1.0037e-06 6.7705e-07 5.1204e-07 4.4021e-07 2.8471e-07 1.9805e-07 1.1335e-07 1.0320e-07
+ 6.4187e-08 4.8220e-08 1.9619e-08 1.5652e-08 9.1386e-09 1.6302e-09 1.7821e-17 2.1249e-22 1.4205e-22
+ 1.1261e-22 9.5104e-23 7.1431e-23 6.0851e-23 4.9469e-23 4.0721e-23 3.9449e-23 3.1600e-23 2.8334e-23
+ 2.2274e-23 2.0123e-23 1.6934e-23 1.5041e-23 1.4208e-23 1.2512e-23 1.0014e-23 8.5056e-24 7.0324e-24
+ 5.4707e-24 4.5816e-24 3.8741e-24 3.5386e-24 2.6186e-24 2.4718e-24 2.2153e-24 2.1071e-24 1.7552e-24
+ 1.6712e-24 1.3075e-24 1.0465e-24 8.6117e-25 6.8692e-25 6.3630e-25 5.3745e-25 4.6176e-25 2.5287e-25
+ 2.1835e-25 1.7950e-25 1.5356e-25 1.3450e-25 1.2452e-25 1.1070e-25 9.1908e-26 8.5065e-26 7.1611e-26
+ 3.8395e-26 2.2222e-26 1.7267e-26 1.0409e-26 6.7324e-27 3.9850e-27 2.8331e-27 3.2922e-28 2.2833e-28
+ 1.5355e-28 1.1920e-28 9.1354e-29 7.2361e-29 5.6972e-29 4.5523e-29 3.7223e-29 2.6787e-29 2.3405e-29
+ 1.9571e-29 1.3771e-29 2.2682e-30 1.7427e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30
+ 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30
+ 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30
+ 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30
+ 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30
+ 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30
+ 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 1.0108e-30 4.9212e-31 5.5727e-33]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] r = 78 of K = 262 (rule='gap': largest consecutive-eigenvalue ratio)
+  eigendirection loadings (|component| >= 0.2, descending eigenvalue):
+    lam= 1.0284e+02  -0.733*kernel[77]  +0.220*kernel[157]
+    lam= 4.1026e+01  -0.690*kernel[103]  -0.378*kernel[252]  +0.286*kernel[9]  -0.227*kernel[8]
+    lam= 1.9292e+01  -0.468*kernel[103]  +0.462*kernel[157]  +0.321*kernel[77]  -0.210*kernel[107]  -0.206*kernel[199]
+    lam= 1.5805e+01  +0.531*kernel[8]  -0.416*kernel[157]  -0.314*kernel[66]  -0.270*kernel[9]
+    lam= 7.2148e+00  -0.621*kernel[157]  +0.437*kernel[252]  -0.290*kernel[107]
+    lam= 4.7138e+00  -0.494*kernel[119]  -0.283*kernel[252]  +0.251*kernel[9]  -0.226*kernel[157]  +0.220*kernel[103]
+    lam= 4.1471e+00  +0.533*kernel[66]  -0.461*kernel[252]  +0.314*kernel[8]  -0.255*kernel[77]  -0.224*kernel[212]
+    lam= 2.6288e+00  +0.563*kernel[166]  -0.302*kernel[81]  +0.227*kernel[189]  +0.226*kernel[9]
+    lam= 1.6675e+00  -0.615*kernel[9]  -0.301*kernel[183]  +0.246*kernel[75]  -0.240*kernel[252]  -0.222*kernel[119]
+    lam= 1.3749e+00  +1.000*grasp.standoff
+    lam= 1.3749e+00  +1.000*place.standoff
+    lam= 1.3212e+00  +0.391*kernel[166]  +0.304*kernel[107]  +0.299*kernel[246]  -0.227*kernel[103]  +0.215*kernel[81]  +0.213*kernel[8]  -0.211*kernel[9]
+    lam= 9.4364e-01  -0.449*kernel[183]  +0.319*kernel[9]  -0.301*kernel[106]  -0.280*kernel[254]  -0.243*kernel[51]
+    lam= 8.7102e-01  +0.709*approach.smooth  -0.706*approach.clearance
+    lam= 5.4007e-01  -0.461*kernel[183]  +0.447*kernel[119]  -0.240*kernel[64]  +0.232*kernel[77]  +0.219*kernel[254]  -0.216*kernel[212]  -0.203*kernel[166]
+    lam= 3.1252e-01  +0.464*kernel[183]  -0.356*kernel[106]  -0.265*kernel[254]  -0.264*kernel[51]  +0.249*kernel[75]  +0.212*kernel[246]
+    lam= 2.3565e-01  -0.320*kernel[66]  -0.242*kernel[4]  -0.236*kernel[208]  +0.219*kernel[75]  +0.214*kernel[8]  +0.204*kernel[51]
+    lam= 1.7495e-01  -0.316*kernel[66]  -0.292*kernel[254]  -0.206*kernel[251]
+    lam= 1.4277e-01  -0.367*kernel[8]  +0.354*kernel[119]  -0.291*kernel[66]  -0.284*kernel[252]  +0.248*kernel[201]  +0.234*kernel[166]  -0.203*kernel[35]
+    lam= 1.0813e-01  -0.466*kernel[246]  -0.319*kernel[64]  +0.254*kernel[107]  -0.246*kernel[208]  +0.222*kernel[51]  -0.220*kernel[35]
+    lam= 6.6440e-02  +0.301*kernel[137]  +0.256*kernel[44]  +0.247*kernel[212]  -0.242*kernel[106]  -0.232*kernel[183]  -0.221*kernel[81]  +0.221*kernel[64]
+    lam= 4.4739e-02  +0.342*kernel[201]  +0.337*kernel[212]  +0.243*kernel[199]  -0.236*kernel[121]  +0.234*kernel[246]  +0.213*kernel[63]  +0.213*kernel[44]  +0.211*kernel[66]
+    lam= 4.0555e-02  +0.306*kernel[166]  +0.287*kernel[212]  +0.283*kernel[168]  +0.271*kernel[225]  -0.215*kernel[4]  -0.201*kernel[183]
+    lam= 2.8776e-02  +0.323*kernel[137]  -0.312*kernel[212]  -0.288*kernel[55]  -0.236*kernel[106]  -0.231*kernel[85]  -0.211*kernel[119]  -0.207*kernel[15]
+    lam= 2.1863e-02  -0.413*kernel[254]  +0.325*kernel[51]  +0.275*kernel[251]  -0.213*kernel[129]  -0.213*kernel[201]
+    lam= 1.2571e-02  -0.274*kernel[32]  +0.258*kernel[44]  -0.243*kernel[63]  +0.218*kernel[53]  +0.214*kernel[85]
+    lam= 1.0110e-02  -0.315*kernel[107]  -0.311*kernel[168]  +0.303*kernel[81]  +0.256*kernel[55]  +0.237*kernel[137]  -0.221*kernel[44]
+    lam= 9.0620e-03  +0.397*kernel[121]  +0.340*kernel[201]  -0.278*kernel[91]  -0.277*kernel[254]  -0.257*kernel[15]  +0.247*kernel[189]  +0.242*kernel[53]
+    lam= 7.3103e-03  +0.403*kernel[51]  -0.260*kernel[85]  +0.249*kernel[246]  -0.236*kernel[15]  +0.221*kernel[168]  -0.218*kernel[225]  -0.212*kernel[106]  -0.212*kernel[81]
+    lam= 4.6797e-03  +0.336*kernel[15]  -0.292*kernel[75]  +0.259*kernel[246]  -0.256*kernel[44]  -0.212*kernel[81]  -0.201*kernel[6]
+    lam= 3.8351e-03  -0.347*kernel[15]  +0.285*kernel[106]  -0.275*kernel[225]  +0.255*kernel[55]  -0.216*kernel[4]  -0.211*kernel[199]  -0.205*kernel[85]
+    lam= 3.1145e-03  +0.372*kernel[121]  -0.369*kernel[201]  +0.306*kernel[212]  +0.232*kernel[75]
+    lam= 2.3893e-03  -0.347*kernel[63]  -0.343*kernel[168]  +0.233*kernel[44]  +0.223*kernel[32]
+    lam= 2.3399e-03  -0.420*kernel[85]  +0.316*kernel[55]  +0.256*kernel[225]  +0.205*kernel[53]  -0.200*kernel[208]
+    lam= 1.3218e-03  +0.268*kernel[75]  -0.254*kernel[64]  +0.243*kernel[91]  -0.242*kernel[30]  +0.218*kernel[137]  +0.215*kernel[76]  +0.206*kernel[189]
+    lam= 1.2374e-03  +0.287*kernel[32]  -0.249*kernel[81]  +0.241*kernel[44]  -0.216*kernel[107]  +0.213*kernel[162]  +0.202*kernel[15]
+    lam= 1.0215e-03  -0.310*kernel[149]  +0.251*kernel[107]  +0.245*kernel[81]  -0.208*kernel[91]  +0.200*kernel[75]
+    lam= 9.5866e-04  +0.423*kernel[85]  -0.412*kernel[208]  +0.301*kernel[121]  -0.229*kernel[35]
+    lam= 5.6943e-04  +0.291*kernel[168]  -0.273*kernel[201]  +0.263*kernel[137]  +0.223*kernel[129]  -0.212*kernel[71]  +0.205*kernel[189]
+    lam= 4.3071e-04  +0.308*kernel[189]  -0.301*kernel[30]  -0.234*kernel[13]  -0.228*kernel[199]  -0.226*kernel[192]  -0.206*kernel[68]
+    lam= 3.0241e-04  +0.254*kernel[35]  -0.243*kernel[71]  -0.240*kernel[70]  +0.209*kernel[205]  -0.208*kernel[137]  -0.200*kernel[44]
+    lam= 2.8562e-04  +0.700*approach.clearance  +0.697*approach.smooth
+    lam= 2.6323e-04  -0.374*kernel[64]  -0.288*kernel[142]  -0.231*kernel[15]  +0.226*kernel[35]  -0.223*kernel[129]  +0.213*kernel[63]
+    lam= 2.2045e-04  +0.348*kernel[137]  -0.227*kernel[192]  +0.211*kernel[64]  -0.209*kernel[206]  +0.207*kernel[75]  -0.202*kernel[44]
+    lam= 1.8055e-04  -0.317*kernel[72]  -0.283*kernel[37]  +0.258*kernel[53]  +0.205*kernel[85]
+    lam= 1.1954e-04  +0.255*kernel[32]  +0.234*kernel[238]  +0.229*kernel[55]  +0.226*kernel[189]  -0.218*kernel[64]  +0.201*kernel[44]
+    lam= 9.5679e-05  -0.353*kernel[238]  +0.280*kernel[134]  -0.273*kernel[53]  +0.224*kernel[225]  -0.213*kernel[15]  -0.203*kernel[76]  +0.201*kernel[32]
+    lam= 6.8754e-05  -0.361*kernel[63]  -0.291*kernel[142]  -0.268*kernel[55]  -0.201*kernel[37]
+    lam= 6.4213e-05  -0.247*kernel[64]  -0.239*kernel[76]  -0.238*kernel[129]  +0.207*kernel[4]  +0.206*kernel[142]
+    lam= 5.1570e-05  -0.365*kernel[208]  +0.255*kernel[32]  -0.247*kernel[251]  +0.229*kernel[144]
+    lam= 3.4203e-05  -0.305*kernel[72]  +0.263*kernel[168]  +0.262*kernel[238]  -0.246*kernel[210]  -0.205*kernel[76]
+    lam= 2.9844e-05  -0.295*kernel[162]  -0.263*kernel[238]  +0.257*kernel[63]  +0.222*kernel[4]  +0.218*kernel[30]  -0.212*kernel[55]
+    lam= 2.3534e-05  +0.256*kernel[216]  -0.202*kernel[222]  +0.201*kernel[227]
+    lam= 1.5697e-05  +0.287*kernel[70]  -0.252*kernel[37]  +0.250*kernel[206]  +0.218*kernel[149]  +0.217*kernel[129]  -0.207*kernel[216]
+    lam= 1.3851e-05  +0.262*kernel[72]  -0.259*kernel[105]  +0.219*kernel[205]  +0.214*kernel[206]  -0.212*kernel[30]
+    lam= 1.1712e-05  -0.239*kernel[6]  +0.237*kernel[241]  +0.219*kernel[76]  -0.205*kernel[206]  +0.203*kernel[68]  -0.203*kernel[30]
+    lam= 8.8078e-06  -0.260*kernel[68]  -0.257*kernel[96]  -0.232*kernel[48]  +0.217*kernel[117]  +0.203*kernel[55]
+    lam= 7.5513e-06  +0.238*kernel[70]  +0.237*kernel[21]  -0.236*kernel[251]  -0.232*kernel[35]
+    lam= 5.6033e-06  +0.307*kernel[241]  +0.263*kernel[32]  -0.216*kernel[199]  +0.201*kernel[68]
+    lam= 4.8048e-06  +0.353*kernel[6]  -0.240*kernel[54]  -0.206*kernel[63]  -0.200*kernel[227]
+    lam= 2.7975e-06  -0.236*kernel[30]  +0.226*kernel[71]  -0.222*kernel[153]  -0.203*kernel[237]
+    lam= 2.0828e-06  -0.299*kernel[120]  -0.281*kernel[21]  -0.241*kernel[113]  +0.203*kernel[76]
+    lam= 1.7133e-06  -0.258*kernel[241]  +0.253*kernel[71]  +0.244*kernel[210]  +0.220*kernel[4]  -0.216*kernel[99]  -0.202*kernel[54]
+    lam= 1.1202e-06  +0.431*kernel[192]  +0.238*kernel[251]  -0.207*kernel[113]
+    lam= 1.0037e-06  +0.249*kernel[210]  -0.206*kernel[53]  +0.203*kernel[6]
+    lam= 6.7705e-07  +0.259*kernel[54]  -0.231*kernel[206]  +0.213*kernel[144]  +0.210*kernel[149]
+    lam= 5.1204e-07  +0.298*kernel[35]  -0.237*kernel[3]  -0.222*kernel[199]  +0.218*kernel[30]  +0.215*kernel[71]
+    lam= 4.4021e-07  -0.307*kernel[129]  +0.233*kernel[113]  +0.202*kernel[144]
+    lam= 2.8471e-07  -0.234*kernel[206]  +0.217*kernel[88]  +0.202*kernel[225]
+    lam= 1.9805e-07  -0.207*kernel[98]
+    lam= 1.1335e-07  -0.264*kernel[128]  +0.243*kernel[71]  +0.231*kernel[205]  -0.213*kernel[88]
+    lam= 1.0320e-07  +0.992*place.smooth
+    lam= 6.4187e-08  +0.252*kernel[41]  +0.241*kernel[153]  -0.235*kernel[48]  +0.205*kernel[72]
+    lam= 4.8220e-08  +0.348*kernel[13]  -0.206*kernel[96]  -0.201*kernel[70]
+    lam= 1.9619e-08  -0.267*kernel[131]  +0.249*kernel[117]  +0.236*kernel[92]  +0.209*kernel[193]  +0.206*kernel[100]
+    lam= 1.5652e-08  +0.286*kernel[126]
+    lam= 9.1386e-09  -0.229*kernel[91]  +0.224*kernel[117]  -0.212*kernel[88]
+    lam= 1.6302e-09  -0.997*grasp.smooth
+    lam= 1.7821e-17  (diffuse)
+    lam= 2.1249e-22  -0.370*kernel[226]  +0.281*kernel[99]  +0.275*kernel[171]  -0.209*kernel[219]
+  [path B (RKHS M=256, ls=10.0, geom/lin)] |<u_1, gauge>| = 0.0000; gauge lands at eigen-index 78 (lam=1.782e-17)
+
+=== path B (RKHS M=256, ls=10.0, geom/lin): r = 78 of K = 262 identifiable directions ===
+                            fit RMSE      gen RMSE
+init (u=0)                    0.5442             -
+wide fit (all K)              0.2754        0.3038
+refit on U_r                  0.3374        0.3484
+
+G0 forward-map consistency: PASS (worst |loss - rmse^2|/loss = 5.094e-04)
+
+wall: wide 63.7s, gram 3268.1s, refit 65.3s

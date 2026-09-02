@@ -1,0 +1,78 @@
+--- pickplace_seed0 ---
+2026-08-31 19:57:30.769 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 19:57:31.636 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.5s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+[demos] 189.7s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 6.298e-06
+[grad] dL/dtheta at z=0: [-0.00681479  0.00011457  0.01082965 -0.00412943]
+[fit] test RMSE 0.00309  move_rel=1.682e+00 reduction=70.47x ok  fit_time=750.5s
+[time] wall=1158.5s  fit=750.5s
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06619     +0.0% vs uniform
+  tied three-stage fit                   0.00309    +95.3% vs uniform
+  oracle theta*                          0.00291    +95.6% vs uniform
+
+param_err (reported, NOT the criterion): 0.0030
+  smooth         0.1308    0.1293
+  clearance      0.2116    0.2131
+  upright        0.0798    0.0784
+  skeleton       0.5778    0.5793
+
+wrote iosp/data/results/pickplace/pickplace_seed0.json
+exit: 0
+--- pickplace_seed1 ---
+2026-08-31 20:17:06.470 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 20:17:07.322 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.8s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 20:23:53.957711   12067 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 20:26:33.950051   11981 slow_operation_alarm.cc:140] The operation took 4m39.992425006s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1225.6s (compile incl.), shape (6, 23, 3)
+[sanity] loss(z_star) = 8.319e-06
+[grad] dL/dtheta at z=0: [-6.5623708e-03  5.6706027e-05  1.1163749e-02 -4.6580844e-03]
+E0831 21:07:10.990543   12067 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 21:08:01.790918   11981 slow_operation_alarm.cc:140] The operation took 2m50.800420629s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.00804  move_rel=1.318e+30 reduction=95.33x ok  fit_time=762.1s
+[time] wall=3133.4s  fit=762.1s
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.06880     +0.0% vs uniform
+  tied three-stage fit                   0.00804    +88.3% vs uniform
+  oracle theta*                          0.00300    +95.6% vs uniform
+
+param_err (reported, NOT the criterion): 0.1299
+  smooth         0.1633    0.1293
+  clearance      0.2714    0.2131
+  upright        0.0957    0.0784
+  skeleton       0.4696    0.5793
+
+wrote iosp/data/results/pickplace/pickplace_seed1.json
+exit: 0
+--- pickplace_seed2 ---
+2026-08-31 21:10:01.600 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-31 21:10:02.408 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 15.8s  K=4 ['smooth', 'clearance', 'upright', 'skeleton']  N_FULL=23  fit/test = 6/6  theta_ik FIXED at [0.06 0.04]
+E0831 21:16:46.327093   64864 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0831 21:19:33.227462   64778 slow_operation_alarm.cc:140] The operation took 4m46.90069311s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 1225.0s (compile incl.), shape (6, 23, 3)

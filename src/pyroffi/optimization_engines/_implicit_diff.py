@@ -408,8 +408,17 @@ def _batch_task_jacobians(q_stars, robot, target_link_indices, target_wxyz_xyz):
         key = (tuple(robot.links.names), link_idx)
         tables = _ANCESTOR_CACHE.get(key)
         if tables is None:
-            tables = _ANCESTOR_CACHE[key] = _ik_jacobian.ancestor_tables(
-                robot, link_idx)
+            tables = _ik_jacobian.ancestor_tables(robot, link_idx)
+            # NEVER cache a tracer. The tables are constants -- a numpy walk of
+            # the chain -- but `jnp.asarray` inside an active trace returns a
+            # value BOUND to that trace, and storing it in this module-level
+            # dict lets it outlive the transformation. The next call then reads
+            # it back and dies with UnexpectedTracerError, pointing at
+            # `ancestor_tables` rather than at the cache that kept it. Recompute
+            # instead: it is a short numpy loop, and the cached fast path still
+            # covers every call made outside a trace.
+            if not any(isinstance(t, jax.core.Tracer) for t in tables):
+                _ANCESTOR_CACHE[key] = tables
         target_jnts, ancestor_masks = tables
 
         # EVERY input is detached. J_q enters the tangent rule as a CONSTANT --

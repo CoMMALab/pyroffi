@@ -138,3 +138,28 @@ def dynamic(problem, payload_wrench=None, torque_backend="grid"):
         return (r_effort, r_coll, r_smooth, torque_residual(q))
 
     return residual_fn, DYNAMIC_NAMES
+
+
+def rff(problem, M, key, lengthscale=1.0):
+    """`M` random-Fourier-feature residuals of a squared-exponential kernel on
+    the per-waypoint descriptor `u_t = [q_t, q_{t+1} - q_t]` (Rahimi & Recht).
+    An unknown-cost / RKHS basis, for the `basis_size` diagnostic's "hand-
+    engineered vs. RKHS" axis -- as `M` grows this is an over-complete
+    dictionary the same way `k16` is for the kinematic family, but without a
+    named feature identity, so the diagnostic can ask whether recovery quality
+    depends on the dictionary being *interpretable* or just *expressive
+    enough*.  Ported from `iosp/study3_identifiable_refit.py::make_rff_residual_fn`.
+    """
+    k1, k2 = jax.random.split(key)
+    dof = problem.dof
+    Omega = jax.random.normal(k1, (M, 2 * dof), dtype=jnp.float32) / lengthscale
+    b = jax.random.uniform(k2, (M,), dtype=jnp.float32) * 2.0 * jnp.pi
+    scale = jnp.sqrt(2.0 / M)
+
+    def residual_fn(x_flat, scene):
+        q = problem.unpack(x_flat, scene)
+        u = jnp.concatenate([q[:-1], q[1:] - q[:-1]], axis=-1)  # (T-1, 2*dof)
+        phi = scale * jnp.cos(u @ Omega.T + b)                  # (T-1, M)
+        return tuple(phi[:, j] for j in range(M))
+
+    return residual_fn, tuple(f"rff[{j}]" for j in range(M))

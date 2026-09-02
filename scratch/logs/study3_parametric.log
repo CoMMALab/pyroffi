@@ -1,0 +1,30 @@
+Path A (known cost library, K=9) on the UNANCHORED scene...
+2026-08-26 19:01:18.275 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-26 19:01:19.070 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+E0826 19:26:23.834042 4125229 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0826 19:26:31.629739 4125127 slow_operation_alarm.cc:140] The operation took 2m7.795795925s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+  [path A (parametric)] compile 1485.8s
+  [path A (parametric)] gram+eig 193.6s; eigenvalues (desc) = [4.2910500e+00 4.2899647e+00 4.1168183e-01 7.2854701e-03 1.6870001e-05
+ 5.4999998e-07 9.9999999e-09 0.0000000e+00 0.0000000e+00]
+  [path A (parametric)] r = 2 of K = 9 (>= 95% cumulative trace)
+
+=== path A (parametric): r = 2 of K = 9 identifiable directions ===
+                        fit RMSE (A)  gen RMSE (B)
+init (z=0)                    0.0500             -
+wide fit (all K)              0.0371        0.0377
+refit on U_r                  0.0256        0.0260
+
+                        ||dtheta||    ||dz||     top-r      null
+wide                        0.2268    3.0431    0.0286    3.0430
+refit                       0.2372    3.3912    0.0167    3.3912
+
+fraction of (z_star - z_prior) inside span(U_r): 0.021   <- the generalization ceiling this demo supports
+
+wall: wide 23.8s, gram 193.6s, refit 24.3s

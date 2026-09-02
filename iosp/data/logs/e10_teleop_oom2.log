@@ -1,0 +1,94 @@
+Unable to resolve filename: meshes/robots/fr3/visual/link0.dae
+Can't find meshes/robots/fr3/visual/link0.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link1.dae
+Can't find meshes/robots/fr3/visual/link1.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link2.dae
+Can't find meshes/robots/fr3/visual/link2.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link3.dae
+Can't find meshes/robots/fr3/visual/link3.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link4.dae
+Can't find meshes/robots/fr3/visual/link4.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link5.dae
+Can't find meshes/robots/fr3/visual/link5.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link6.dae
+Can't find meshes/robots/fr3/visual/link6.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link7.dae
+Can't find meshes/robots/fr3/visual/link7.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/hand.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/hand.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+2026-09-02 10:29:07.665 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 10:29:07.983 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 10:29:09.325 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 37 disabled collision pairs from SRDF
+2026-09-02 10:29:10.132 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 26 links and 288 active self-collision pairs, using spherical collision models.
+[build] 10 episodes (8 fit / 2 held out); standoff prior grasp 0.1051 m, place 0.2463 m
+    fit   ep_20260902_093953
+    fit   ep_20260902_094034
+    fit   ep_20260902_094106
+    fit   ep_20260902_094218
+    fit   ep_20260902_094301
+    fit   ep_20260902_094334
+    fit   ep_20260902_094436
+    fit   ep_20260902_094535
+    held  ep_20260902_094627
+    held  ep_20260902_094649
+[build] 0s  B=4 branches x S=3 starts = 12 candidates, 40 outer steps each, in chunks of 4
+W0902 10:53:25.134832  427334 hlo_rematerialization.cc:3231] Can't reduce memory use below 16.78GiB (18016317966 bytes) by rematerialization; only reduced to 17.90GiB (19222930598 bytes), down from 18.96GiB (20364114314 bytes) originally
+E0902 10:54:35.954283  427420 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0902 10:56:06.154977  427334 slow_operation_alarm.cc:140] The operation took 3m30.200802839s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+W0902 10:56:43.388449  427334 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 14.19GiB (rounded to 15237030912)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:56:43.388693  427334 bfc_allocator.cc:525] ___________________________________________________________________________________________________*
+W0902 10:56:53.391275  427334 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 14.19GiB (rounded to 15237030912)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:56:53.391602  427334 bfc_allocator.cc:525] ___________________________________________________________________________________________________*
+W0902 10:57:03.393544  427334 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 14.19GiB (rounded to 15237030912)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W0902 10:57:03.393738  427334 bfc_allocator.cc:525] ___________________________________________________________________________________________________*
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e10_teleop.py", line 240, in <module>
+    main(demo_dir=a.demo_dir, n_fit=a.n_fit, seed=a.seed, n_iters=a.n_iters,
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e10_teleop.py", line 212, in main
+    res["multistart"] = run_multistart(
+                        ^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/experiments/e10_teleop.py", line 111, in run_multistart
+    res = ms.run(seed=seed, n_iters=n_iters, n_branches=n_branches,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/fit/multistart.py", line 423, in run
+    v, g = gf(U)
+           ^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/fit/multistart.py", line 417, in gf
+    return sum(float(v) for v in vals), jnp.concatenate(grads, axis=0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/Work/pyroffi/iosp/fit/multistart.py", line 417, in <genexpr>
+    return sum(float(v) for v in vals), jnp.concatenate(grads, axis=0)
+               ^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 300, in __float__
+    return self._value.__float__()
+           ^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sadmin/miniconda3/envs/pyroffi/lib/python3.11/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 14.19GiB. [executable_name='jit__lambda'] [tf-allocator-allocation-error='']
+ERROR conda.cli.main_run:execute(142): `conda run python -m iosp.experiments.e10_teleop --mode multistart --chunk 4 --out iosp/data/e10_teleop.json` failed. (See above for error)

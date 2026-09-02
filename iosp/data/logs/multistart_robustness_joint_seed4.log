@@ -1,0 +1,12 @@
+
+############################################################
+# multistart_robustness: Fig 2 + Table 1: multistart convergence, multi-seed robustness
+############################################################
+
+============================================================
+[run] joint_seed4  GPU=0  module=iosp.record.multistart
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.record.multistart --steps 40 --lr 0.05 --n-iters 60 --n-branches 3 --n-starts 3 --scene-b-scale 1.0 --no-render --space joint --seed 4 --out iosp/data/results/multistart/joint_seed4.npz
+2026-08-30 09:03:04.289 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 09:03:05.152 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 146s  B=3 branches x S=3 starts = 9 candidates  space=joint  scene_b_scale=1.0
+[rec] step   0/40  train(min)=0.18922 held@trainargmin=0.18308  |  ee_fit=0.05503 ee_held=0.05618  spread=2.6x

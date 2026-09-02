@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/tmp/claude-1000/-home-sadmin-Work-pyroffi/0ee37fdb-bc97-4015-b3a6-c7263f299147/scratchpad/e10_baseline.py", line 8, in <module>
+    from iosp import config
+ModuleNotFoundError: No module named 'iosp'
+ERROR conda.cli.main_run:execute(142): `conda run python /tmp/claude-1000/-home-sadmin-Work-pyroffi/0ee37fdb-bc97-4015-b3a6-c7263f299147/scratchpad/e10_baseline.py` failed. (See above for error)

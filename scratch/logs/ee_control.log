@@ -1,0 +1,60 @@
+2026-08-28 23:31:34.892 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-28 23:31:35.693 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+  [path A (parametric)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=7.574e-05 over 2 scenes [7.6e-05 7.2e-06]
+    grasp      worst=9.312e-06 over 2 scenes [9.3e-06 9.3e-06]
+    transport  worst=1.762e-04 over 2 scenes [9.8e-05 1.8e-04]
+    place      worst=1.446e-05 over 2 scenes [1.4e-05 1.4e-05]
+[build] 98s  K=9  space=ee
+[ee] step   0/40  loss=0.002569  fit=0.05035 held=0.04800  |  ee_fit=0.05035 ee_held=0.04800
+[ee] step   1/40  loss=0.002280  fit=0.04771 held=0.04571  |  ee_fit=0.04771 ee_held=0.04571
+[ee] step   2/40  loss=0.002091  fit=0.07902 held=0.04265  |  ee_fit=0.07902 ee_held=0.04265
+[ee] step   3/40  loss=0.001791  fit=0.04242 held=0.04065  |  ee_fit=0.04242 ee_held=0.04065
+[ee] step   4/40  loss=0.001573  fit=0.03969 held=0.03837  |  ee_fit=0.03969 ee_held=0.03837
+[ee] step   5/40  loss=0.001337  fit=0.03653 held=0.03615  |  ee_fit=0.03653 ee_held=0.03615
+[ee] step   6/40  loss=0.001171  fit=0.03389 held=0.03283  |  ee_fit=0.03389 ee_held=0.03283
+[ee] step   7/40  loss=0.001024  fit=0.03213 held=0.03091  |  ee_fit=0.03213 ee_held=0.03091
+[ee] step   8/40  loss=0.000836  fit=0.02933 held=0.02864  |  ee_fit=0.02933 ee_held=0.02864
+[ee] step   9/40  loss=0.000732  fit=0.02714 held=0.02644  |  ee_fit=0.02714 ee_held=0.02644
+[ee] step  10/40  loss=0.000609  fit=0.02471 held=0.02389  |  ee_fit=0.02471 ee_held=0.02389
+[ee] step  11/40  loss=0.000508  fit=0.02280 held=0.02206  |  ee_fit=0.02280 ee_held=0.02206
+[ee] step  12/40  loss=0.000431  fit=0.02068 held=0.02004  |  ee_fit=0.02068 ee_held=0.02004
+[ee] step  13/40  loss=0.000347  fit=0.01868 held=0.01825  |  ee_fit=0.01868 ee_held=0.01825
+[ee] step  14/40  loss=0.000293  fit=0.01707 held=0.01662  |  ee_fit=0.01707 ee_held=0.01662
+[ee] step  15/40  loss=0.000240  fit=0.01584 held=0.01450  |  ee_fit=0.01584 ee_held=0.01450
+[ee] step  16/40  loss=0.000198  fit=0.01452 held=0.01319  |  ee_fit=0.01452 ee_held=0.01319
+[ee] step  17/40  loss=0.000167  fit=0.01371 held=0.01148  |  ee_fit=0.01371 ee_held=0.01148
+[ee] step  18/40  loss=0.000156  fit=0.01163 held=0.01058  |  ee_fit=0.01163 ee_held=0.01058
+[ee] step  19/40  loss=0.000100  fit=0.01028 held=0.00938  |  ee_fit=0.01028 ee_held=0.00938
+[ee] step  20/40  loss=0.000089  fit=0.01006 held=0.00863  |  ee_fit=0.01006 ee_held=0.00863
+[ee] step  21/40  loss=0.000073  fit=0.00931 held=0.00775  |  ee_fit=0.00931 ee_held=0.00775
+[ee] step  22/40  loss=0.000061  fit=0.00859 held=0.00728  |  ee_fit=0.00859 ee_held=0.00728
+[ee] step  23/40  loss=0.000078  fit=0.00821 held=0.00682  |  ee_fit=0.00821 ee_held=0.00682
+[ee] step  24/40  loss=0.000053  fit=0.00784 held=0.00622  |  ee_fit=0.00784 ee_held=0.00622
+[ee] step  25/40  loss=0.000045  fit=0.00664 held=0.00603  |  ee_fit=0.00664 ee_held=0.00603
+[ee] step  26/40  loss=0.000048  fit=0.00689 held=0.00623  |  ee_fit=0.00689 ee_held=0.00623
+[ee] step  27/40  loss=0.000045  fit=0.00796 held=0.00546  |  ee_fit=0.00796 ee_held=0.00546
+[ee] step  28/40  loss=0.000044  fit=0.00642 held=0.00584  |  ee_fit=0.00642 ee_held=0.00584
+[ee] step  29/40  loss=0.000050  fit=0.00669 held=0.00591  |  ee_fit=0.00669 ee_held=0.00591
+[ee] step  30/40  loss=0.000047  fit=0.00717 held=0.00631  |  ee_fit=0.00717 ee_held=0.00631
+[ee] step  31/40  loss=0.000041  fit=0.00690 held=0.00628  |  ee_fit=0.00690 ee_held=0.00628
+[ee] step  32/40  loss=0.000040  fit=0.00608 held=0.00586  |  ee_fit=0.00608 ee_held=0.00586
+[ee] step  33/40  loss=0.000037  fit=0.00581 held=0.00563  |  ee_fit=0.00581 ee_held=0.00563
+[ee] step  34/40  loss=0.000031  fit=0.00576 held=0.00533  |  ee_fit=0.00576 ee_held=0.00533
+[ee] step  35/40  loss=0.000030  fit=0.00560 held=0.00556  |  ee_fit=0.00560 ee_held=0.00556
+[ee] step  36/40  loss=0.000027  fit=0.00523 held=0.00559  |  ee_fit=0.00523 ee_held=0.00559
+[ee] step  37/40  loss=0.000025  fit=0.00498 held=0.00643  |  ee_fit=0.00498 ee_held=0.00643
+[ee] step  38/40  loss=0.000021  fit=0.00473 held=0.00725  |  ee_fit=0.00473 ee_held=0.00725
+[ee] step  39/40  loss=0.000019  fit=0.00458 held=0.00587  |  ee_fit=0.00458 ee_held=0.00587
+[ee] step  40/40  loss=0.000018  fit=0.00425 held=0.00565  |  ee_fit=0.00425 ee_held=0.00565
+[ee] wrote scratch/viz/loss_space_ee.npz
+
+[ee] SUMMARY over 40 steps
+  final : loss=0.000018 fit=0.00425 held=0.00565 ee_fit=0.00425 ee_held=0.00565
+  best-train-loss iterate (step 40): fit=0.00425 held=0.00565 ee_fit=0.00425 ee_held=0.00565
+  min ee_held over trajectory = 0.00533 (step 34)
+
+[ee] jac+svd 658s
+  eigenvalues (desc) = [8.2547e+00 2.7500e-01 2.7500e-01 1.9453e-01 6.9997e-04 3.1002e-05
+ 1.5178e-09 5.0601e-10 2.8429e-15]
+  r = 8 (gap rule) / 3 (95% trace) of K = 9

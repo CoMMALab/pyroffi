@@ -1,0 +1,22 @@
+experiment: identifiability_spectrum
+module: iosp.experiments.e0d_eigen_projection
+description: "Supplementary: eigen-projected recovery error on anchored scene"
+
+defaults: {}
+
+runs:
+  - name: eigen_projection
+    args: {}
+    out: iosp/data/results/identifiability/eigen_projection.npz
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"
+
+figures:
+  - name: fig_eigenspectrum
+    renderer: iosp.viz.fig_eigenspectrum
+    input: iosp/data/results/identifiability/eigen_projection.npz
+    out: iosp/figures/fig_eigenspectrum.pdf

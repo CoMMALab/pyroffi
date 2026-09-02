@@ -1,6 +1,6 @@
 """Interactive multi-segment IOC: teleop a full pick-and-place task, recover
 IK-stage + trajopt-stage cost weights on the composed IK->trajopt planner
-(`iosp.pickplace` -- the genuinely-composed design, not the retired flat-vector
+(`iosp.model.pickplace` -- the genuinely-composed design, not the retired flat-vector
 one; see that module's docstring for the composition and why it matters).
 
 Same gizmo-driven waypoint recording UX as `examples/21_00_panda_ioc_teleop_viser
@@ -9,10 +9,10 @@ approach -> grasp -> transport -> place: four "record <phase>" buttons let the
 human demonstrate the whole task in one continuous session, phase by phase
 (chosen over one undifferentiated recording because the resample step needs to
 know the phase boundaries to build one fixed-length trajectory per segment,
-matching `iosp.pickplace.PHASES`' per-phase waypoint counts).
+matching `iosp.model.pickplace.PHASES`' per-phase waypoint counts).
 
 There is no ground-truth theta* for a human demo, so -- exactly as in 21_00 --
-"Run IOC" reports each method's recovered theta_hat (`iosp.pickplace.
+"Run IOC" reports each method's recovered theta_hat (`iosp.model.pickplace.
 THETA_IK_NAMES` + `THETA_TRAJOPT_NAMES`) and a reconstruction error (EE-path
 RMSE against the recorded demo), not regret.  See `iosp/recovery_bench.py` for
 the ground-truth (synthetic-theta*) version of this same recovery loop, used
@@ -45,7 +45,7 @@ from viser.extras import ViserUrdf
 
 from ioc import outer as outer_opt
 from ioc.inner import make_inner_solver
-from iosp import pickplace as pp
+from iosp.model import pickplace as pp
 from pyroffi.optimization_engines._ls_ik import ls_ik_solve
 
 THETA_NAMES = pp.THETA_IK_NAMES + pp.THETA_TRAJOPT_NAMES

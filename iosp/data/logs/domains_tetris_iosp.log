@@ -1,0 +1,238 @@
+
+############################################################
+# tetris_iosp: IOSP on SPaSM tetris packing: recover trajopt costs from composed pick-place demos
+############################################################
+
+============================================================
+[run] blocks3_seed0  GPU=1  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 0 --out iosp/data/results/tetris/blocks3_seed0.npz
+2026-08-30 16:13:59.084 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 16:13:59.875 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.0s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+E0830 16:19:39.526238 3051993 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 16:20:39.536905 3051869 slow_operation_alarm.cc:140] The operation took 3m0.010772486s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 881.1s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.635e-07
+[grad] dL/dtheta at z=0: [ 5.3862728e-02 -9.2471130e-03  1.2417795e-04  1.7008200e-01
+ -2.1482182e-01]
+E0830 16:45:06.456707 3051993 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 16:45:30.907425 3051869 slow_operation_alarm.cc:140] The operation took 2m24.450843975s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.01291  move_rel=9.469e-01 reduction=664.30x ok
+[out] wrote iosp/data/results/tetris/blocks3_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.37129     +0.0% vs uniform
+  tetris IOSP fit                        0.01291    +96.5% vs uniform
+  oracle theta*                          0.00047    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.3111
+  effort         0.0630    0.0893
+  smooth         0.1794    0.2427
+  clearance      0.4148    0.1472
+  orient         0.0800    0.1205
+  skeleton       0.2629    0.4002
+  wall: 2901s  exit: 0
+  manifest: iosp/data/results/tetris/blocks3_seed0.manifest.json
+
+============================================================
+[run] blocks3_seed1  GPU=1  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 1 --out iosp/data/results/tetris/blocks3_seed1.npz
+2026-08-30 17:02:19.648 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 17:02:20.414 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.5s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+E0830 17:07:57.597768 3131300 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 17:08:57.080151 3131202 slow_operation_alarm.cc:140] The operation took 2m59.482458352s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 877.9s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.960e-06
+[grad] dL/dtheta at z=0: [ 4.3533131e-02 -8.6833928e-03  1.5308503e-04  1.6554105e-01
+ -2.0054385e-01]
+E0830 17:33:04.810297 3131300 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 17:33:28.378067 3131202 slow_operation_alarm.cc:140] The operation took 2m23.567880582s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.02357  move_rel=1.402e+30 reduction=275.07x ok
+[out] wrote iosp/data/results/tetris/blocks3_seed1.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.38191     +0.0% vs uniform
+  tetris IOSP fit                        0.02357    +93.8% vs uniform
+  oracle theta*                          0.00050    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.0535
+  effort         0.0677    0.0893
+  smooth         0.2432    0.2427
+  clearance      0.1930    0.1472
+  orient         0.1085    0.1205
+  skeleton       0.3876    0.4002
+  wall: 2892s  exit: 0
+  manifest: iosp/data/results/tetris/blocks3_seed1.manifest.json
+
+============================================================
+[run] blocks3_seed2  GPU=1  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 3 --seed 2 --out iosp/data/results/tetris/blocks3_seed2.npz
+2026-08-30 17:50:31.462 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 17:50:32.231 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.6s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=3  fit/test=6/6
+E0830 17:56:00.948128 3211604 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 17:56:54.658287 3211518 slow_operation_alarm.cc:140] The operation took 2m53.710230874s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 850.7s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.000e-06
+[grad] dL/dtheta at z=0: [ 1.8308759e-02 -6.1264932e-03 -1.1817599e-04  1.3427615e-01
+ -1.4634025e-01]
+E0830 18:20:57.264217 3211604 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 18:21:22.288518 3211518 slow_operation_alarm.cc:140] The operation took 2m25.024377448s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.02325  move_rel=1.444e+30 reduction=150.93x ok
+[out] wrote iosp/data/results/tetris/blocks3_seed2.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.37552     +0.0% vs uniform
+  tetris IOSP fit                        0.02325    +93.8% vs uniform
+  oracle theta*                          0.00039    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.0801
+  effort         0.0638    0.0893
+  smooth         0.2276    0.2427
+  clearance      0.2184    0.1472
+  orient         0.1061    0.1205
+  skeleton       0.3841    0.4002
+  wall: 2889s  exit: 0
+  manifest: iosp/data/results/tetris/blocks3_seed2.manifest.json
+
+============================================================
+[run] blocks5_seed0  GPU=1  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 5 --seed 0 --out iosp/data/results/tetris/blocks5_seed0.npz
+2026-08-30 18:38:40.958 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 18:38:41.768 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 17.0s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+E0830 18:45:54.523613 3304945 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 18:46:54.284633 3304742 slow_operation_alarm.cc:140] The operation took 2m59.761095881s
+
+********************************
+[Compiling module jit__lambda for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[demos] 531.3s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.635e-07
+[grad] dL/dtheta at z=0: [ 5.3862728e-02 -9.2471130e-03  1.2417795e-04  1.7008200e-01
+ -2.1482182e-01]
+E0830 19:19:02.281334 3304945 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0830 19:19:25.533443 3304742 slow_operation_alarm.cc:140] The operation took 2m23.252202482s
+
+********************************
+[Compiling module jit_loss for GPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+[fit] test RMSE 0.01291  move_rel=9.469e-01 reduction=664.30x ok
+[out] wrote iosp/data/results/tetris/blocks5_seed0.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.37129     +0.0% vs uniform
+  tetris IOSP fit                        0.01291    +96.5% vs uniform
+  oracle theta*                          0.00047    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.3111
+  effort         0.0630    0.0893
+  smooth         0.1794    0.2427
+  clearance      0.4148    0.1472
+  orient         0.0800    0.1205
+  skeleton       0.2629    0.4002
+  wall: 2531s  exit: 0
+  manifest: iosp/data/results/tetris/blocks5_seed0.manifest.json
+
+============================================================
+[run] blocks5_seed1  GPU=1  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 5 --seed 1 --out iosp/data/results/tetris/blocks5_seed1.npz
+2026-08-30 19:20:51.645 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 19:20:52.437 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.7s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 175.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 1.960e-06
+[grad] dL/dtheta at z=0: [ 4.3533131e-02 -8.6833928e-03  1.5308503e-04  1.6554105e-01
+ -2.0054385e-01]
+[fit] test RMSE 0.02357  move_rel=1.402e+30 reduction=275.07x ok
+[out] wrote iosp/data/results/tetris/blocks5_seed1.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.38191     +0.0% vs uniform
+  tetris IOSP fit                        0.02357    +93.8% vs uniform
+  oracle theta*                          0.00050    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.0535
+  effort         0.0677    0.0893
+  smooth         0.2432    0.2427
+  clearance      0.1930    0.1472
+  orient         0.1085    0.1205
+  skeleton       0.3876    0.4002
+  wall: 1184s  exit: 0
+  manifest: iosp/data/results/tetris/blocks5_seed1.manifest.json
+
+============================================================
+[run] blocks5_seed2  GPU=1  module=iosp.experiments.e8_tetris
+  cmd: /home/sadmin/miniconda3/envs/pyroffi/bin/python -m iosp.experiments.e8_tetris --n-iters 60 --n-steps 40 --n-starts 4 --num-blocks 5 --seed 2 --out iosp/data/results/tetris/blocks5_seed2.npz
+2026-08-30 19:40:35.856 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
+2026-08-30 19:40:36.630 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
+[build] 16.7s  K=5 ['effort', 'smooth', 'clearance', 'orient', 'skeleton']  num_blocks=5  fit/test=6/6
+[demos] 175.8s, shape (6, 22, 3)
+[sanity] loss(z_star) = 3.000e-06
+[grad] dL/dtheta at z=0: [ 1.8308759e-02 -6.1264932e-03 -1.1817599e-04  1.3427615e-01
+ -1.4634025e-01]
+[fit] test RMSE 0.02325  move_rel=1.444e+30 reduction=150.93x ok
+[out] wrote iosp/data/results/tetris/blocks5_seed2.npz
+
+=== held-out behavioural recovery (EE RMSE, m) ===
+  baseline uniform (theta = 1/K)         0.37552     +0.0% vs uniform
+  tetris IOSP fit                        0.02325    +93.8% vs uniform
+  oracle theta*                          0.00039    +99.9% vs uniform
+
+param_err (reported, NOT criterion): 0.0801
+  effort         0.0638    0.0893
+  smooth         0.2276    0.2427
+  clearance      0.2184    0.1472
+  orient         0.1061    0.1205
+  skeleton       0.3841    0.4002
+  wall: 1186s  exit: 0
+  manifest: iosp/data/results/tetris/blocks5_seed2.manifest.json
