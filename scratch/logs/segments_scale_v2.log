@@ -1,3 +1,0 @@
-[2026-08-19T21:06:43-04:00] === segments K=6 (S=2, n-contexts=8, budget=1500) ===
-[segments] K=6 d=2 T=30 M=8 budget=1500 solves
-  seed 0: implicit=1.26e-05  fd=4.62e-04  cmaes=1.14e-05  kkt=1.46e-02  cioc=1.78e-04  random=1.46e-02

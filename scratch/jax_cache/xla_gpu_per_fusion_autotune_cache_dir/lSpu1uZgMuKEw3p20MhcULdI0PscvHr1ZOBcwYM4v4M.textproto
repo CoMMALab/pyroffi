@@ -1,7 +1,0 @@
-other {
-  name: "NATIVE_EMITTER"
-  config {
-    type_url: "type.googleapis.com/xla.autotuner.BackendConfig"
-    value: "2\000"
-  }
-}

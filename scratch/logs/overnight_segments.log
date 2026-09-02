@@ -1,6 +1,0 @@
-[2026-08-19T00:01:04-04:00] waiting on probe PID 933040 to finish...
-[2026-08-19T05:51:35-04:00] probe process ended
-[2026-08-19T05:51:35-04:00] PROBE FAILED: screening still rejects demos at DEMO_N_ITER=2500.
-RuntimeError: [segments seed 2] 1/9 demonstrations are not local optima: max relative stationarity = 7.79e-05 > 1e-06 after 2500 inner iterations. The recovered costs would not be valid; raise the demonstration iteration count (ioc.bench2d.run.DEMO_N_ITER).
-[2026-08-19T05:51:35-04:00] Not proceeding with the full segments rerun -- treat as evidence
-the benchmark needs re-evaluation, not another iteration bump.
