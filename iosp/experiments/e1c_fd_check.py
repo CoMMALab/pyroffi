@@ -1,19 +1,7 @@
-"""Direct FD-vs-implicit-adjoint gradient check on Study 1's K=3 loss, at the
-alpha0 the canonical fit actually starts from. Cheap (few forward solves, no
-optimization loop) BECAUSE the persistent compilation cache (see
-pickplace.py) means only the FIRST forward solve of a given shape pays the
-compile cost -- every subsequent central-difference sample reuses the cached
-compiled executable.
+"""E1c — FD-vs-implicit-adjoint gradient check on E1's K=3 loss.
 
-Motivation: `run_multi_demo_fit`/`run_multi_demo_fit_vmap`/`run_single_demo_
-tuned` (study1_diagnostic_multidemo.py) all show fit RMSE getting WORSE than
-the alpha=0 no-fit baseline, MEASURED ON THE TRAINING DEMO ITSELF, across
-independent optimizer configs (different demo count, different lr/steps).
-That's inconsistent with plain overfitting (which would improve training
-loss at generalization's expense) and consistent with the implicit-adjoint
-gradient pointing the wrong way -- already documented on the FULL 9-feature
-model (`cos(implicit, FD) ~= -0.71`, see HANDOFF.md) but never checked on
-this K=3 reduced model specifically. This script checks it directly.
+Verifies the implicit adjoint direction against central finite differences at
+the canonical alpha0.
 """
 
 import jax

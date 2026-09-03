@@ -1,0 +1,14 @@
+experiment: minimal_identifiable
+module: iosp.experiments.e1_minimal_identifiable
+description: "E1: minimal identifiability-clean pick-place with known-rank subspace"
+
+defaults: {}
+
+runs:
+  - name: canonical
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

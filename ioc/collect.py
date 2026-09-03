@@ -75,13 +75,18 @@ STAGES: dict[str, list[Run]] = {
     "e3_dynamics": [
         Run(E3, ["--n-timesteps", "16", "--n-contexts", "5", "--n-seeds", "5",
                  "--n-newton", "60", "--n-outer-steps", "30", "--demo-noise", "0.02",
-                 "--payload-kg", "2.0", "--torque-backend", "grid",
-                 "--adjoint-hessian", "hybrid"], "robot/e3_results.json",
-            "E3 dynamics: GRiD forward solve + float64 adjoint"),
+                 "--payload-kg", "2.0", "--torque-backend", "grid"],
+            "robot/e3_results.json",
+            "E3 dynamics: GRiD forward solve, exact GRiD-analytic adjoint"),
+        # End-to-end float32 (x64 off): the implicit adjoint's exact Hessian
+        # now comes from GRiD's own idsva_so second-order kernel (see
+        # ioc.inner / pyroffi.dynamics._grid_dynamics), so this no longer
+        # needs the Gauss-Newton fallback -- it is the same code path as
+        # e3_dynamics above, just run with x64 off end-to-end.
         Run(E3, ["--n-timesteps", "16", "--n-contexts", "5", "--n-seeds", "3",
                  "--n-newton", "60", "--n-outer-steps", "30", "--demo-noise", "0.02",
                  "--payload-kg", "2.0", "--torque-backend", "grid",
-                 "--adjoint-hessian", "gn", "--adjoint-ridge", "1e-6",
+                 "--adjoint-ridge", "1e-6",
                  "--conv-tol", "1e-3", "--no-check-grads"], "robot/e3_float32.json",
             "E3 end-to-end float32 (conv_tol loosened: 1e-5 is unreachable there)",
             env={"JAX_ENABLE_X64": "0"}),

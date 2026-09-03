@@ -39,7 +39,11 @@ def enable_compilation_cache(min_compile_secs=5.0):
 
 
 # -- the demonstrator's cost (ground truth) ---------------------------------
-THETA_IK_STAR = jnp.array([0.06, 0.04], dtype=jnp.float32)      # grasp/place standoff, m
+# grasp standoff, place standoff, place radial, place tangential -- all metres.
+# The two in-plane offsets are ZERO here on purpose: the synthetic demonstrator
+# releases on the bucket's axis, so every recorded synthetic result is
+# reproduced byte-for-byte by the widened parameter vector.
+THETA_IK_STAR = jnp.array([0.06, 0.04, 0.0, 0.0], dtype=jnp.float32)
 Z_TRAJOPT_STAR = jnp.array([1.0, 2.0, 0.5, 1.0, 2.0, 0.5, 1.0], dtype=jnp.float32)
 Z_FULL_STAR = jnp.array([1.0, 2.0, 0.5, 1.5], dtype=jnp.float32)  # refine: smooth, clearance, upright, skeleton
 

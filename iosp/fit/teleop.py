@@ -130,7 +130,7 @@ def find_episodes(demo_dir=DEFAULT_DEMO_DIR):
 
 
 def load_demos(demo_dir=DEFAULT_DEMO_DIR, teleop_root=DEFAULT_TELEOP_ROOT,
-               prob=None, anchor_grasp=False):
+               prob=None, anchor_grasp=False, max_episodes=None):
     """-> (names, (B, N_FULL, dof) waypoints, batched `PickPlaceScene`).
 
     `anchor_grasp=True` fills `pick_wxyz`/`grasp_ref` AND `place_wxyz`/
@@ -141,6 +141,8 @@ def load_demos(demo_dir=DEFAULT_DEMO_DIR, teleop_root=DEFAULT_TELEOP_ROOT,
     """
     ex = _import_exporter(teleop_root)
     eps = find_episodes(demo_dir)
+    if max_episodes is not None:
+        eps = eps[: int(max_episodes)]
     paths, fields = ex.build_demo_batch(
         [(d / "state.jsonl", d / "factors.json") for d in eps])
     demo_q = jnp.asarray(paths, dtype=jnp.float32)
@@ -166,31 +168,52 @@ def load_demos(demo_dir=DEFAULT_DEMO_DIR, teleop_root=DEFAULT_TELEOP_ROOT,
 
 
 def z_prior(K, n_ik, standoffs=None):
-    """`u = 0` in `z` coordinates: standoffs at `standoffs`, flat logits.
+    """`u = 0` in `z` coordinates: `theta_ik` at `standoffs`, flat logits.
 
-    `standoffs=None` falls back to the TCP offset on both, which is the right
-    answer for the grasp and an underestimate for the release -- prefer
-    `measure_standoffs`, which reads both off the demonstrations.
+    `standoffs=None` falls back to the TCP offset on the two standoffs and zero
+    in-plane offset, which is right for the grasp and wrong for the release --
+    prefer `measure_standoffs`, which reads all four off the demonstrations.
     """
     p = np.zeros(K, dtype=np.float32)
-    p[:n_ik] = TCP_OFFSET_M if standoffs is None else np.asarray(standoffs)
+    if standoffs is None:
+        p[:2] = TCP_OFFSET_M
+    else:
+        p[:n_ik] = np.asarray(standoffs)
     return jnp.asarray(p)
 
 
 def measure_standoffs(prob, demo_q, scenes, idx):
-    """`(grasp, place)` standoff priors, in metres, from episodes `idx`.
+    """`theta_ik`'s prior, in metres, from episodes `idx` -- all four entries.
 
-    The median height of the EE frame above the IK target at the rows the
-    skeleton pins -- i.e. exactly the quantity `theta_ik` parameterises, read
-    off the demonstrations instead of guessed.  Median, not mean: one fumbled
-    approach should not move the initialization.
+    Each is the median over those episodes of exactly the quantity the matching
+    coordinate parameterises, read off the demonstrations instead of guessed:
+
+      grasp.standoff     height of the EE frame above the cube at the pinned
+                         grasp row -- comes out at the hand-to-TCP offset, which
+                         is an independent check that the gripper channel put
+                         the grasp on the right row
+      place.standoff     the same above the bucket at the release row
+      place.radial       in-plane displacement of the release point along the
+                         base->bucket direction (negative = short of centre)
+      place.tangential   the same along its left-hand normal
+
+    Median, not mean: one fumbled approach should not move the initialization.
     """
-    ee = np.asarray(jax.vmap(prob.ee_positions)(demo_q))[np.asarray(idx)]
-    targets = (np.asarray(scenes.pick_pos)[np.asarray(idx)],
-               np.asarray(scenes.place_pos)[np.asarray(idx)])
-    rows = (pp.SKELETON_PICK, pp.SKELETON_PLACE)
-    return np.array([float(np.median(ee[:, list(r), 2] - t[:, 2:3]))
-                     for r, t in zip(rows, targets)], dtype=np.float32)
+    idx = np.asarray(idx)
+    ee = np.asarray(jax.vmap(prob.ee_positions)(demo_q))[idx]
+    pick = np.asarray(scenes.pick_pos)[idx]
+    place = np.asarray(scenes.place_pos)[idx]
+    r_pick, r_place = list(pp.SKELETON_PICK), list(pp.SKELETON_PLACE)
+
+    grasp_z = np.median(ee[:, r_pick, 2] - pick[:, 2:3])
+    place_z = np.median(ee[:, r_place, 2] - place[:, 2:3])
+
+    # In-plane, in the scene's own base->bucket frame; see `pp._place_frame`.
+    radial, tangential = pp._place_frame(jnp.asarray(place))
+    d = ee[:, r_place[0], :2] - place[:, :2]
+    rad = np.median((d * np.asarray(radial)[:, :2]).sum(-1))
+    tan = np.median((d * np.asarray(tangential)[:, :2]).sum(-1))
+    return np.array([grasp_z, place_z, rad, tan], dtype=np.float32)
 
 
 def build_teleop(demo_dir=DEFAULT_DEMO_DIR, teleop_root=DEFAULT_TELEOP_ROOT,
@@ -250,13 +273,11 @@ def build_teleop(demo_dir=DEFAULT_DEMO_DIR, teleop_root=DEFAULT_TELEOP_ROOT,
 
     def ee_paths(u):
         xs, ps = _rollout(u)
-        return jnp.stack([prob.full_ee_path(scenes, xs, ps, batch_index=i)
-                          for i in range(B)])
+        return prob.full_ee_paths(scenes, xs, ps)
 
     def joint_paths(u):
         xs, ps = _rollout(u)
-        return jnp.stack([prob.full_joint_path(scenes, xs, ps, batch_index=i)
-                          for i in range(B)])
+        return prob.full_joint_paths(scenes, xs, ps)
 
     paths = joint_paths if space == "joint" else ee_paths
     paths_j = jax.jit(paths)

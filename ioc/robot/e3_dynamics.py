@@ -1,4 +1,4 @@
-"""E3: the price of a misspecified cost basis, and the GRiD/float64 hybrid adjoint.
+"""E3: the price of a misspecified cost basis.
 
 Demonstrations are generated under a *dynamic* cost: kinematic terms plus an
 RNEA torque feature with a payload, so the demonstrated motion depends on mass,
@@ -13,30 +13,16 @@ dynamic cost.  A kinematic method optimizes what it can express, and pays for
 what it cannot -- the regret gap between the two fits is that price, and the
 `random` bookend says whether the misspecified fit is even worth doing.
 
-The second thing this experiment exists to establish is that the implicit
-adjoint survives a fast, reduced-precision, once-differentiable forward backend.
-The GRiD CUDA inverse-dynamics FFI computes in float32 and supports exactly one
-level of differentiation, so `jax.hessian` raises on it.  `adjoint_hessian`
-selects how to cope:
+This experiment also exercises the implicit adjoint on the GRiD CUDA
+inverse-dynamics FFI (`--torque-backend grid`, float32). `jax.hessian` runs
+straight through it: `GRiDDynamics`'s analytic-gradient kernels carry their
+own `custom_jvp` built from GRiD's `idsva_so` second-order kernel (see
+`pyroffi.dynamics._grid_dynamics`), so the implicit adjoint's exact-Hessian
+curvature (`ioc.inner`'s `adjoint_hessian="jax"`, the only mode) needs no
+float64-JAX twin and no Gauss-Newton fallback -- same code path as the
+pure-JAX torque backend.
 
-  "hybrid"  forward solve on GRiD, adjoint curvature built from the *exact
-            float64 JAX RNEA*.  The adjoint runs once per outer step against
-            ~n_newton solver iterations, so the extra float64 evaluation costs
-            little.  Measured: reproduces the pure-float64 gradient at
-            cos = 1.000000.
-  "gn"      Gauss-Newton curvature, first derivatives only.  Works everywhere,
-            but carries a ~14% magnitude bias here.
-  "true"    exact Hessian; requires a twice-differentiable torque backend
-            (`--torque-backend jax`).
-
-Note what cannot be used as the reference: finite differences.  The float32
-forward solve bottoms out around ||grad|| ~ 1e-6, so an eps-sized probe of theta
-is comparable to solver noise and FD is dominated by it (measured cos ~ 0.13
-while the same adjoint matches a float64 reference at cos = 1.000000).  The
-check below therefore validates against a float64 JAX-RNEA pipeline and reports
-FD only as a diagnostic of how noisy the float32 solve is.
-
-    XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 CUDA_VISIBLE_DEVICES=0 \
+    XLA_PYTHON_CLIENT_PREALLOCATE=false CUDA_VISIBLE_DEVICES=0 \
         python -m ioc.robot.e3_dynamics
 """
 
@@ -72,7 +58,7 @@ def make_dynamics_forward_solver(opt_cfg=DynamicsTrajOptConfig()):
 def run_trial(
     problem, theta_star_full, n_contexts, seed, demo_noise, payload_kg, n_newton,
     n_outer_steps, lr, n_unroll_tail, adjoint_ridge, conv_tol, check_grads,
-    torque_backend, adjoint_hessian, forward_solver, unrolled_forward_solver,
+    torque_backend, forward_solver, unrolled_forward_solver,
 ):
     rng = np.random.default_rng(seed)
     payload = bases.make_payload(problem, payload_kg)
@@ -80,24 +66,9 @@ def run_trial(
     res_kin, kin_names = bases.kinematic(problem, "k3")
     res_jax, _ = bases.dynamic(problem, payload, "jax")
 
-    def adjoint_cost_for(scales):
-        """Exact float64 objective used only to build the adjoint's curvature."""
-        if adjoint_hessian != "hybrid":
-            return None
-
-        def cost(x_flat, theta, scene):
-            rs = res_jax(x_flat, scene)
-            phi = jnp.stack([jnp.sum(r**2) for r in rs]) / scales
-            return jnp.dot(theta, phi)
-
-        return cost
-
-    inner_hess = "true" if adjoint_hessian == "hybrid" else adjoint_hessian
-
     def build_full(scales):
         return make_inner_solver(
             res_full, scales, adjoint_ridge=adjoint_ridge,
-            adjoint_hessian=inner_hess, adjoint_cost_fn=adjoint_cost_for(scales),
             forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
         )
@@ -132,7 +103,7 @@ def run_trial(
         scales_ref = problem.calibrate(res_jax, scenes, jax.random.key(seed))
         inner_ref = make_inner_solver(
             res_jax, scales_ref, adjoint_ridge=adjoint_ridge,
-            adjoint_hessian="true", forward_solver=forward_solver,
+            forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
         )
         loss_ref = jax.jit(
@@ -186,7 +157,6 @@ def run_trial(
     scales_kin = problem.calibrate(res_kin, scenes, jax.random.key(seed))
     inner_kin = make_inner_solver(
         res_kin, scales_kin, adjoint_ridge=adjoint_ridge,
-        adjoint_hessian="gn" if adjoint_hessian != "true" else "true",
         forward_solver=forward_solver,
         unrolled_forward_solver=unrolled_forward_solver,
     )
@@ -233,7 +203,6 @@ def main(
     conv_tol: float = 1e-5,
     check_grads: bool = True,
     torque_backend: str = "grid",
-    adjoint_hessian: str = "hybrid",
     dynamics_n_iters: int = 200,
     dynamics_m_lbfgs: int = 8,
     out: str = "e3_results.json",
@@ -244,8 +213,6 @@ def main(
     """
     problem = prob.RobotProblem.load(urdf_path, srdf_path, mesh_dir, n_timesteps)
     print(f"jax devices: {jax.devices()}  T={n_timesteps}  payload={payload_kg}kg")
-    if not jax.config.jax_enable_x64:
-        print("WARNING: x64 is OFF; the implicit adjoint needs float64.")
 
     # Torque must carry real weight or the dynamic and kinematic problems
     # coincide and the experiment measures nothing.
@@ -264,7 +231,7 @@ def main(
         all_results[f"s{seed}"] = run_trial(
             problem, theta_star, n_contexts, seed, demo_noise, payload_kg,
             n_newton, n_outer_steps, lr, n_unroll_tail, adjoint_ridge,
-            conv_tol, check_grads, torque_backend, adjoint_hessian,
+            conv_tol, check_grads, torque_backend,
             forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
         )

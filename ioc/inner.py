@@ -50,32 +50,29 @@ result -- it is exactly the cost the implicit adjoint avoids.
 The third way, finite differences on L, needs no differentiable solver at all
 and lives in `ioc.outer`; it costs K+1 solves per outer step instead of 1.
 
-Curvature choices
------------------
-`adjoint_hessian` selects the H used by the adjoint:
+Curvature
+---------
+The implicit adjoint always uses the exact Hessian grad^2_xx C
+(`adjoint_hessian="jax"`, `hess_x = jax.hessian(cost, ...)`). This used to
+need a first-derivatives-only Gauss-Newton fallback ("gn") or a float64-JAX
+curvature computed alongside a float32 GRiD forward solve ("hybrid"), because
+the GRiD CUDA inverse-dynamics FFI supported only one level of
+differentiation -- `jax.hessian` raised straight through it. That limit is
+fixed at the source now: `pyroffi.dynamics.GRiDDynamics`'s analytic-gradient
+kernels (`inverse_dynamics_gradient`, `crba`) carry their own `custom_jvp`
+built from GRiD's `idsva_so` second-order kernel, so `jax.hessian` works
+straight through `inverse_dynamics` on the GRiD backend exactly as it always
+did on the pure-JAX one. "jax" names the single remaining mode to flag that
+it is backend-agnostic -- a plain `jax.hessian` of whatever `cost`/
+`adjoint_cost_fn` computes, GRiD-backed or not.
 
-  "true"  exact grad^2_xx C.  Most accurate, but needs *second* derivatives of
-          every feature.
-  "gn"    the Gauss-Newton J^T J.  First derivatives only, so it is the only
-          option when a feature comes from an FFI kernel that supports a single
-          level of differentiation (the GRiD CUDA inverse-dynamics call, whose
-          FFI raises on `jax.hessian`).  At a converged small-residual solution
-          the two nearly agree; the experiments measure the gap rather than
-          assuming it (measured: ~14% magnitude bias on E3).
+`forward_solver` selects which optimizer produces x*; the implicit adjoint only
+needs x* to be a stationary point, not to know how it was found.
 
-`forward_solver` selects which optimizer produces x* in the first place --
-orthogonal to `adjoint_hessian`: the implicit adjoint only needs x* to be a
-genuine stationary point, not to know how it was found, so any solver can be
-swapped in as `_solve_one` (required; see `make_inner_solver`).  In practice
-this is always `pyroffi.optimization_engines.dynamics_trajopt`, the generic
-L-BFGS engine this codebase ships, wrapped as `Callable[[x0, cost_fn], x]`.
-
-`adjoint_cost_fn` overrides the objective used to *build* that curvature while
-leaving the forward solve alone.  This is the hybrid path: run the forward solve
-on a fast, reduced-precision, once-differentiable backend (GRiD CUDA) and build
-the adjoint -- evaluated once per outer step, against ~n_iter solver iterations
--- from an exact float64 model.  Measured to reproduce the pure-float64 gradient
-at cos = 1.000000.
+`adjoint_cost_fn` overrides the objective used to build curvature while leaving
+the forward solve alone, for the rare case a caller wants a different (but
+still twice-differentiable) objective driving curvature than the one driving
+the forward solve.
 """
 
 import dataclasses
@@ -116,7 +113,7 @@ def make_inner_solver(
     scales,
     *,
     adjoint_ridge=1e-9,
-    adjoint_hessian="true",
+    adjoint_hessian="jax",
     adjoint_cost_fn=None,
     n_restarts=1,
     restart_jitter=0.35,
@@ -156,6 +153,12 @@ def make_inner_solver(
     if unrolled_forward_solver is None:
         unrolled_forward_solver = forward_solver
 
+    if adjoint_hessian != "jax":
+        raise ValueError(
+            f"adjoint_hessian must be 'jax' (the only remaining mode -- see "
+            f"the module docstring), got {adjoint_hessian!r}."
+        )
+
     def features(x, ctx):
         rs = residual_fn(x, ctx)
         return jnp.stack([jnp.sum(r**2) for r in rs]) / scales
@@ -168,7 +171,10 @@ def make_inner_solver(
                          argnums=0)
 
     def gn_system(x, theta, ctx):
-        """Gradient and PSD Gauss-Newton Hessian of sum_k theta_k ||r_k||^2 / s_k."""
+        """Gradient and PSD Gauss-Newton Hessian of sum_k theta_k ||r_k||^2 /
+        s_k. Used by CIOC (`ioc.analytic.cioc_fit`), which integrates this
+        curvature directly -- unrelated to the implicit adjoint's curvature
+        (see the module docstring), which always uses the exact Hessian."""
 
         def res_cat(xx):
             rs = residual_fn(xx, ctx)
@@ -247,10 +253,7 @@ def make_inner_solver(
 
     def _bwd(res, g_out):
         xs, theta, ctx = res
-        if adjoint_hessian == "gn":
-            _, H = gn_system(xs, theta, ctx)
-        else:
-            H = hess_x(xs, theta, ctx)
+        H = hess_x(xs, theta, ctx)
         # Ridge only for numerical invertibility.  Reusing the LM damping here
         # would be a bug: that damping exists to make the *forward* step safe,
         # and it is many orders of magnitude larger than what conditioning

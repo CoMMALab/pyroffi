@@ -336,6 +336,38 @@ ffi::Error GridFdGradImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
   return CudaCheck(cudaGetLastError(), "forward_dynamics_gradient_kernel");
 }
 
+// Second-order inverse dynamics (GRiD idsva_so, body-frame fixed-base
+// dispatch): (q, qd, qdd) -> 4 flattened (n,n,n) tensors per timestep,
+// concatenated as [d2tau_dq | d2tau_dqd | d2tau_cross | dM_dq], each n^3
+// floats (SECOND_ORDER_TENSOR_SIZE = 4*n^3 total). Same [q|qd|qdd] packing
+// as GridFdGradImpl (stride 3n = Q_QD_U_STRIDE).
+ffi::Error GridIdsvaSoImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
+                           float gravity,
+                           ffi::Buffer<ffi::DataType::F32> q,
+                           ffi::Buffer<ffi::DataType::F32> qd,
+                           ffi::Buffer<ffi::DataType::F32> qdd,
+                           ffi::Result<ffi::Buffer<ffi::DataType::F32>> out) {
+  const int64_t batch = q.dimensions()[0];
+  const int64_t n = q.dimensions()[1];
+  if (auto err = CheckDims(batch, n, q.element_count()); err.failure())
+    return err;
+  grid::robotModel<T>* model = GetRobotModel();
+
+  ScratchBuffer q_qd_qdd(scratch, 3 * kNq * batch);
+  if (q_qd_qdd.err.failure()) return q_qd_qdd.err;
+  Pack3Kernel<<<PackBlocks(batch * kNq), 256, 0, stream>>>(
+      q_qd_qdd.ptr, q.typed_data(), qd.typed_data(), qdd.typed_data(), kNq,
+      batch);
+  WorkspaceBuffer ws(scratch, batch);
+  if (ws.err.failure()) return ws.err;
+  grid::idsva_so_body_frame_kernel<T>
+      <<<GridDims(batch), ThreadDims(),
+         grid::IDSVA_SO_BODY_FRAME_DYNAMIC_SHARED_MEM_BYTES<T>(), stream>>>(
+          out->typed_data(), ws.ptr, q_qd_qdd.ptr, 3 * kNq, model, gravity,
+          batch);
+  return CudaCheck(cudaGetLastError(), "idsva_so_body_frame_kernel");
+}
+
 }  // namespace
 
 #ifdef PYROFFI_GRID_RUNTIME_INERTIA
@@ -408,4 +440,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GridFdGradFfi, GridFdGradImpl,
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qd
                                   .Arg<ffi::Buffer<ffi::DataType::F32>>()  // u
+                                  .Ret<ffi::Buffer<ffi::DataType::F32>>());
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GridIdsvaSoFfi, GridIdsvaSoImpl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Ctx<ffi::ScratchAllocator>()
+                                  .Attr<float>("gravity")
+                                  .Arg<ffi::Buffer<ffi::DataType::F32>>()  // q
+                                  .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qd
+                                  .Arg<ffi::Buffer<ffi::DataType::F32>>()  // qdd
                                   .Ret<ffi::Buffer<ffi::DataType::F32>>());

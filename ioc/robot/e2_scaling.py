@@ -142,6 +142,10 @@ def run_basis(
     z = analytic.kkt_fit(inner.grad_x, scenes, demos, K)
     record("kkt", z, time.perf_counter() - t0, 0)
 
+    t0 = time.perf_counter()
+    z = analytic.eiv_fit(inner.grad_x, scenes, demos, K)
+    record("eiv", z, time.perf_counter() - t0, 0)
+
     record("random", z0, 0.0, 0)
     return results
 

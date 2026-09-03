@@ -88,6 +88,7 @@ pyroffi-sandbox = "pyroffi.sandbox._server:main"
 [tool.pytest.ini_options]
 markers = [
     "slow: tests that build an extra session or pay a large compile",
+    "gpu: requires a CUDA GPU with JAX GPU support",
 ]
 
 [tool.ruff.lint]

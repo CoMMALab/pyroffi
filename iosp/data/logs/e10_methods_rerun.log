@@ -1,0 +1,44 @@
+Building teleop forward map...
+Unable to resolve filename: meshes/robots/fr3/visual/link0.dae
+Can't find meshes/robots/fr3/visual/link0.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link1.dae
+Can't find meshes/robots/fr3/visual/link1.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link2.dae
+Can't find meshes/robots/fr3/visual/link2.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link3.dae
+Can't find meshes/robots/fr3/visual/link3.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link4.dae
+Can't find meshes/robots/fr3/visual/link4.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link5.dae
+Can't find meshes/robots/fr3/visual/link5.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link6.dae
+Can't find meshes/robots/fr3/visual/link6.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link7.dae
+Can't find meshes/robots/fr3/visual/link7.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/hand.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/hand.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+2026-09-03 09:04:37.228 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-03 09:04:37.538 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-03 09:04:38.874 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 37 disabled collision pairs from SRDF
+2026-09-03 09:04:39.640 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 26 links and 288 active self-collision pairs, using spherical collision models.
+  [teleop] standoff prior from the 8 fit episodes: grasp 0.1051 m, place 0.2463 m (hand-to-TCP is 0.1034 m)
+  [teleop (path A, human demos)] inner stationarity ||grad_x C|| per phase:
+    approach   worst=2.402e-04 over 8 scenes [4.9e-05 5.1e-05 6.7e-06 1.2e-05 8.5e-05 1.3e-05 9.2e-05 2.4e-04]
+    grasp      worst=1.939e-05 over 8 scenes [1.9e-05 1.9e-05 1.9e-05 3.1e-06 1.9e-05 1.9e-05 1.9e-05 1.9e-05]
+    transport  worst=6.168e-04 over 8 scenes [4.4e-04 6.2e-04 1.5e-04 5.5e-04 4.2e-04 2.7e-04 5.9e-04 3.5e-04]
+    place      worst=1.917e-05 over 8 scenes [1.9e-05 1.9e-05 3.1e-06 1.9e-05 0.0e+00 1.9e-05 1.9e-05 1.9e-05]
+
+10 episodes: 8 fit / 2 held out
+
+Baseline (u=0): loss=1.2673  ee_fit=0.5825m  ee_gen=0.6082m
+
+=== Implicit diff ===
+  compile: 2.7s
+  fit: 188.7s  loss 1.2673 → 0.3531
+
+=== Finite differences ===
+  compile: 33.7s

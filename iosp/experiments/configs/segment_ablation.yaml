@@ -1,0 +1,14 @@
+experiment: segment_ablation
+module: iosp.experiments.e0_segment_ablation
+description: "E0: segment-freeze ablation — which phases need free weights?"
+
+defaults: {}
+
+runs:
+  - name: ablation
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

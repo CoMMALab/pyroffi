@@ -1,0 +1,27 @@
+experiment: tamp2d_sanity
+module: iosp.experiments.e5_tamp2d
+description: "Fig 1: 2D TAMP sanity check — three-stage inversion on a drawable problem"
+
+defaults:
+  n_iters: 120
+  n_ctx: 8
+  n_steps: 60
+  n_starts: 8
+
+runs:
+  - name: seed0
+    args: {seed: 0, record: "iosp/data/results/tamp2d/seed0.npz"}
+  - name: seed1
+    args: {seed: 1, record: "iosp/data/results/tamp2d/seed1.npz"}
+  - name: seed2
+    args: {seed: 2, record: "iosp/data/results/tamp2d/seed2.npz"}
+
+env:
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  PYTHONUNBUFFERED: "1"
+
+figures:
+  - name: fig1_tamp2d
+    renderer: iosp.viz.fig_tamp2d
+    input: iosp/data/results/tamp2d/seed0.npz
+    out: iosp/figures/fig1_tamp2d.pdf

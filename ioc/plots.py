@@ -66,6 +66,7 @@ STYLE = {
     "fd":       dict(color="#D55E00", marker="s", ls="--", label="Finite diff."),
     "cmaes":    dict(color="#009E73", marker="^", ls="-.", label="CMA-ES"),
     "cioc":     dict(color="#E69F00", marker="D", ls=(0, (3, 1, 1, 1)), label="CIOC [Levine '12]"),
+    "eiv":      dict(color="#F0E442", marker="H", ls=(0, (4, 1, 1, 1, 1, 1)), label="EIV-TLS [Rickenbach '24]"),
     "kkt":      dict(color="#CC79A7", marker="v", ls=":", label="Inverse KKT"),
     "kkt_seed": dict(color="#CC79A7", marker="v", ls="-", label=r"Implicit, KKT-seeded $z_0$"),
     "unrolled": dict(color="#56B4E9", marker="P", ls=(0, (5, 2)), label="Unrolled"),
@@ -854,7 +855,7 @@ def fig_noise():
         d = json.load(open(f))
         rows[d["demo_noise"]] = d["results"]
     sig = np.array(sorted(rows))
-    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "random")
+    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "eiv", "random")
     # Implicit and finite differences agree to 3-4 significant figures here, so
     # one curve would sit exactly on top of the other and vanish.  Dodge the
     # markers slightly along x so both remain visible; the lines still coincide,
@@ -1135,7 +1136,7 @@ def fig_regime(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
     the demonstration stays near-optimal; `implicit` re-solves and fits
     rollout behaviour, which degrades far more gracefully as sigma grows.
     """
-    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "random")
+    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "eiv", "random")
     sig = np.asarray(sigmas, float)
     per_sigma = []
     for s in sig:

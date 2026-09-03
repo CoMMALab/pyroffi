@@ -37,3 +37,4 @@ tamp/external/
 # PDDLStream writes these into the working directory on every solve
 statistics/
 temp/
+scratch/

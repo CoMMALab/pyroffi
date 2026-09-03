@@ -1,68 +1,14 @@
-"""Study 4: inverting spasm's three-stage pick-and-place forward pass.
+"""E4 — Inverting spasm's three-stage pick-and-place forward pass.
 
-The forward model
------------------
-Three stages, matching spasm:
+Three stages: (1) IK seeds endpoints, (2) per-segment trajopt, (3) refine
+trajopt over the full concatenated trajectory.  One shared theta over
+{smooth, clearance, upright, skeleton}; theta_ik fixed.
 
-  1. IK seeds the endpoints:  q_pick, q_place  from the pick/place targets.
-  2. One trajopt per segment (approach, grasp, transport, place), chained
-     through those endpoints as boundary conditions.
-  3. One trajopt over the ENTIRE concatenated trajectory, warm-started at the
-     stage-2 output.
+Sharing theta is required for differentiability: per-stage weights would be
+dead parameters (the implicit adjoint gives zero sensitivity to x0).
 
-Every earlier iosp experiment inverted stages 1-2 only, against a
-demonstrator that runs all three -- a misspecification present in every iosp
-number recorded before this script.
-
-The tied cost model, and why it is what makes this differentiable
------------------------------------------------------------------
-ONE preference vector theta in the simplex over
-`{smooth, clearance, upright, skeleton}` is shared by all four segments and
-by the refine pass; theta_ik is held FIXED and is not estimated.
-
-That is not only a parsimony choice, it is what makes the composition
-differentiable at all.  With a separate weight block per stage, a segment
-block theta_s reaches the loss only through the warm start x_bar, and the
-implicit adjoint gives x0 exactly zero sensitivity (x0 never appears in the
-stationarity condition grad_x C = 0, so a converged argmin genuinely forgets
-its seed).  d(loss)/d(theta_s) would be 0 EXACTLY -- the segment weights would
-be dead parameters sitting at their seed while the fit reported a number.
-Sharing theta puts it directly in stage 3's own stationarity condition, where
-the adjoint can see it:
-
-    dL/dtheta = (dL/dx*_f) (dx*_f/dtheta),    dx*_f/dtheta = -H^-1 B
-
-exactly, via `ioc.inner`'s implicit adjoint.  Fixing theta_ik additionally
-makes every stage's context constant w.r.t. the fitted parameters, which
-matters because `ioc.inner._bwd` returns a hard-coded ZERO cotangent for
-`ctx` -- a real bug (the IFT gives dx*/dc = -H^-1 grad^2_xc C, which is not
-zero), but one this model no longer depends on.
-
-What stage 2 can and cannot contribute
---------------------------------------
-Read the gradient above literally: stage 2 influences the fit ONLY by choosing
-which basin stage 3 converges in.  If the refine problem is unimodal, x*_f is
-independent of its seed and the segment stage washes out entirely -- in which
-case "inverting spasm" reduces to inverting one global trajopt, and the task
-skeleton survives only through the `skeleton` feature and the clamped
-endpoints.  If it is multimodal, the seed does select the basin, but then
-x*_f(theta) jumps between basins and the IFT precondition fails.  `--ablate-
-stage2` measures which regime this problem is in by refitting with the refine
-pass seeded from a straight line instead of the segments; that is a headline
-result of this script, not a side check.
-
-Success criterion: behavioural
-------------------------------
-Held-out end-effector RMSE against the demonstrator's path.  `param_err` is
-reported but is NOT the criterion: this problem's cost spectrum is
-near-rank-deficient, so a correct fit is expected to drift along null
-directions while reproducing behaviour.
-
-Baselines.  The zero baseline (z=0) is kept for continuity but is WEAK -- it
-sits near the flat-cost corner where the inner solve barely leaves its seed,
-so beating it partly just says "an optimizer ran".  `uniform` (theta = 1/K, a
-real solve from an uninformed prior) is the honest reference, and `oracle`
-(theta*) is the floor.
+`--ablate-stage2` tests whether the segment stage matters by seeding stage 3
+from a straight line instead.  Success criterion: held-out EE RMSE.
 """
 
 import argparse

@@ -39,44 +39,15 @@ def scene_a():
 
 
 def scene_b(scale=1.0):
-    """`generalization_check`'s held-out scene.
-
-    `scale` multiplies all three offsets, so `scale=1.0` is byte-for-byte every
-    recorded result and larger values push the held-out scene further from the
-    fit scene -- a stress test for generalization rather than a near-duplicate.
-    The offsets are displacements from scene A, so scaling them is a pure
-    extrapolation along the same direction: nothing about the task changes, only
-    how far the fitted cost has to carry.  It is NOT unbounded -- past some
-    scale the pick/place targets leave the arm's reachable set and the IK
-    stage's residual stops being a generalization signal at all, so a run at a
-    large scale must be read together with `screen_stationarity`.
-    """
+    """Held-out scene.  `scale` multiplies offsets from scene A (1.0 = default)."""
     return _scene(Q_START + scale * SCENE_B_Q_START_OFFSET,
                   PICK_POS + scale * SCENE_B_PICK_OFFSET,
                   PLACE_POS + scale * SCENE_B_PLACE_OFFSET)
 
 
-# ---------------------------------------------------------------------------
-# multi-scene contexts (fix 2: identifiability needs several environments)
-# ---------------------------------------------------------------------------
-#
-# Cao, Cohen & Szpruch (arXiv:2106.03498) prove the reward in IRL is not
-# identifiable even given perfect knowledge of optimal behaviour, and is
-# recoverable only up to a constant -- and only given demonstrations under
-# sufficiently DIFFERENT ENVIRONMENTS (or distinct discount factors).  Every
-# result in this study so far fit a single scene, so part of the rank
-# deficiency the whole three-stage refit exists to manage is an artifact of
-# that choice rather than a property of the cost.
-#
-# Note this applies to Path A exactly as much as to Path B: A's measured
-# `captured_frac = 0.859` is a ONE-SCENE ceiling.
-#
-# Scene 0 is the canonical `scene_a()` unchanged, so results stay anchored to
-# every earlier run; the rest are jittered around it.  `obs_center` is jittered
-# TOO -- the original A/B pair moved only `q_start`/`pick`/`place` and left the
-# obstacle fixed, which is precisely the direction that makes a clearance cost
-# identifiable.  A demo set that never moves the obstacle cannot distinguish
-# "avoid that obstacle" from "prefer that region of joint space".
+# Multi-scene contexts: identifiability requires demonstrations under
+# sufficiently different environments (Cao, Cohen & Szpruch, arXiv:2106.03498).
+# Scene 0 is scene_a() unchanged; the rest are jittered (including obs_center).
 
 _SCENE_SCALE = dict(q_start=0.15, pick=0.08, place=0.06, obs=0.06)
 

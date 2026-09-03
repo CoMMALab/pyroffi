@@ -1,0 +1,24 @@
+experiment: identifiable_refit
+module: iosp.experiments.e3_identifiable_refit
+description: "E3: fit wide, eigendecompose Gram, refit on identifiable subspace"
+
+defaults:
+  n_iters: 60
+  steps: 40
+  lr: 0.05
+  space: ee
+  scene_b_scale: 1.0
+
+runs:
+  - name: refit_seed0
+    args: {seed: 0}
+  - name: refit_seed1
+    args: {seed: 1}
+  - name: refit_seed2
+    args: {seed: 2}
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

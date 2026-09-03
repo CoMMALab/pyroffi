@@ -1,132 +1,22 @@
-"""Study 1 -- a minimal, identifiability-clean pick-and-place.
+"""E1 — Minimal, identifiability-clean pick-and-place recovery.
 
-Relation to `iosp/THEORY_IDENTIFIABLE_REFIT.md`: that document derives the
-general r < K remedy (fit all K, eigendecompose the cost-gradient/sensitivity
-Gram matrix, re-parametrize onto the r retained eigendirections, refit).  This
-study is the HAND-PICKED special case of it -- the reduction to K=3 is chosen
-a priori from the certificate below rather than selected automatically from
-`U_r`, and the refit is over the 3 named features rather than over eigen-
-coordinates.  The automatic version (stage 4 there) is not implemented yet.
+Question: with few features (K=3) and curated demos designed to excite each
+feature differently, does implicit-adjoint recovery work well?
 
-Motivation
-----------
-`iosp/identifiability_check.py` found the 9-feature composed model has a
-near-exact collinearity (cos=-0.9999) between `transport.smooth` and
-`transport.upright` at a single demo, plus 4 more features with near-zero
-gradient there -- 6 of 9 directions effectively unidentifiable from one demo.
-`iosp/generalization_check.py` showed this produces a real 17x fit-vs-
-held-out RMSE gap.  Rather than keep iterating on the 9-feature setup, this
-script asks a narrower, cleaner question: with FEW features and CURATED
-(not randomly jittered) demos designed to excite each feature differently,
-does the same implicit-adjoint recovery machinery actually work well?
+Reduced parameterization (K=3, transport phase only):
+    transport.clearance, transport.smooth, transport.line_dev
 
-Reduced parameterization (K=3, all in `iosp.model.pickplace`'s existing `transport`
-phase -- the site of the collinearity found above):
+All other parameters (theta_ik and non-transport trajopt weights) are held
+fixed at ground truth.  `transport.line_dev` replaces `transport.upright`,
+which was structurally collinear with `transport.smooth`.
 
-    transport.clearance   (position/clearance term)
-    transport.smooth      (smoothness term)
-    transport.line_dev    (position/shape term -- REPLACES `transport.upright`)
+Curated demo scenes (see `CURATED_SCENES`):
+    "clear"   intrusive obstacle on the pick->place midline
+    "smooth"  obstacle inactive, short transport
+    "shape"   obstacle inactive, wide lateral spread
 
-REVISION 1 (this version): the first attempt used `transport.upright`
-(quaternion x/y tilt) as the orientation term.  Its certificate (see below)
-found `cos(transport.smooth, transport.upright)` stuck at essentially -1
-across THREE geometrically distinct curated demos (-1.0000, -0.9600,
--0.9987) -- i.e. not a curation failure, a structural degeneracy: for fixed
-IK-pinned transport endpoints, a lower-curvature (smoother) joint-space path
-mechanically entails less wrist rotation too, so the two residuals'
-steepest-descent directions are close to anti-parallel almost regardless of
-scene geometry.  Per the coordinator's direction, `transport.upright` is
-REPLACED with `transport.line_dev`: perpendicular distance of the EE path
-from the straight line connecting the transport segment's pinned endpoints
-(`ee_positions(q_pick)` to `ee_positions(q_place)`) -- a position/shape
-residual computed directly in THIS script (`_line_dev_residual_fn` below),
-not added to `iosp.model.pickplace`'s shared `SEGMENT_FEATURES`/`segment_
-residual_fn`, so every other caller of `pickplace.py` (`recovery_bench`,
-`generalization_check`, `identifiability_check`, the viser example) is
-completely unaffected.  The REVISION-1 certificate result is what's recorded
-below; the ATTEMPT-0 (`upright`) numbers are kept in git history, not
-duplicated here.
-
-`theta_ik` (`grasp.standoff`/`place.standoff`) and the other 4 trajopt
-features (`approach.smooth`, `approach.clearance`, `grasp.smooth`,
-`place.smooth`) are FIXED at their Study-0 ground-truth values (`recovery_
-bench.THETA_IK_STAR`/`Z_TRAJOPT_STAR`), not learned -- `iosp/pickplace.py`'s
-machinery is reused completely unchanged (`RobotProblem`/`Scene`/
-`make_inner_solver`/`solve`/`full_ee_path` all as-is); only the OUTER
-parameter is narrowed from 9 free dims to 3, by holding the other 6 logits of
-`theta_trajopt`'s softmax fixed at their true values while only the 3
-`transport.*` logits vary.  `identifiability_check.py`'s own certificate
-found `grasp.standoff` well-identified on its own (top eigenvalue 8.99,
-clean separation) -- the actual identifiability problem was inside
-`transport`'s three residuals, so that is exactly where this study's
-reduction should focus, not a scope cut chosen for convenience.
-
-Curated demos (NOT randomly jittered -- deliberately scene-designed, see
-`CURATED_SCENES` below):
-
-    "clear"  a MUCH more intrusive obstacle than attempt 0 (radius 0.25, not
-             0.08) placed directly on the pick->place midline -- attempt 0's
-             obstacle let the solver detour with room to spare, giving an
-             EXACTLY-zero clearance gradient (confirmed by measurement, not
-             assumed); this one is large enough relative to the pick/place
-             separation (~0.4m) that avoiding it costs more (via the smooth/
-             line_dev weights) than accepting some margin violation, so the
-             clearance hinge should actually bind at the optimum.  Verified
-             below, not assumed.
-    "smooth" obstacle moved far away (inactive), pick/place brought closer
-             together for a short, low-perturbation transport -- meant to
-             load onto `transport.smooth` with the other two near-inactive.
-    "shape"  obstacle inactive, pick/place spread far apart laterally with a
-             different `q_start` posture (forcing a different redundant-arm
-             null-space path through the transport segment) -- meant to
-             excite `transport.line_dev` (a curved EE path driven by the
-             arm's own kinematics, not by an explicit obstacle) somewhat
-             independently of `transport.smooth`.  (Renamed from attempt 0's
-             "orient" now that the feature it targets is line-deviation, not
-             orientation.)
-
-History (brief; earlier attempts, superseded, numbers in git history not
-repeated here): ATTEMPT A used `transport.upright` as the orientation term
-and found near-exact collinearity with `transport.smooth` (cos~-1) that
-survived scene curation -- replaced with `transport.line_dev` (REVISION 1).
-REVISION 1's certificate was NOT fully clean on raw gradients; whitening
-(dividing by `calibrate_segment`'s scales, matching what the outer loop's
-cost actually sees) was a real fix but still left one eigendirection
-near-null.  The recovery test built on REVISION 1 (fixing the null direction
-at the KNOWN ground-truth `theta_star`) was first run in a way that turned
-out vacuous (`theta_star` happened to be ~99.65% aligned with the null
-direction already, so there was nothing to recover), then rerun with a
-deliberately-chosen non-vacuous `theta_star` and found a real, if partial,
-win over a "null-only" baseline -- but that whole construction depended on
-KNOWING `theta_star`'s true null-component, which a real inference procedure
-never has.
-
-CANONICAL METHOD (this version -- cite this, not the attempts above):
-
-1. Certificate: `run_certificate(whiten=True)`, accumulated (averaged Gram)
-   over the 3 `CURATED_SCENES` demos, exactly as before.
-2. Rank selection: `select_rank(eigvals, cumulative_threshold=0.95)` --
-   generic, scale-free, fixed BEFORE looking at any spectrum (see its
-   docstring for why this rule over a fixed epsilon).
-3. Zero-prior subspace fit: `theta_from_alpha_zero_prior` -- unselected
-   (near-null) eigendirections get EXACTLY ZERO weight, not the (in a real
-   setting, unknown) ground truth.  This is the fix that makes the whole
-   procedure usable at real inference time, not just in this synthetic study
-   where `theta_star` happens to be known.
-4. `run_canonical(fit_scene_spec, ...)` runs 1-3, fits `alpha` via the
-   implicit-adjoint outer loop against a demo generated on the fit scene, and
-   reports generalization RMSE on `HELD_OUT_SCENES` (kept OUT of the
-   certificate's own demo set, unlike earlier attempts where the held-out
-   scene doubled as a certificate demo) against the alpha=0 ("no fitting at
-   all", i.e. theta=[0,0,0] on all 3 transport features) baseline.
-
-MEASURED result (canonical, float32, `soft_line_search`+
-`soft_curvature_gate`+`early_stop=False` forward solver, seed 0; see
-`run_canonical()` to reproduce) -- filled in after the recollection run; see
-the report accompanying this revision for the numbers and the honest
-comparison against Attempt B's ground-truth-leakage version (expected to be
-somewhat worse under the honest zero-prior convention -- reported plainly,
-not compared misleadingly against Attempt B as if it were the same test).
+Procedure: certificate -> rank selection -> zero-prior subspace fit ->
+generalization test.
 
 Usage:
     CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_PREALLOCATE=false \\
@@ -250,6 +140,34 @@ def _full_joint_path(prob, xs, phase_scenes, batch_index=0):
         q = problem.unpack(xs[phase][batch_index], sc)
         rows.append(q[1:] if i > 0 else q)
     return jnp.concatenate(rows, axis=0)
+
+
+def _split_trajopt_batched(theta_trajopt):
+    """`_split_trajopt` with a leading candidate axis: (C, 7) -> {phase: (C, n_p)}.
+
+    The split is by fixed feature counts, so it is the same slice applied on the
+    last axis instead of the only one.
+    """
+    out, i = {}, 0
+    for p in pp.PHASES:
+        n = len(pp.SEGMENT_FEATURES[p])
+        out[p] = theta_trajopt[:, i:i + n]
+        i += n
+    return out
+
+
+def _full_joint_paths(prob, xs, phase_scenes):
+    """(C, T, dof) -- `_full_joint_path` for the whole batch, vmapped.
+
+    Same concatenation and same duplicated-boundary drop; row b equals
+    `_full_joint_path(..., batch_index=b)`.  Exists so a flattened multistart
+    can read out every candidate's path without unrolling the concat C times.
+    """
+    rows = []
+    for i, phase in enumerate(pp.PHASES):
+        q = jax.vmap(prob.seg[phase].unpack)(xs[phase], phase_scenes[phase])
+        rows.append(q[:, 1:] if i > 0 else q)
+    return jnp.concatenate(rows, axis=1)
 
 
 def _make_scene(spec):
@@ -590,7 +508,7 @@ def kkt_seed_alpha(prob, forward_solver, fit_scene_spec, theta_trajopt_star, eig
 
 
 def multistart_fit(gf, k, target_theta_mag, n_starts=16, n_steps=40, lr=0.05, seed=0,
-                    extra_starts=()):
+                    extra_starts=(), loss_rows=None, chunk=None):
     """Multistart Adam over the (now only k=2-3 dimensional) alpha subspace --
     the cheap thing to try BEFORE reaching for a derivative-free method: if
     Adam is only getting trapped by ONE bad local plateau/wall structure
@@ -598,7 +516,7 @@ def multistart_fit(gf, k, target_theta_mag, n_starts=16, n_steps=40, lr=0.05, se
     should recover most of what CMA-ES would buy, at a fraction of the cost
     (still gradient-based per start, just not committed to one basin).
 
-    `outer_opt.adam` already returns `best_z` (the lowest-loss iterate seen
+    `ioc.outer.adam` already returns `best_z` (the lowest-loss iterate seen
     during that run, not just the final one -- see its docstring), so each
     start's own within-run wandering (e.g. the transient wall-crossing spike
     seen in the single-KKT-seed trace) is already accounted for; multistart
@@ -607,6 +525,27 @@ def multistart_fit(gf, k, target_theta_mag, n_starts=16, n_steps=40, lr=0.05, se
     `extra_starts` lets the caller fold in already-computed seeds (grid,
     KKT) as some of the candidates, so multistart's own random starts are
     compared against them directly rather than redundantly re-deriving them.
+
+    Two modes:
+
+    * `loss_rows=None` (default): the starts are fitted one at a time, each its
+      own `ioc.outer.adam` call.  Unchanged behaviour, and the only option when
+      the caller cannot supply a per-row forward map.
+    * `loss_rows` given: `loss_rows(A) -> (C,)` scores a whole STACK of alpha
+      candidates, and all starts are fitted as one batched program via
+      `ioc.outer.adam_multi`.  Each start's loss depends only on its own row, so
+      one gradient of the summed loss is exactly every start's own gradient (see
+      `adam_multi`).  This is the flattening `iosp.fit.multistart` uses for its
+      (branch x seed) candidates, applied to the alpha subspace.
+
+    `chunk` splits the candidate axis into groups of that many, evaluated one
+    group at a time via `jax.lax.map` -- sequential on device, so only one
+    group's intermediates are live at a time, but with no host round-trip
+    between groups.  It changes no value (row independence again), and every
+    group has the same shape so it costs one compilation.  Use it when the
+    batched map does not fit: this path solves four trajopt segments per row,
+    and peak memory is linear in the number of rows.  `chunk=None` keeps the
+    whole batch in one call.
     """
     key = jax.random.PRNGKey(seed)
     starts = list(extra_starts)
@@ -618,25 +557,58 @@ def multistart_fit(gf, k, target_theta_mag, n_starts=16, n_steps=40, lr=0.05, se
         v = v / (jnp.linalg.norm(v) + 1e-8)
         mag = jax.random.uniform(kmag, (), minval=target_theta_mag[0], maxval=target_theta_mag[1])
         starts.append(v * mag)
+    starts = [jnp.asarray(s, dtype=jnp.float32) for s in starts]
 
+    if loss_rows is None:
+        results = []
+        for s in starts:
+            a_hat, trace = outer_opt.adam(gf, s, lr=lr, n_steps=n_steps)
+            best_val = min(v for _, v in trace) if trace else float("inf")
+            results.append(dict(alpha0=np.asarray(s), alpha_hat=np.asarray(a_hat),
+                                 best_val=best_val, trace=[float(v) for _, v in trace]))
+            print(f"  [multistart] alpha0={np.asarray(s)}  best_loss={best_val:.5f}  "
+                  f"alpha_hat={np.asarray(a_hat)}")
+        return min(results, key=lambda r: r["best_val"]), results
+
+    A0 = jnp.stack(starts)                                   # (C, k)
+    C = A0.shape[0]
+    rows = loss_rows if chunk is None else _chunked_rows(loss_rows, C, int(chunk))
+    A_hat, traces = outer_opt.adam_multi(
+        outer_opt.summed_grad_fn(rows), A0, lr=lr, n_steps=n_steps)
     results = []
-    for s in starts:
-        s = jnp.asarray(s, dtype=jnp.float32)
-        a_hat, trace = outer_opt.adam(gf, s, lr=lr, n_steps=n_steps)
-        best_val = min(v for _, v in trace) if trace else float("inf")
-        results.append(dict(alpha0=np.asarray(s), alpha_hat=np.asarray(a_hat),
-                             best_val=best_val, trace=[float(v) for _, v in trace]))
-        print(f"  [multistart] alpha0={np.asarray(s)}  best_loss={best_val:.5f}  "
-              f"alpha_hat={np.asarray(a_hat)}")
+    for i in range(C):
+        best_val = min(v for _, v in traces[i]) if traces[i] else float("inf")
+        results.append(dict(alpha0=np.asarray(A0[i]), alpha_hat=np.asarray(A_hat[i]),
+                             best_val=best_val,
+                             trace=[float(v) for _, v in traces[i]]))
+        print(f"  [multistart] alpha0={np.asarray(A0[i])}  best_loss={best_val:.5f}  "
+              f"alpha_hat={np.asarray(A_hat[i])}")
+    return min(results, key=lambda r: r["best_val"]), results
 
-    best = min(results, key=lambda r: r["best_val"])
-    return best, results
+
+def _chunked_rows(loss_rows, n_rows, chunk):
+    """`loss_rows` applied one group of `chunk` rows at a time, via `lax.map`.
+
+    `lax.map` rather than a Python list comprehension: it is sequential on
+    device, so peak memory is one group's worth (which is the point) WITHOUT a
+    host round-trip per group, and it keeps the whole thing inside one traced
+    program so the caller can still differentiate straight through it.
+    """
+    if n_rows % chunk:
+        raise ValueError(f"chunk={chunk} must divide the candidate count {n_rows}")
+
+    def rows(A):
+        out = jax.lax.map(loss_rows, A.reshape(n_rows // chunk, chunk, A.shape[-1]))
+        return out.reshape(n_rows)
+
+    return rows
 
 
 def run_canonical(fit_scene_spec, held_out_specs=None, certificate_scene_specs=None,
                    prob=None, forward_solver=None, seed=0, n_steps=12,
                    cumulative_threshold=0.95, theta_transport_star_override=None,
-                   alpha0_mode="grid", n_starts=16, nonneg_theta=False):
+                   alpha0_mode="grid", n_starts=16, nonneg_theta=False,
+                   multistart_batched=False, multistart_chunk=None):
     """THE canonical Study 1/2 procedure: certificate -> rank selection (95%
     cumulative-trace rule) -> zero-prior subspace fit -> held-out
     generalization vs. the alpha=0 ("no fitting at all") baseline.
@@ -644,6 +616,30 @@ def run_canonical(fit_scene_spec, held_out_specs=None, certificate_scene_specs=N
     Generic over which scenes are used for the certificate, the fit, and
     generalization -- this is what lets Study 2 reuse this exact function
     for every demo regime instead of reimplementing the procedure.
+
+    `multistart_batched` opts the `alpha0_mode="multistart"` path into the
+    flattened forward map (`loss_rows` below), fitting every start as one
+    batched program instead of one at a time.  DEFAULT OFF, and the measurement
+    is why -- 8 starts x 10 steps on a curated scene:
+
+        serial        456s   per-start best = [1.69e-2 4.64e-4 3.06e-2 4.35e0 ...]
+        flattened     334s   per-start best = [4.25e-1 3.80e-4 3.01e-2 7.79e1 ...]
+        flat chunk=2  291s   per-start best = [4.28e-1 1.20e-4 1.46e-2 2.54e0 ...]
+
+    Only 1.4x -- this fit's batch is ONE scene, but each row still runs four
+    trajopt segments, so it is not the idle-GPU regime the trick pays off in
+    (contrast `ioc.bench2d`, where the same change measured 4.0x end to end).
+    And the per-start losses genuinely MOVE: folding candidates into the scene
+    batch changes each row's position in the IK kernel's problem batch, and
+    `pickplace._ik_batch`'s docstring records that a row "can land on a
+    different IK branch depending on how it was batched".  The winning start's
+    loss is comparable either way (1.0e-4 / 9.1e-5 / 4.3e-5), so this is a
+    different-but-valid search, not a worse one -- but it is not the same run,
+    so it must not silently replace results already recorded serially.
+
+    `multistart_chunk` bounds the batched path's memory; note above that
+    chunking was FASTER than the full batch here, consistent with the
+    autotuning pressure `iosp.fit.multistart.run` documents.
     """
     if prob is None:
         prob = pp.PickPlaceProblem.load(str(URDF_PATH), str(SRDF_PATH), str(MESH_DIR))
@@ -680,6 +676,34 @@ def run_canonical(fit_scene_spec, held_out_specs=None, certificate_scene_specs=N
         xs, ps = _solve_all(prob, scenes, inner_by_phase, theta_trajopt, x0_star)
         path = _full_joint_path(prob, xs, ps, batch_index=0)
         return jnp.mean(jnp.sum((path - demo_path) ** 2, axis=-1))
+
+    def loss_rows(A):
+        """`loss`, for a whole STACK of alpha candidates: (C, k) -> (C,).
+
+        The flattening.  This fit has a ONE-scene batch, so the batched program
+        the scalar `loss` builds leaves the device almost entirely idle; folding
+        the candidate axis into that batch fills it.  Each row keeps its own
+        cost via `solve_batched_theta`'s per-row `in_axes`, so row c's loss
+        depends only on `A[c]` -- which is what lets `multistart_fit` take one
+        gradient of the summed loss and get every start's own gradient.
+
+        `scenes` has a leading axis of 1 here, so replicating it to C rows is a
+        `jnp.repeat`; if this fit ever carries several scenes, the rows become
+        (candidate, scene) pairs and the reshape below has to fold both.
+        """
+        C = A.shape[0]
+        tt = jax.vmap(lambda a: theta_from_alpha_zero_prior(
+            a, cert["eigvecs"], selected_idx, nonneg=nonneg_theta))(A)     # (C, 3)
+        theta_traj = jax.vmap(
+            lambda t: theta_trajopt_star.at[_TRANSPORT_IDX].set(t))(tt)    # (C, 7)
+        by_phase = _split_trajopt_batched(theta_traj)
+        rep = lambda a: jnp.repeat(a, C, axis=0)
+        sc_c = jax.tree.map(rep, scenes)
+        x0_c = {p: rep(x0_star[p]) for p in pp.PHASES}
+        _, _, xs, ps = prob.solve_batched_theta(
+            THETA_IK_STAR, by_phase, sc_c, inner_by_phase, x0_c)
+        paths = _full_joint_paths(prob, xs, ps)                            # (C, T, dof)
+        return jnp.mean(jnp.sum((paths - demo_path) ** 2, axis=-1), axis=-1)
 
     # Two SEPARATE things were conflated in the first canonical attempt:
     # (1) the null (unselected) eigendirections are pinned at exactly zero --
@@ -774,7 +798,9 @@ def run_canonical(fit_scene_spec, held_out_specs=None, certificate_scene_specs=N
     if alpha0_mode == "multistart":
         best, ms_results = multistart_fit(
             gf, k, TARGET_THETA_MAG, n_starts=n_starts, n_steps=n_steps, lr=0.05, seed=seed,
-            extra_starts=(grid_alpha0, kkt_alpha0))
+            extra_starts=(grid_alpha0, kkt_alpha0),
+            loss_rows=loss_rows if multistart_batched else None,
+            chunk=multistart_chunk)
         alpha_hat = jnp.asarray(best["alpha_hat"], dtype=jnp.float32)
         adam_trace = [(0, v) for v in best["trace"]]
         # movement must be measured against the start alpha_hat ACTUALLY came

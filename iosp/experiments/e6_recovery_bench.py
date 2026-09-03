@@ -211,15 +211,14 @@ def sweep_demo_count(demo_counts=(1, 2, 4, 8), n_steps=8, seed=0):
 
     _, _, xs_gt, phase_scenes_gt = prob.solve(
         THETA_IK_STAR, _split_trajopt(theta_trajopt_star), scenes, inner_by_phase, x0_star)
-    demo_paths = jnp.stack(
-        [prob.full_ee_path(scenes, xs_gt, phase_scenes_gt, batch_index=i) for i in range(N_MAX)])
+    demo_paths = prob.full_ee_paths(scenes, xs_gt, phase_scenes_gt)
 
     def loss_masked(z, mask):
         theta_ik, z_trajopt = _unpack_z(z)
         theta_trajopt_by_phase = _split_trajopt(jax.nn.softmax(z_trajopt))
         x0, phase_scenes, _, _ = prob.seeds(scenes, theta_ik)
         _, _, xs, phase_scenes2 = prob.solve(theta_ik, theta_trajopt_by_phase, scenes, inner_by_phase, x0)
-        paths = jnp.stack([prob.full_ee_path(scenes, xs, phase_scenes2, batch_index=i) for i in range(N_MAX)])
+        paths = prob.full_ee_paths(scenes, xs, phase_scenes2)
         per_demo_mse = jnp.mean(jnp.sum((paths - demo_paths) ** 2, axis=-1), axis=-1)
         return jnp.sum(per_demo_mse * mask) / jnp.sum(mask)
 

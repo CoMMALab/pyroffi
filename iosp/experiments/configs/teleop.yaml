@@ -1,0 +1,27 @@
+experiment: teleop
+module: iosp.experiments.e10_teleop
+description: "E10: recover cost from human teleop demonstrations (FR3)"
+
+defaults:
+  n_iters: 60
+  steps: 40
+  lr: 0.05
+  space: joint
+  mode: multistart
+  n_branches: 4
+  n_starts: 3
+  chunk: 4
+
+runs:
+  - name: teleop_seed0
+    args: {seed: 0}
+    out: iosp/data/results/teleop/teleop_seed0.json
+  - name: teleop_seed1
+    args: {seed: 1}
+    out: iosp/data/results/teleop/teleop_seed1.json
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

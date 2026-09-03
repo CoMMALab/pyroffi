@@ -7,11 +7,8 @@ refit on the identifiable subspace only.  Path-agnostic implementation of
     stage 3  select_rank                -- 95%-cumulative-trace rule
     stage 4  refit_on_subspace          -- reparametrize onto U_r, refit alpha
 
-None of this is specific to the pick-and-place composition; anything that
-plugs in a `(value, grad) -> loss_and_grad` function and a `path_fn` for the
-Jacobian can use it.  `iosp/study3_identifiable_refit.py` is the pickplace
-caller: it builds `gf`/`jac_fn` from `PickPlaceProblem`, then calls the four
-functions below.
+Path-agnostic: anything that provides a `loss_and_grad` function and a
+`path_fn` for the Jacobian can use it.
 """
 
 import jax
@@ -26,14 +23,8 @@ def wide_fit(loss_and_grad, u0, *, n_steps, lr, **adam_kwargs):
 
 
 def make_jac_fn(path_fn):
-    """Stage 2's Jacobian, JITTED.  `jax.jacrev` vmaps internally over the
-    output cotangents, so jitting turns what would be many sequential eager
-    backward passes into one batched backward.
-
-    Forward mode would be cheaper when K << output dim, but is unavailable
-    whenever `path_fn` runs through `ioc.inner.solve_implicit`'s `custom_vjp`,
-    which has no JVP rule.
-    """
+    """Stage 2's Jacobian, jitted.  Forward mode unavailable because
+    `solve_implicit`'s custom_vjp has no JVP rule."""
     return jax.jit(jax.jacrev(path_fn))
 
 
@@ -60,41 +51,12 @@ def sensitivity_spectrum(jac_fn, u):
 def select_rank(eigvals, frac=0.95, *, rule="gap"):
     """Stage 3: retained indices, discarded indices, and r.
 
-    `rule="gap"` (default) cuts at the LARGEST RATIO between consecutive
-    descending eigenvalues -- the numerical-rank boundary, where the spectrum
-    falls off a cliff rather than merely tapering.
+    `rule="gap"` (default) cuts at the largest ratio between consecutive
+    descending eigenvalues — the numerical-rank boundary.
 
-    `rule="trace"` is the original 95%-cumulative-trace rule, kept so earlier
-    results remain reproducible.  It should not be the default, because trace
-    share answers "how much of the response does this direction carry", which is
-    not the identifiability question.  A direction can be genuinely identifiable
-    and still hold a small share of a trace dominated by one stiff direction.
-    Two measurements:
-
-      single segment, k3, 10 clean scenes, WELL-SPECIFIED basis (theta_star =
-      [0.5, 0.3, 0.2], so all three features genuinely matter):
-          lam = [2.8888, 0.11123, 3.4313e-32]
-          trace rule -> r = 1   (lam[0] alone is 96.29% of the trace, just over
-                                 the 95% line, so `smooth` is discarded)
-          gap rule   -> r = 2   (the 3e31 cliff to the softmax gauge direction)
-      Since the softmax gauge is an exact null direction, r = K-1 = 2 is the
-      correct answer here and the trace rule is off by one on the easiest case
-      the suite has.
-
-      composed pickplace, K=9:
-          trace rule -> r = 2,  cutting THROUGH a degenerate pair (lam[1] ==
-                                lam[2] == 0.24379, ratio 1.0), which keeps one
-                                standoff coordinate and discards its twin
-                                arbitrarily.
-          gap rule   -> r = 6,  at the 1.0e5 cliff between lam[5]=6.41e-05 and
-                                lam[6]=6.26e-10; the degenerate pair is safely
-                                inside the retained set.
-
-    So the trace rule was pinning FOUR identifiable directions at the prior on
-    the composed model, which is enough on its own to explain a refit that
-    cannot express the fit the wide search already found.  (It does NOT explain
-    the wide fit's own reconstruction floor -- that is a separate question, since
-    the wide fit has every coordinate free.)
+    `rule="trace"` is the 95%-cumulative-trace rule, kept for reproducibility of
+    earlier results.  Prefer "gap": trace share can discard genuinely identifiable
+    directions that hold a small share of a trace dominated by one stiff direction.
 
     `frac` is used only by `rule="trace"`.
     """

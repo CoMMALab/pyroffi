@@ -1,66 +1,19 @@
-"""Study 6: the whole bilevel IOC batched -- outer loop, inner solves, and IK
-branches -- with a single selection at the very end.
+"""Batched multistart bilevel IOC: run B*S candidates in parallel, select at the end.
 
-The shape
----------
-Every candidate is (IK branch b, cost seed s).  A candidate is a COMPLETE,
-independent bilevel fit: its branch is fixed for all outer steps, and its cost
-parameters follow their own Adam trajectory.  `jax.vmap` runs all B*S of them
-as one batched program:
-
-    candidate -> [ 40 outer Adam steps
-                     each: 4 chained trajopt solves (implicit adjoint)
-                           + 1 GD refine over the full trajectory
-                           over M scenes ]  -> converged z, loss history
-
-and only after every candidate has converged is there an argmin, over
-TRAINING loss, to pick the winner.
+Every candidate is (IK branch b, cost seed s) — a complete, independent bilevel
+fit with its branch fixed for all outer steps.  `jax.vmap` runs all candidates
+as one batched program; only after convergence does an argmin over TRAINING loss
+pick the winner.
 
 Two-phase forward model
 -----------------------
-The inner loop follows spasm's two-phase structure, with pyroffi's
-dynamics-aware trajopt solver throughout:
-
   1. Per-segment trajopt (approach, grasp, transport, place), chained through
-     IK-seeded endpoints as boundary conditions.  Each segment uses
-     `ioc.inner.solve_implicit` (pyroffi L-BFGS + implicit adjoint).
-  2. Refine trajopt over the ENTIRE concatenated trajectory, seeded from
-     phase 1's output.  Same pyroffi dynamics-aware solver + implicit adjoint,
-     applied to the full N_FULL-waypoint path with its own cost weights
-     (smooth, clearance, upright, skeleton).
+     IK-seeded endpoints.  Each uses `ioc.inner.solve_implicit`.
+  2. Refine trajopt over the full concatenated trajectory.
 
-Phase 2 is what removes the C0 kinks at phase junctions and is where the
-demonstrator's global preferences (smoothness vs. skeleton fidelity) live.
-Without it, every iosp result was inverting a forward model the demonstrator
-never ran.
-
-Why the selection must be at the end, and only there
-----------------------------------------------------
-Three separate hard selections have already been measured to hurt this
-problem, all the same failure:
-
-  1. `sqp_ik_solve_cuda_batch`'s winner argmax at `continuity_weight=0.0`.
-     Measured: q_pick jumping 2.5-4.4 rad between adjacent outer steps against
-     an off-spike median of 0.007 -- up to 712x -- while the achieved EE pose
-     moved 0.0002-0.002 m, i.e. a pure self-motion branch flip.  Held-out EE
-     RMSE spiked 20-40x for one step, at 4 of 6 spikes in the path-A fit.
-  2. `ioc.inner.solve`'s `xs[jnp.argmin(costs)]` over `n_restarts`.  Measured:
-     n_restarts=3 left those spikes bit-identical (the discontinuity was
-     upstream) AND delayed convergence by ~15 outer steps, plausibly because
-     the argmin itself flips between near-equal restarts.
-  3. Any per-step "pick the best branch", which would reintroduce (1) exactly.
-
-A hard selection ANYWHERE inside the differentiated forward map makes
-x*(theta) discontinuous and breaks the implicit adjoint's precondition.  Fixing
-the branch per candidate removes all of them: within a candidate nothing is
-selected, so the map is smooth in theta; across candidates the basins are
-covered by construction.
-
-Selection is on TRAINING loss -- never held-out
------------------------------------------------
-Picking the candidate with the best held-out RMSE would be test-set leakage,
-and held-out RMSE is the paper's criterion.  `select_winner` asserts on this
-rather than trusting a comment.
+Hard selection INSIDE the differentiated map makes x*(theta) discontinuous and
+breaks the implicit adjoint.  Fixing the branch per candidate keeps the map
+smooth; selection on training loss (never held-out) avoids test-set leakage.
 """
 
 import argparse
@@ -143,13 +96,21 @@ def build(seed=0, n_iters=60, n_branches=4, scene_b_scale=1.0, z_prior=None):
 
         rep = lambda a: jnp.repeat(a, M, axis=0)              # candidate -> C*M
         sc = jax.tree.map(lambda a: jnp.tile(a, (C,) + (1,) * (a.ndim - 1)), scenes)
-        tik = rep(theta_ik)                                   # (C*M, 2)
+        tik = rep(theta_ik)                                   # (C*M, K_IK)
         refs_n = rep(refs_c)                                  # (C*M, dof)
 
+        # The in-plane release offsets are applied here too, even though every
+        # synthetic scene sets them to zero in `THETA_IK_STAR`: leaving them out
+        # would make `place.radial`/`place.tangential` DEAD parameters on this
+        # path -- exactly zero gradient, two spurious null directions in a
+        # spectrum this study reads rank off.  At the synthetic ground truth the
+        # added term is identically zero, so recorded results are unchanged.
+        radial, tangential = pp._place_frame(sc.place_pos)
         tgt_pick = sc.pick_pos + tik[:, 0:1] * pp.UP_AXIS
-        q_pick = pp._ik_batch(prob, tgt_pick, refs_n)
-        tgt_place = sc.place_pos + tik[:, 1:2] * pp.UP_AXIS
-        q_place = pp._ik_batch(prob, tgt_place, q_pick)
+        q_pick = pp._ik_batch(prob, tgt_pick, refs_n, prob._grasp_wxyz(sc))
+        tgt_place = (sc.place_pos + tik[:, 1:2] * pp.UP_AXIS
+                     + tik[:, 2:3] * radial + tik[:, 3:4] * tangential)
+        q_place = pp._ik_batch(prob, tgt_place, q_pick, prob._place_wxyz(sc))
 
         ps = {
             "approach": pp.Scene(sc.q_start, q_pick, sc.obs_center, sc.obs_radius),
@@ -201,7 +162,8 @@ def build(seed=0, n_iters=60, n_branches=4, scene_b_scale=1.0, z_prior=None):
 
 
 def build_from_demos(demo_dir=None, teleop_root=None, n_fit=None, seed=0,
-                     n_iters=60, n_branches=4, anchor_grasp=False):
+                     n_iters=60, n_branches=4, anchor_grasp=False,
+                     max_episodes=None):
     """`build`, but the demonstration is RECORDED HUMAN TELEOP, not a rollout.
 
     Same three-stage forward model, same fixed-branch candidate structure, same
@@ -238,11 +200,15 @@ def build_from_demos(demo_dir=None, teleop_root=None, n_fit=None, seed=0,
         kw["teleop_root"] = teleop_root
     urdf, srdf, mesh_dir, ee_link = fr3.paths()
     prob = pp.PickPlaceProblem.load(urdf, srdf, mesh_dir, ee_link=ee_link)
-    names, demo_q, scenes = tl.load_demos(prob=prob, anchor_grasp=anchor_grasp, **kw)
+    names, demo_q, scenes = tl.load_demos(prob=prob, anchor_grasp=anchor_grasp,
+                                          max_episodes=max_episodes, **kw)
     M = len(names)
     n_fit = M - max(1, M // 4) if n_fit is None else int(n_fit)
-    if not 0 < n_fit < M:
-        raise ValueError(f"n_fit must be in (0, {M}); got {n_fit}")
+    # `n_fit == M` is allowed: a single-problem reconstruction check has no
+    # held-out set, and reporting a held-out RMSE over zero episodes would be a
+    # number with no content rather than an error.
+    if not 0 < n_fit <= M:
+        raise ValueError(f"n_fit must be in (0, {M}]; got {n_fit}")
     fit_idx, gen_idx = np.arange(n_fit), np.arange(n_fit, M)
     fit_scenes = jax.tree.map(lambda a: a[fit_idx], scenes)
 
@@ -298,8 +264,23 @@ def build_from_demos(demo_dir=None, teleop_root=None, n_fit=None, seed=0,
         tik = rep(theta_ik)
         refs_n = rep(refs_c)
 
-        q_pick = pp._ik_batch(prob, sc.pick_pos + tik[:, 0:1] * pp.UP_AXIS, refs_n)
-        q_place = pp._ik_batch(prob, sc.place_pos + tik[:, 1:2] * pp.UP_AXIS, q_pick)
+        # Targets and orientations exactly as `grasp_ik`/`place_ik` build them
+        # -- this map does NOT call them (it needs the candidate axis folded
+        # into the kernel's problem batch), so anything added there has to be
+        # mirrored here or it is silently inert inside the fit.
+        #
+        # SEEDS stay `refs_n` / `q_pick`, deliberately, even when the scene
+        # carries `grasp_ref`/`place_ref`: covering several IK branches is what
+        # this entry point exists for, and seeding every candidate from the one
+        # demonstrated configuration would collapse the branch axis that
+        # produced the 4.3x held-out spread.  Anchoring the ORIENTATION is where
+        # the gain is anyway (0.530 -> 0.146 rad; the seed adds 0.146 -> 0.084).
+        radial, tangential = pp._place_frame(sc.place_pos)
+        place_target = (sc.place_pos + tik[:, 1:2] * pp.UP_AXIS
+                        + tik[:, 2:3] * radial + tik[:, 3:4] * tangential)
+        q_pick = pp._ik_batch(prob, sc.pick_pos + tik[:, 0:1] * pp.UP_AXIS,
+                              refs_n, prob._grasp_wxyz(sc))
+        q_place = pp._ik_batch(prob, place_target, q_pick, prob._place_wxyz(sc))
 
         ps = {
             "approach": pp.Scene(sc.q_start, q_pick, sc.obs_center, sc.obs_radius),
@@ -392,6 +373,11 @@ def run(seed=0, n_iters=60, n_branches=4, n_starts=3, n_steps=40, lr=config.LR,
           + (f", in chunks of {chunk}" if chunk else ""), flush=True)
 
     def _per_cand(U, R, idx):
+        # An empty scene set (n_fit == M, no held-out) scores as NaN rather than
+        # a mean over nothing, which numpy would return as NaN with a warning
+        # and which reads as 0.0 after the sqrt in `report`.
+        if len(idx) == 0:
+            return jnp.full((U.shape[0],), jnp.nan)
         """(C,) mean squared displacement over the scenes in `idx`.
 
         Mean over scenes as well as waypoints, so an 8-episode fit set and a

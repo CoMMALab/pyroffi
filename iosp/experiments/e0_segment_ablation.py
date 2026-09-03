@@ -1,41 +1,11 @@
-"""Segment-freeze ablation for the composed pick-and-place chain.
+"""E0 — Segment-freeze ablation for the composed pick-and-place chain.
 
-Motivation: `recovery_bench.run()` fits ALL of `(theta_ik, theta_trajopt)`
-jointly and recovers it poorly enough that both `implicit` and `cmaes` --
-two methods with nothing in common except the forward solver -- land on the
-same bad reconstruction (see conversation this script was born from). Two
-methods that don't share a gradient path agreeing on a bad answer is strong
-evidence the LANDSCAPE (the forward composition), not either optimizer, is
-the problem. This script isolates where in the 4-segment chain
-(approach -> grasp -> transport -> place) that landscape breaks down, by
-freezing everything except a small, growing subset of segments at their
-TRUE ground-truth weights and re-running the exact same composed forward
-pass (`PickPlaceProblem.solve`, `ioc.inner.make_inner_solver`, unmodified)
-with only the free segments' weights actually optimized.
+Freezes all but a growing subset of segments at ground-truth weights, isolating
+where in the 4-segment chain recovery degrades.  A sudden cliff when a specific
+segment joins the free set points at that segment's boundary-condition wiring.
 
-If a single free segment recovers well (it should -- this reduces to
-something close to `ioc.robot.e1_identifiability`'s already-verified
-point-to-point case, just routed through the composed IK-seeded machinery),
-and recovery degrades as more segments are unfrozen, that pins the failure
-on composition/identifiability, not on the per-segment adjoint. A sudden
-cliff (rather than gradual degradation) when a SPECIFIC segment joins the
-free set points at that segment's boundary-condition wiring specifically.
-
-Stock components only: reuses `iosp.model.pickplace.PickPlaceProblem`,
-`ioc.inner.make_inner_solver`, `ioc.outer.adam` -- no new solver code.
-
-Compile-count discipline (load-bearing for tractability -- see conversation):
-the free/frozen split is a MASK over a FIXED-SHAPE 9-dim `z` (2 theta_ik +
-7 z_trajopt logits), not a variable-length vector whose size changes per
-schedule rung. `unpack`/`loss` are jitted ONCE, taking `(z, mask)` with
-`mask` a traced runtime value (not a shape), so every rung after the first
-in `SCHEDULE` reuses the SAME compiled executable -- only `mask`'s VALUES
-differ. Frozen entries are pinned by `jnp.where(mask, z, stop_gradient(
-FULL_STAR))` inside the loss: their gradient is exactly zero (blocked by
-`stop_gradient`), so Adam's own zero-momentum/zero-variance update leaves
-them at their star-initialized value across all `n_steps`, without a second
-compile. This mirrors `recovery_bench.sweep_demo_count`'s same trick
-(runtime mask over a fixed `N_MAX` batch instead of one compile per N).
+The free/frozen split uses a runtime mask over a fixed-shape 9-dim z, so every
+rung reuses a single compiled executable.
 
 Usage:
     CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_PREALLOCATE=false \\
@@ -343,8 +313,7 @@ def build_common_multidemo(n_max=5, seed=0):
 
     _, _, xs_gt, phase_scenes_gt = prob.solve(
         THETA_IK_STAR, _split_trajopt(theta_trajopt_star), scenes, inner_by_phase, x0_star)
-    demo_paths = jnp.stack(
-        [prob.full_ee_path(scenes, xs_gt, phase_scenes_gt, batch_index=i) for i in range(n_max)])
+    demo_paths = prob.full_ee_paths(scenes, xs_gt, phase_scenes_gt)
 
     def unpack(z, z_mask):
         z_eff = jnp.where(z_mask, z, jax.lax.stop_gradient(FULL_STAR))
@@ -356,7 +325,7 @@ def build_common_multidemo(n_max=5, seed=0):
         x0, phase_scenes, _, _ = prob.seeds(scenes, theta_ik)
         _, _, xs, phase_scenes2 = prob.solve(
             theta_ik, _split_trajopt(theta_trajopt), scenes, inner_by_phase, x0)
-        paths = jnp.stack([prob.full_ee_path(scenes, xs, phase_scenes2, batch_index=i) for i in range(n_max)])
+        paths = prob.full_ee_paths(scenes, xs, phase_scenes2)
         per_demo_mse = jnp.mean(jnp.sum((paths - demo_paths) ** 2, axis=-1), axis=-1)  # (n_max,)
         return jnp.sum(per_demo_mse * demo_mask) / jnp.sum(demo_mask)
 

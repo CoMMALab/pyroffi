@@ -1,20 +1,24 @@
 """Baselines that never solve the forward problem.
 
-Both methods here fit theta using only quantities evaluated *at the
-demonstration*.  They cost zero forward trajectory-optimization solves, which
-makes them unbeatable on price -- and both buy that price with the same
-assumption, that the demonstration is (near) optimal.  The experiments in this
-package are largely about where that assumption breaks: Inverse KKT is exact and
-free at sigma = 0, and falls below random weights by sigma = 0.05.
+All three methods here fit theta using only quantities evaluated *at the
+demonstration* (or at a denoised version of it).  They cost zero forward
+trajectory-optimization solves, which makes them unbeatable on price -- and they
+buy that price with the assumption that the demonstration is (near) optimal.
+The experiments in this package are largely about where that assumption breaks:
+Inverse KKT is exact and free at sigma = 0, and falls below random weights by
+sigma = 0.05.  The EIV-TLS method (Rickenbach, Scampicchio & Zeilinger 2024)
+addresses this by treating the noisy demonstrations as an errors-in-variables
+problem and jointly fitting the denoised trajectory and the cost weights.
 """
 
 import jax
 import jax.numpy as jnp
 
-from ioc.outer import adam
+from ioc.outer import adam_scan
 
 
-def kkt_fit(grad_x, ctxs, demos, K, *, n_steps=400, lr=0.05, return_gram=False):
+def kkt_fit(grad_x, ctxs, demos, K, *, n_steps=400, lr=0.05, return_gram=False,
+            basis=None):
     """Inverse KKT / feature matching (Keshavarz et al. 2011; Englert et al. 2017).
 
     If the demonstration x~ is optimal under theta, it is a stationary point of
@@ -35,26 +39,25 @@ def kkt_fit(grad_x, ctxs, demos, K, *, n_steps=400, lr=0.05, return_gram=False):
     mechanism (unlike a rollout-based loss) that lets the fit trade a small
     stationarity violation for behaviour that matches.
 
-    G doubles as the study's **identifiability certificate**.  Its smallest
-    eigenvalue, normalized by its trace, measures how strongly the demonstration
-    set excites the weakest direction of the feature basis: lambda_min ~ 0 means
-    some combination of features leaves the demonstrations unchanged, so *no*
-    method can recover theta along it and a large L1 error there is a property of
-    the data, not of the optimizer.  Set `return_gram` to get it.
-
-    When rank(G) = r < K, G is not just a warning -- it is the object the fit
-    should be *restricted to*: eigendecompose G = U Lambda U^T, keep the r
-    directions above threshold, and refit in the U_r coordinates instead of
-    over all K weights.  See `iosp/THEORY_IDENTIFIABLE_REFIT.md` §1-2 (the
-    feature-gradient construction here is the `g_ik = grad_x phi_k` Gram of
-    that document's §1; the bilevel refit wants the *sensitivity* Gram
-    `S_i = dx_i*/dtheta` instead, since that is what the outer loss can see).
+    G doubles as the **identifiability certificate**: lambda_min ~ 0 means some
+    feature combination is unexcited by the demos.  Set `return_gram` to get it.
+    When rank(G) < K, refit on the identifiable subspace (see
+    `ioc.identifiability`).
     """
-    e = jnp.eye(K)
+    # `basis` rows are the per-feature weight vectors `grad_x` is probed with.
+    # The identity is the whitened solver's own basis; a caller that shares ONE
+    # unit-scale solver across several fits passes `diag(1/scales)` instead, so
+    # the whitening rides in the probe rather than in the solver -- which is
+    # what lets those fits be `vmap`ped as one batched program (see
+    # `ioc.bench2d.run`).  Both give identical columns.
+    e = jnp.eye(K) if basis is None else basis
 
     def stacked_B(ctx, demo):
+        # grad_x is probed once per basis weight; vmapping that axis keeps the
+        # graph one call wide instead of K unrolled copies, so compile time
+        # stops growing linearly in the number of features.
         x_demo = demo[1:-1].reshape(-1)
-        return jnp.stack([grad_x(x_demo, e[k], ctx) for k in range(K)], axis=-1)
+        return jax.vmap(grad_x, in_axes=(None, 0, None))(x_demo, e, ctx).T
 
     Bs = jax.vmap(stacked_B)(ctxs, demos)
     G = jnp.einsum("bik,bil->kl", Bs, Bs) / Bs.shape[0]
@@ -63,12 +66,19 @@ def kkt_fit(grad_x, ctxs, demos, K, *, n_steps=400, lr=0.05, return_gram=False):
         theta = jax.nn.softmax(z)
         return theta @ G @ theta
 
-    obj = jax.jit(jax.value_and_grad(resid))
-    z, _ = adam(obj, jnp.zeros(K), lr=lr, n_steps=n_steps)
+    # The whole fit -- every Adam step -- is one jitted `lax.scan`, so the
+    # zero-solve baselines cost one dispatch instead of `n_steps` of them.
+    @jax.jit
+    def fit(z0):
+        return adam_scan(jax.value_and_grad(resid), z0, lr=lr, n_steps=n_steps,
+                         return_best=True)[0]
+
+    z = fit(jnp.zeros(K))
     return (z, G) if return_gram else z
 
 
-def cioc_fit(grad_x, gn_system, ctxs, demos, K, *, n_steps=400, lr=0.05, ridge=1e-8):
+def cioc_fit(grad_x, gn_system, ctxs, demos, K, *, n_steps=400, lr=0.05,
+             ridge=1e-8, basis=None):
     """Continuous IOC via the Laplace approximation (Levine & Koltun 2012).
 
     Under a Boltzmann model p(x) proportional to exp(-J_theta(x)) the partition
@@ -92,12 +102,14 @@ def cioc_fit(grad_x, gn_system, ctxs, demos, K, *, n_steps=400, lr=0.05, ridge=1
     Uses the Gauss-Newton Hessian, which is PSD by construction so log det is
     well defined.
     """
-    e = jnp.eye(K)
+    e = jnp.eye(K) if basis is None else basis  # see `kkt_fit` on `basis`
 
     def per_ctx(ctx, demo):
+        # As in `kkt_fit`: the K basis probes are a vmapped axis, not an
+        # unrolled Python loop.
         x_demo = demo[1:-1].reshape(-1)
-        gs = jnp.stack([grad_x(x_demo, e[k], ctx) for k in range(K)], axis=-1)
-        Hs = jnp.stack([gn_system(x_demo, e[k], ctx)[1] for k in range(K)], axis=0)
+        gs = jax.vmap(grad_x, in_axes=(None, 0, None))(x_demo, e, ctx).T
+        Hs = jax.vmap(lambda ek: gn_system(x_demo, ek, ctx)[1])(e)
         return gs, Hs  # (n_x, K), (K, n_x, n_x)
 
     gs, Hs = jax.vmap(per_ctx)(ctxs, demos)
@@ -121,6 +133,85 @@ def cioc_fit(grad_x, gn_system, ctxs, demos, K, *, n_steps=400, lr=0.05, ridge=1
 
         return jnp.mean(jax.vmap(one)(gs, Hs))
 
-    f = jax.jit(jax.value_and_grad(obj))
-    params, _ = adam(f, jnp.zeros(K + 1), lr=lr, n_steps=n_steps)
+    @jax.jit
+    def fit(p0):
+        return adam_scan(jax.value_and_grad(obj), p0, lr=lr, n_steps=n_steps,
+                         return_best=True)[0]
+
+    params = fit(jnp.zeros(K + 1))
     return params[:-1]
+
+
+def eiv_fit(grad_x, ctxs, demos, K, *, n_outer=5, n_inner=400, lr=0.05,
+            mu=10.0, basis=None):
+    """EIV-TLS: IOC as an errors-in-variables problem (Rickenbach et al. 2024).
+
+    Standard Inverse KKT evaluates the stationarity condition B(x~)θ = 0 at the
+    noisy demonstration x~.  When x~ = x* + noise, the noise enters the
+    regressors B, making the ordinary least-squares estimate biased and
+    inconsistent.  The total-least-squares (TLS) fix jointly estimates a
+    denoised trajectory U and the cost weights θ:
+
+        min_{U, z}  (1/M) Σ_i ||U_i - x~_i||² / σ²  +  μ · (1/M) Σ_i ||B(U_i) softmax(z)||²
+
+    with the noise covariance σ² re-estimated from the residuals each outer
+    iteration (the paper's alternating scheme, Approach 2, Sec. 3.3).
+
+    The penalty μ enforces the KKT stationarity constraint at the *denoised*
+    point rather than the noisy demo.  This is the key difference from KKT: the
+    fit can move U away from the demo to land on a point that actually satisfies
+    stationarity, trading demo fidelity against optimality -- exactly what noise
+    demands and what pure KKT cannot do.
+
+    Like KKT and CIOC this is a zero-solve baseline: no forward trajectory
+    optimization is needed; the inner problem is replaced by its first-order
+    necessary condition.
+
+    The trajectory U is parameterized as a per-context offset δ from the demo's
+    interior waypoints, so U_i = x~_i + δ_i.  Only the interior waypoints are
+    free (endpoints are boundary conditions, not decision variables).
+    """
+    e = jnp.eye(K) if basis is None else basis
+
+    M = demos.shape[0]
+    # Interior waypoints flattened, same convention as kkt_fit / cioc_fit.
+    x_demos = demos[:, 1:-1].reshape(M, -1)  # (M, n_x)
+    n_x = x_demos.shape[1]
+
+    def stacked_B(x_flat, ctx):
+        return jax.vmap(grad_x, in_axes=(None, 0, None))(x_flat, e, ctx).T
+
+    def objective(params, sigma_sq):
+        z = params[:K]
+        delta = params[K:].reshape(M, n_x)
+        U = x_demos + delta
+        theta = jax.nn.softmax(z)
+
+        demo_cost = jnp.mean(jnp.sum(delta ** 2, axis=-1)) / (sigma_sq + 1e-30)
+
+        def kkt_residual(u, ctx):
+            B = stacked_B(u, ctx)
+            return jnp.sum((B @ theta) ** 2)
+
+        kkt_cost = jnp.mean(jax.vmap(kkt_residual)(U, ctxs))
+        return demo_cost + mu * kkt_cost
+
+    @jax.jit
+    def fit_one(params0, sigma_sq):
+        return adam_scan(
+            jax.value_and_grad(lambda p: objective(p, sigma_sq)),
+            params0, lr=lr, n_steps=n_inner, return_best=True,
+        )[0]
+
+    # Initialize: zero offset, KKT-seeded z.
+    z_init = kkt_fit(grad_x, ctxs, demos, K, n_steps=200, lr=lr, basis=basis)
+    params = jnp.concatenate([z_init, jnp.zeros(M * n_x)])
+    sigma_sq = jnp.array(1.0)
+
+    for _ in range(n_outer):
+        params = fit_one(params, sigma_sq)
+        delta = params[K:].reshape(M, n_x)
+        sigma_sq = jnp.mean(jnp.sum(delta ** 2, axis=-1)) / n_x
+        sigma_sq = jnp.maximum(sigma_sq, 1e-12)
+
+    return params[:K]

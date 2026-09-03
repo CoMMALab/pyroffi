@@ -24,7 +24,7 @@ Modules
 `outer`     optimizers over z that only need L and dL/dz (Adam, finite
             differences, CMA-ES)
 `analytic`  baselines that never solve the inner problem at all (Inverse KKT,
-            CIOC)
+            CIOC, EIV-TLS)
 `metrics`   scoring of a recovered theta against ground truth
 `robot`     7-DoF Panda experiments (E1 identifiability, E2 cost dimension,
             E3 dynamics)
@@ -35,16 +35,18 @@ Modules
 `collect.py` reproduces `data/`, `plots.py` renders `figures/`; see README.md.
 """
 
-from ioc.analytic import cioc_fit, kkt_fit
+from ioc.analytic import cioc_fit, eiv_fit, kkt_fit
 from ioc.inner import InnerSolver, make_inner_solver
 from ioc.metrics import cosine, simplex_metrics
-from ioc.outer import adam, cma_es, fd_grad_fn
+from ioc.outer import adam, adam_scan, cma_es, fd_grad_fn
 
 __all__ = [
     "InnerSolver",
     "adam",
+    "adam_scan",
     "cioc_fit",
     "cma_es",
+    "eiv_fit",
     "cosine",
     "fd_grad_fn",
     "kkt_fit",

@@ -1,129 +1,47 @@
 """Composed pick-and-place planner: differentiable IK chained into differentiable
 trajopt, approach -> grasp -> transport -> place.
 
-Why this is a genuine composition and not "one trajopt problem with named cost
-terms"
-----------------------------------------------------------------------------
-The first version of this module (see git history) put the whole task in ONE
-flat decision vector and used phase boundaries purely as index slices into one
-`residual_fn` -- which a single hand-authored trajopt cost (e.g. cuRobo, given
-the same named terms) could reproduce exactly.  That is not a claim worth
-making: composing named residuals into one cost function is what any
-weighted-trajopt system already does.
-
-The thing a monolithic trajopt system CANNOT do is what this version does:
-`grasp_ik`/`place_ik` are a genuinely separate differentiable module (SQP IK,
-`sqp_ik_solve_cuda_batch`) whose *output* -- not a residual against it, the
-literal returned array -- is the boundary condition of the `approach`/
-`transport` trajopt segments.  Each segment is its own `ioc.inner.
-make_inner_solver` instance with its own `solve_implicit` custom_vjp.  Because
-`q_pick`/`q_place` flow into the next segment's `Scene.q_start`/`q_goal`
-undetached (no `stop_gradient` at the interface), JAX's ordinary reverse mode
-composes the IK stage's custom_jvp with each segment's implicit-adjoint
-custom_vjp automatically: d(loss)/d(theta_ik) is the product of the trajopt
-adjoint's sensitivity to its boundary condition and the IK stage's sensitivity
-to theta_ik.  A single-cost trajopt formulation has no "theta_ik" at all --
-there is no analogue of "which of several redundant-IK solutions the
-downstream segment starts from" in a system that never solves an IK subproblem
-as a distinct step.  Section 2 of this module's test harness verifies this
-chain is real (not just constructed) by finite-differencing d(loss)/d(theta_ik)
-through the full IK->trajopt composition.
+Architecture
+------------
+Each IK stage (`grasp_ik`/`place_ik`) is a genuinely separate differentiable
+module (`sqp_ik_solve_cuda_batch`) whose output is the boundary condition of
+the downstream trajopt segments.  Each segment has its own `solve_implicit`
+custom_vjp.  Because `q_pick`/`q_place` flow into the next segment undetached
+(no `stop_gradient`), JAX reverse mode composes the IK custom_jvp with each
+segment's implicit-adjoint custom_vjp automatically.
 
 Correctness precondition: canonical IK
 ---------------------------------------
-The Panda is 7-DOF against a 6-DOF pose task, so `sqp_ik_solve_cuda_batch`'s
-IK subproblem is redundant.  pyroffi's *default* implicit-diff rule for IK is
-measured WRONG on redundant arms (assumes minimum-norm self-motion via a
-pinv, but the solver's actual self-motion is arbitrary; ~80% gradient error
-vs FD, confirmed to be a null-space artifact, not solution-ambiguity noise).
-The fix is the canonical reformulation (`q* = argmin ||q-q_ref||^2 s.t.
-r(q,t)=0`, exact KKT sensitivity), which the batched entry point applies
-automatically via `cfg_ref=previous_cfgs` -- gated by a module-level flag
-`_implicit_diff.CANONICAL_BY_DEFAULT` that is read at CALL time (not import
-time), so setting it here after import is sufficient and doesn't require the
-`PYROFFI_CANONICAL_IK` env var to be exported before `pyroffi` is first
-imported.  Benchmarked cost on this kernel: ~1.29x at batch=1, ~1.34x at
-batch=8 -- cheap enough to force on unconditionally for every IK call in this
-module, rather than making it a per-call opt-in.
+The Panda is 7-DOF against a 6-DOF pose task, so the IK subproblem is
+redundant.  pyroffi's default implicit-diff rule assumes minimum-norm
+self-motion (pinv), which is wrong on redundant arms.  The canonical
+reformulation (`q* = argmin ||q-q_ref||^2 s.t. r(q,t)=0`) gives exact KKT
+sensitivity and is forced on for every IK call via
+`_implicit_diff.CANONICAL_BY_DEFAULT`.
 
-theta_ik parameterization -- and a real limitation of the IK API found while
-building this
---------------------------------------------------------------------------
-The brief's suggested knobs (`pos_weight`/`ori_weight` balance, or which
-`cfg_ref` `canonical_ik` walks toward) turned out NOT to be differentiable
-inputs of this API as implemented: `differentiable_ik_solution_batch` attaches
-an implicit-diff rule ONLY to `target_poses` (see its docstring: "Gradients
-flow back to these"); `cfg_ref` is explicitly `jax.lax.stop_gradient`-ed
-before being handed to `canonical_ik`, and `pos_weight`/`ori_weight` are
-config baked into the CUDA kernel launch, not JAX values participating in the
-custom_jvp at all.  Wiring `theta_ik` through either would have produced a
-`theta_ik` that gets a zero (or, worse, a JAX-tracer-shaped but wrong) gradient
-silently -- exactly the kind of "looks connected, isn't" bug this whole
-exercise exists to catch.  So `theta_ik` here is instead a standoff offset
-along a fixed approach axis, applied to the pose actually passed as
-`target_poses`:
+theta_ik parameterization
+-------------------------
+`theta_ik` is a standoff offset along a fixed approach axis:
 
     target_pos = scene.pick_pos (or place_pos) + theta_ik_k * UP_AXIS
 
-This is genuinely meaningful (how far above the object the gripper should
-approach from -- a real pregrasp/preplace standoff) and it is a real,
-differentiable input of the wrapped solve.
+This is the only differentiable IK input available -- `cfg_ref` and
+`pos_weight`/`ori_weight` are stop-gradiented or baked into the kernel.
+`theta_ik` is NOT softmaxed: it is a signed geometric offset, not a cost
+weight.  The full outer parameter is `(theta_ik, z_trajopt)`, optimized
+jointly; only `z_trajopt` is softmaxed.
 
-MEASURED, and NOT papered over: the IK stage alone (`grasp_ik` in isolation,
-holding the trajopt stage out of the loop) is smooth and its implicit
-gradient is FD-verifiable -- `|q_pick(theta+eps)-q_pick(theta)| / eps` is
-stable to 4 significant figures (~3.84-3.87) across eps in [1e-4, 1e-2] before
-float32 noise takes over below that.  The FULL composed chain (IK -> trajopt)
-is NOT FD-verifiable with the current trajopt forward solver
-(`pyroffi.optimization_engines.dynamics_trajopt`, early-stopping L-BFGS):
-`d(reconstruction_loss)/d(theta_ik)` estimated by forward differences roughly
-DOUBLES every time eps is halved across 6 octaves (eps in [5e-4, 5e-2]) --
-never converging to a stable value, cos(implicit, FD) ~ -0.71.  Ruled out by
-direct test, in order: (1) NOT the multi-seed argmax in `sqp_ik_solve_cuda_
-batch` -- confirmed above, IK alone is smooth; (2) NOT trajopt basin-jumping
-in the usual `ioc.inner` sense -- `n_restarts=3` on every segment changes the
-FD numbers by <1%; (3) NOT warm-start path-dependence -- holding the L-BFGS
-x0 FIXED (only letting the boundary condition itself vary with theta_ik)
-reproduces the identical blow-up.  What's left, by elimination: the
-early-stopping trajopt solver's OWN convergence criterion (a `grad_tol`-gated
-halt) responds discontinuously to a smoothly-varying boundary condition --
-the iteration at which it decides "converged" can flip as the boundary shifts
-by an infinitesimal amount, producing a different final iterate near a flat
-region of the cost.  This makes the composed adjoint UNVALIDATED against FD,
-not wrong -- the adjoint differentiates the returned iterate as an exact
-stationary point (per `ioc.inner`'s own precondition), which is well-defined
-and smooth in theta_ik regardless of the solver's stopping-time
-discontinuity, but there is currently no FD ground truth to compare it to at
-usable step sizes.  Validating the composed adjoint properly needs a
-fixed-iteration (no early stopping) trajopt forward solver for this check
-specifically; out of scope for this pass, flagged here rather than fixed.  `theta_ik` is NOT passed through the shared softmax: it is a
-signed geometric offset, not a relative cost weight, and forcing it onto the
-simplex with the trajopt weights would be a category error.  So the full
-outer parameter is `(theta_ik, z_trajopt)`, optimized jointly; only
-`z_trajopt` is softmaxed into `theta_trajopt`.
+Note: the composed chain (IK -> trajopt) is not FD-verifiable at usable step
+sizes due to the early-stopping solver's stopping-time discontinuity.  The
+adjoint is valid at converged stationary points per `ioc.inner`'s precondition.
 
-theta_trajopt (K=7, unchanged in spirit from the old K=9 but two features
-dropped): `approach.smooth, approach.clearance, grasp.smooth,
-transport.smooth, transport.clearance, transport.upright, place.smooth`.  The
-old `*.align` features are GONE on purpose: in the old design they existed to
-softly pull a free trajectory endpoint toward the pick/place pose; here that
-endpoint is `q_pick`/`q_place` itself, hard-clamped as the segment boundary
-(exactly reached by construction, delegated entirely to the IK stage), so an
-align residual on it would be identically zero and is not a meaningful
-degree of freedom to weight.
+theta_trajopt (K=7): `approach.smooth, approach.clearance, grasp.smooth,
+transport.smooth, transport.clearance, transport.upright, place.smooth`.
 
 Segments
 --------
-Each segment reuses `ioc.robot.problem.RobotProblem`/`Scene` UNCHANGED (not
-re-derived): `dataclasses.replace(base_problem, n_timesteps=...)` gives one
-`RobotProblem` per phase sharing the same robot/collision model, and each
-phase's `Scene(q_start=..., q_goal=..., obs_center=..., obs_radius=...)` uses
-q_start/q_goal that are either the scene's literal endpoints (global start) or
-`q_pick`/`q_place` -- undetached JAX values, not scene constants.
-`approach`: q_start -> q_pick.  `grasp`: q_pick -> q_pick (small in-place
-motion, per the brief's "grasp-in-place small motion" segment; the
-Scene's start==goal cost is genuinely tiny but the segment is a real
-`solve_implicit` call so its adjoint still participates in the chain).
+Each segment reuses `ioc.robot.problem.RobotProblem`/`Scene` unchanged.
+`approach`: q_start -> q_pick.  `grasp`: q_pick -> q_pick.
 `transport`: q_pick -> q_place.  `place`: q_place -> q_place.
 """
 
@@ -197,7 +115,22 @@ THETA_TRAJOPT_NAMES = tuple(
     f"{seg}.{feat}" for seg in PHASES for feat in SEGMENT_FEATURES[seg]
 )
 K_TRAJOPT = len(THETA_TRAJOPT_NAMES)
-THETA_IK_NAMES = ("grasp.standoff", "place.standoff")
+# The release point is NOT the bucket's axis.  MEASURED on the teleop set: every
+# one of ten operators let go 6.3 cm SHORT of the bucket centre, toward the arm
+# base (std 1.8 cm), plus 1.6 cm tangentially -- i.e. over the NEAR RIM, the
+# bucket's inner radius being 6.5 cm.  That is a preference, not noise, and a
+# +z standoff cannot express it: it is perpendicular to the only direction
+# `place.standoff` can move.  So the release target carries two more fitted
+# coordinates, in the frame spanned by the base->bucket direction:
+#
+#   place.radial      + is AWAY from the arm base   (fits ~ -0.063 m)
+#   place.tangential  + is the left-hand normal      (fits ~ +0.016 m)
+#
+# Scene-derived, so they transfer to a bucket somewhere else -- which is what
+# keeps the release point PREDICTED rather than read off the demonstration.
+# Fitting a single global pair cuts release position error 0.068 -> 0.022 m.
+THETA_IK_NAMES = ("grasp.standoff", "place.standoff",
+                  "place.radial", "place.tangential")
 K_IK = len(THETA_IK_NAMES)
 
 # -- stage 3: the global refine pass -----------------------------------------
@@ -497,6 +430,30 @@ def _down_yaw_wxyz(yaw):
     return R.wxyz
 
 
+def _place_frame(place_pos):
+    """(radial, tangential) unit vectors in the xy plane, per batch row.
+
+    Radial points from the arm base (world origin, where the FR3 stands) out to
+    the bucket; tangential is its left-hand normal.  Defined from the SCENE, so
+    a fitted offset means the same thing when the bucket moves -- expressing it
+    in world xy instead would make `place.radial` a different preference for
+    every episode.
+    """
+    xy = place_pos[..., :2]
+    r = xy / (jnp.linalg.norm(xy, axis=-1, keepdims=True) + 1e-9)
+    radial = jnp.concatenate([r, jnp.zeros_like(r[..., :1])], axis=-1)
+    tangential = jnp.stack([-r[..., 1], r[..., 0],
+                            jnp.zeros_like(r[..., 0])], axis=-1)
+    return radial, tangential
+
+
+def _place_target(scenes, theta_ik):
+    """The release target: bucket, lifted by the standoff, shifted in-plane."""
+    radial, tangential = _place_frame(scenes.place_pos)
+    return (scenes.place_pos + theta_ik[1] * UP_AXIS
+            + theta_ik[2] * radial + theta_ik[3] * tangential)
+
+
 def _target_pose_batch(pos_batch, wxyz=DOWN_WXYZ):
     """Cast to float32 at the IK call boundary: the canonical-IK CUDA kernel's
     custom_jvp is float32-only (same boundary as GRiD's FFI -- see
@@ -512,7 +469,7 @@ def _target_pose_batch(pos_batch, wxyz=DOWN_WXYZ):
     )
 
 
-def _ik_batch(problem, target_pos, refs):
+def _ik_batch(problem, target_pos, refs, wxyz=DOWN_WXYZ):
     """Canonical IK over a flat batch of (target, ref) rows.
 
     The batch axis is whatever the caller folded into it: scenes, IK branches,
@@ -527,9 +484,16 @@ def _ik_batch(problem, target_pos, refs):
     different IK branch depending on how it was batched.  `IK_CONTINUITY_WEIGHT`
     is what makes that harmless -- winner selection prefers the branch nearest
     `refs`, so the returned branch follows the reference, not the seeding.
+
+    `wxyz` defaults to a fixed straight-down grasp.  Callers that have an
+    anchored or object-yaw orientation MUST pass it: this is the entry point
+    `multistart`'s flattened forward map uses instead of `grasp_ik`/`place_ik`,
+    and while it defaulted silently the whole anchoring path was inert inside
+    the fit -- an anchored run and an unanchored one computed the same thing and
+    differed only by solver nondeterminism.
     """
     return sqp_ik_solve_cuda_batch(
-        problem.base.robot, problem.ee_index, _target_pose_batch(target_pos),
+        problem.base.robot, problem.ee_index, _target_pose_batch(target_pos, wxyz),
         IK_RNG_KEY, refs.astype(jnp.float32),
         continuity_weight=IK_CONTINUITY_WEIGHT,
     ).astype(refs.dtype)
@@ -669,7 +633,7 @@ class PickPlaceProblem:
         place pose stays on the branch the grasp settled into."""
         dtype = q_pick_b.dtype
         B, M = q_pick_b.shape[0], q_pick_b.shape[1]
-        target = scenes.place_pos + theta_ik[1] * UP_AXIS
+        target = _place_target(scenes, theta_ik)
         target_b = jnp.broadcast_to(target, (B, M, 3)).reshape(B * M, 3)
         # Orientation anchored as in `place_ik`; the SEED stays each branch's
         # own `q_pick`, for the same reason `grasp_ik_branched` keeps `refs` --
@@ -690,7 +654,7 @@ class PickPlaceProblem:
         IK's own null-space choice (and its canonical gradient) is relative to
         where the grasp phase actually left the arm, not the scene's home cfg."""
         dtype = q_pick.dtype
-        target = scenes.place_pos + theta_ik[1] * UP_AXIS
+        target = _place_target(scenes, theta_ik)
         # `place_ref` overrides the q_pick continuity seed when the release is
         # anchored: the demonstrated release configuration is a strictly better
         # reference than "wherever the grasp left the arm", and it is what makes
@@ -966,6 +930,46 @@ class PickPlaceProblem:
             phase_scenes["full"] = full_sc
         return q_pick, q_place, xs, phase_scenes
 
+    def solve_batched_theta(self, theta_ik, theta_trajopt_by_phase,
+                            scenes: PickPlaceScene, inner_by_phase, x0_by_phase):
+        """`solve`, but with a PER-ROW cost -- the flattening, for two-stage callers.
+
+        `solve` maps the batch axis over scenes and holds one `theta` for all of
+        them (`in_axes=(0, None, 0)`).  That is right when the batch axis IS the
+        scene axis, and wrong when a caller wants several independent COSTS
+        evaluated at once: multistart alpha candidates, a finite-difference
+        probe stack, a CMA-ES population.  Those callers previously ran one
+        `solve` per candidate in a Python loop.
+
+        Here every argument is mapped (`in_axes=(0, 0, 0)`), so the caller folds
+        its candidate axis into the batch it already has -- replicating the
+        scenes and repeating each candidate's theta across them -- and the whole
+        population is one batched program.  `iosp.fit.multistart.build` does the
+        same thing inline for the three-stage path; this is the two-stage twin.
+
+        Two-stage only (no `refine`/`theta_full`): the callers that need a
+        per-row cost are segment-level, and adding an unused third stage here
+        would mean a second untested code path.
+
+        `theta_ik` is still shared across rows -- these callers vary the trajopt
+        cost, not the IK targets, and a per-row IK would change which kernel
+        batch the IK stage sees.
+        """
+        q_pick = self.grasp_ik(theta_ik, scenes)
+        q_place = self.place_ik(theta_ik, scenes, q_pick)
+        phase_scenes = {
+            "approach": Scene(scenes.q_start, q_pick, scenes.obs_center, scenes.obs_radius),
+            "grasp": Scene(q_pick, q_pick, scenes.obs_center, scenes.obs_radius),
+            "transport": Scene(q_pick, q_place, scenes.obs_center, scenes.obs_radius),
+            "place": Scene(q_place, q_place, scenes.obs_center, scenes.obs_radius),
+        }
+        xs = {}
+        for phase in PHASES:
+            xs[phase] = jax.vmap(inner_by_phase[phase].solve_implicit,
+                                 in_axes=(0, 0, 0))(
+                x0_by_phase[phase], theta_trajopt_by_phase[phase], phase_scenes[phase])
+        return q_pick, q_place, xs, phase_scenes
+
     def full_ee_path(self, scenes: PickPlaceScene, xs, phase_scenes, batch_index=0):
         """One batch element's EE path.
 
@@ -1011,6 +1015,50 @@ class PickPlaceProblem:
             q = problem.unpack(xs[phase][batch_index], sc)
             rows.append(q[1:] if i > 0 else q)
         return jnp.concatenate(rows, axis=0)
+
+    def full_joint_paths(self, scenes: PickPlaceScene, xs, phase_scenes):
+        """(B, T, dof) -- `full_joint_path` for the WHOLE batch, vmapped.
+
+        `full_joint_path` takes a scalar `batch_index` and gathers one row, so
+        the callers that actually want every row wrote
+
+            jnp.stack([full_joint_path(..., batch_index=i) for i in range(B)])
+
+        which unrolls B copies of the unpack (and, for the EE twin, of the
+        forward kinematics) into the graph.  The solves upstream of it are
+        already vmapped over the batch; only this readout was not, so the
+        unrolling bought nothing and cost compile time linear in B.  This is the
+        same map with the batch as a `vmap` axis.
+
+        The `PHASES` loop stays a Python loop on purpose: those four segments
+        are concatenated along TIME, not batched over -- it is a genuine
+        4-element concat, not a hidden batch axis.
+        """
+        if "full" in xs:
+            return jax.vmap(self.seg["full"].unpack)(xs["full"], phase_scenes["full"])
+        rows = []
+        for i, phase in enumerate(PHASES):
+            q = jax.vmap(self.seg[phase].unpack)(xs[phase], phase_scenes[phase])
+            rows.append(q[:, 1:] if i > 0 else q)   # drop the duplicated boundary
+        return jnp.concatenate(rows, axis=1)
+
+    def full_ee_paths(self, scenes: PickPlaceScene, xs, phase_scenes):
+        """(B, T, 3) -- `full_ee_path` for the whole batch; see `full_joint_paths`.
+
+        Row t here and row t of `full_joint_paths` are the same waypoint, and
+        row b matches `full_ee_path(..., batch_index=b)`, so this is a drop-in
+        for the stack-comprehension idiom it replaces -- bit-identical to it
+        when both are evaluated in the same jit (asserted in
+        `tests/test_batched_paths_gpu.py`).  Comparing across a jit boundary is
+        NOT a meaningful equivalence check here: this FK is float32 and moves by
+        ~3e-4 m between compilation/precision contexts, the looped form
+        included, so a mismatch there says something about the FK's precision
+        and nothing about the batching.
+
+        `ee_positions` already indexes with an ellipsis, so it broadcasts over
+        leading axes on its own -- no `vmap` wrapper needed or wanted.
+        """
+        return self.ee_positions(self.full_joint_paths(scenes, xs, phase_scenes))
 
     def seeds(self, scenes: PickPlaceScene, theta_ik, forward_solver_free=None):
         """Interior-waypoint seeds per phase, from the SAME IK call used by the

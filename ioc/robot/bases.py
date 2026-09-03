@@ -97,18 +97,19 @@ def dynamic(problem, payload_wrench=None, torque_backend="grid"):
     """Return `(residual_fn, names)` for the kinematic basis plus RNEA torque.
 
     `torque_backend="grid"` routes inverse dynamics through the GRiD CUDA FFI.
-    Two consequences, both handled rather than avoided:
+    GRiD computes in float32 internally, so torques carry ~2.6e-7 relative
+    error even when the surrounding graph is float64.  The torque feature is
+    whitened by a large scale (~5e5), which shrinks that error's contribution
+    to the weighted residual; the remaining effect on the outer gradient is
+    measured, not assumed.
 
-    1. GRiD computes in float32 internally, so torques carry ~2.6e-7 relative
-       error even when the surrounding graph is float64.  The torque feature is
-       whitened by a large scale (~5e5), which shrinks that error's contribution
-       to the weighted residual; the remaining effect on the outer gradient is
-       measured, not assumed.
-    2. The FFI supports one level of differentiation -- `jax.jacobian` works,
-       `jax.hessian` raises.  So the implicit adjoint must either use the
-       Gauss-Newton curvature (`adjoint_hessian="gn"`, first derivatives only) or
-       build its curvature from the float64 JAX RNEA while the forward solve
-       stays on CUDA (`adjoint_cost_fn`; see `ioc.inner`).
+    The implicit adjoint's exact Hessian (`ioc.inner`'s `adjoint_hessian="jax"`,
+    the only mode) works straight through this FFI: `pyroffi.dynamics
+    .GRiDDynamics`'s analytic-gradient kernels carry their own `custom_jvp`
+    built from GRiD's `idsva_so` second-order kernel, so `jax.hessian` no
+    longer raises on `inverse_dynamics` the way it used to. No float64 twin
+    and no once-differentiable-only fallback are needed any more --
+    `torque_backend="grid"` runs with x64 on or off, same as `"jax"`.
     """
 
     def torque_residual(q):

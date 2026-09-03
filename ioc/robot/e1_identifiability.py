@@ -15,6 +15,7 @@ Methods compared (see `ioc.inner`, `ioc.outer`, `ioc.analytic` for the theory):
     cmaes      derivative-free search on z                 population / generation
     kkt        Inverse-KKT stationarity residual                 0 solves
     cioc       Continuous IOC (Laplace approx., Levine & Koltun)  0 solves
+    eiv        EIV-TLS (Rickenbach et al. 2024)                  0 solves
 
 The sweep axes are the number of demonstration contexts M and the demonstration
 noise sigma.  The sigma sweep is the headline: with noiseless demonstrations the
@@ -199,6 +200,10 @@ def run_trial(
     z = analytic.cioc_fit(inner.grad_x, inner.gn_system, scenes, demos, K)
     finish("cioc", z, [], time.perf_counter() - t0, 0)
 
+    t0 = time.perf_counter()
+    z = analytic.eiv_fit(inner.grad_x, scenes, demos, K)
+    finish("eiv", z, [], time.perf_counter() - t0, 0)
+
     # -- bookends: the best achievable and the do-nothing baseline -------------
     finish("oracle", jnp.log(theta_star + 1e-30), [], 0.0, 0)
     finish("random", z0, [], 0.0, 0)
@@ -259,7 +264,7 @@ def main(
     print(f"\nwrote {out}")
 
     print("\n=== median theta_l1 (IQR) over seeds ===")
-    methods = ["implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "random"]
+    methods = ["implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "eiv", "random"]
     print(f"{'M':>4s} " + " ".join(f"{m:>16s}" for m in methods))
     for m in n_contexts:
         row = []

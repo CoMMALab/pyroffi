@@ -1,20 +1,8 @@
-"""Does scoring the outer loss in JOINT space beat scoring it in EE space?
+"""E7 — Joint-space vs EE-space outer loss comparison.
 
-The comparison is against `scratch/logs/pathA_fixed.log`, which is the same
-`build_parametric` at the same seed=0, n_iters=60, n_restarts=1, 40 Adam steps
-at LR=0.05 from u=0 -- so the ONLY difference is the coordinates the loss is
-measured in.  That run ended at ee_fit 0.00425 / ee_held 0.00565.
-
-Both runs are scored on BOTH criteria every step.  A joint-space fit that wins
-on joint RMSE but loses on EE RMSE has not improved anything the paper claims;
-`ee_paths_fn` exists so that cannot be hidden.
-
-Stage 2 (the sensitivity spectrum at the fitted point) answers the separate
-question of whether joint coordinates make the problem more identifiable --
-J = d path / d u gains (dof - 3) rows per waypoint, so r can only go up or stay
-put, and the interesting quantity is whether the NEW rows clear the 95%-trace
-rule or land in the numerical floor.  It is computed after the fit is already
-on disk because the jacrev+svd is ~27 min on this model.
+Both runs are scored on BOTH criteria every step.  Also computes the sensitivity
+spectrum at the fitted point to check whether joint coordinates improve
+identifiability.
 """
 
 import argparse

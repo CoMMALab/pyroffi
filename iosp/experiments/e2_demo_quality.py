@@ -1,54 +1,12 @@
-"""Study 2 -- demo-quality ablation: does recovery track CURATION, not COUNT?
+"""E2 — Demo-quality ablation: does recovery track CURATION, not COUNT?
 
-Motivation
-----------
-Study 1 (`iosp/study1_minimal_identifiable.py`) established a canonical
-inference procedure (whitened multi-demo Gram certificate -> 95%-cumulative-
-trace rank selection -> zero-prior subspace fit -> held-out generalization
-vs. a no-fit baseline) on a minimal, deliberately-curated 3-feature pick-
-and-place setup.  This script asks a different question on the SAME setup:
-holding the feature set and scene family fixed, does recovery quality track
-demo CURATION quality or demo COUNT?  If curated data at a given N clearly
-beats randomly-jittered data at the SAME N, that's evidence bad performance
-is a data problem, not a method problem -- with real implications for
-learning-based approaches that rely on naive/random data collection.
+On E1's K=3 setup, compares three demo regimes (matched N=3):
+    (a) single     1 demo ("clear" scene only)
+    (b) jittered   3 demos, small random perturbations of one scene family
+    (c) curated    3 demos = E1's CURATED_SCENES, designed to excite different features
 
-Reuse discipline: this script does NOT reimplement the certificate, rank
-selection, zero-prior fit, or generalization test -- it imports and calls
-`iosp.experiments.e1_minimal_identifiable.run_canonical` (and its dependencies)
-directly, for every regime.  The only new code here is the demo-regime
-SCENE CONSTRUCTION (single scene / random jitter / curated) and the
-comparison table across regimes.
-
-Demo regimes (matched N=3, i.e. Study 1's own `CURATED_SCENES` count)
------------------------------------------------------------------------
-    (a) single       1 demo (the "clear" scene alone) -- today's baseline,
-                      rerun on the new `line_dev` feature set (not the old
-                      `upright` one) for a fair comparison.
-    (b) jittered      3 demos, all small random perturbations of ONE scene
-                      family ("clear"'s obstacle-intrusion geometry) --
-                      mirrors `recovery_bench.sample_pickplace_scenes`'s
-                      jitter style: redundant/non-decoupling BY CONSTRUCTION,
-                      since all 3 demos excite roughly the same directions.
-    (c) curated       3 demos = Study 1's own `CURATED_SCENES` ("clear",
-                      "smooth", "shape") -- deliberately designed to load
-                      onto different features.
-
-Scope decision, stated rather than silently assumed: the CERTIFICATE in each
-regime is accumulated over that regime's full N-demo set (so rank selection
-and the identifiable subspace genuinely reflect the regime's data
-richness), but the FIT itself (the implicit-adjoint outer loop) is run
-against ONE representative scene from that regime (the first/primary one),
-not a jointly-batched N-demo fit.  This isolates the question this study is
-actually asking (does the regime's data give a better-conditioned
-certificate/identifiable-subspace, hence better recovery+generalization)
-without the added engineering and compile cost of a batched multi-demo fit
-loss (which `recovery_bench.sweep_demo_count` already explores separately,
-for a different question -- does MORE data of any kind help).  Flagged here
-as a real scope choice, not hidden.
-
-MEASURED result: filled in after the run; see `if __name__ == "__main__"`'s
-printed report.
+Reuses `e1_minimal_identifiable.run_canonical` for the full procedure; only the
+scene construction varies.
 
 Usage:
     CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_PREALLOCATE=false \\

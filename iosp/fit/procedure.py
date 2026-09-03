@@ -1,7 +1,4 @@
-"""The five-stage identifiable-refit procedure, and the gate that has to pass
-before its output means anything.
-
-The procedure is `THEORY_IDENTIFIABLE_REFIT.md` executed literally:
+"""The five-stage identifiable-refit procedure and the G0 consistency gate.
 
     1  fit wide          -- all K weights free
     2  sensitivity Gram  -- G = J^T J at the wide fit, J = d(path)/du
@@ -9,14 +6,8 @@ The procedure is `THEORY_IDENTIFIABLE_REFIT.md` executed literally:
     4  refit on U_r      -- null component pinned at the prior
     5  report in the U_r projection, plus a held-out scene
 
-It is path-agnostic: it takes a `built` dict from `iosp.fit.parametric` (or
-from the shelved RKHS builder) and knows nothing about pick-and-place.
-
-`check_loss_rmse_consistency` is the G0 gate.  `loss_a(u)` and `rmse_a(u)**2`
-are the same quantity by construction, computed through separately jitted
-graphs; on one configuration they disagreed by 340x at the fitted point, which
-is what made a wide fit report WORSE than its own initialization.  Stationarity
-screening does not catch this -- gate on the identity itself.
+Path-agnostic: takes a `built` dict from `iosp.fit.parametric` and knows
+nothing about pick-and-place.
 """
 
 import time

@@ -1,0 +1,46 @@
+Unable to resolve filename: meshes/robots/fr3/visual/link0.dae
+Can't find meshes/robots/fr3/visual/link0.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link1.dae
+Can't find meshes/robots/fr3/visual/link1.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link2.dae
+Can't find meshes/robots/fr3/visual/link2.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link3.dae
+Can't find meshes/robots/fr3/visual/link3.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link4.dae
+Can't find meshes/robots/fr3/visual/link4.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link5.dae
+Can't find meshes/robots/fr3/visual/link5.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link6.dae
+Can't find meshes/robots/fr3/visual/link6.dae
+Unable to resolve filename: meshes/robots/fr3/visual/link7.dae
+Can't find meshes/robots/fr3/visual/link7.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/hand.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/hand.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+Unable to resolve filename: meshes/robot_ee/franka_hand_white/visual/finger.dae
+Can't find meshes/robot_ee/franka_hand_white/visual/finger.dae
+2026-09-02 13:53:05.291 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 13:53:05.605 | INFO     | pyroffi._robot_urdf_parser:_topologically_sort_joints:407 - Joints were not in topological order; they will be internally sorted.
+2026-09-02 13:53:06.949 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 37 disabled collision pairs from SRDF
+2026-09-02 13:53:07.726 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 26 links and 288 active self-collision pairs, using spherical collision models.
+[build] 1 episodes (1 fit / 0 held out); standoff prior grasp 0.1015 m, place 0.2465 m
+episode ep_20260902_093953   anchor_grasp=False   K=15  theta_ik prior [ 0.1015  0.2465 -0.0393  0.0142]
+  seed error: ||q_pick - demo|| 0.490 rad   ||q_place - demo|| 0.714 rad
+[build] 0s  B=4 branches x S=3 starts = 12 candidates, 40 outer steps each, in chunks of 2
+[fit] step   0/40  sum-loss=32.900063
+[fit] step   5/40  sum-loss=32.055134
+[fit] step  10/40  sum-loss=32.104162
+[fit] step  15/40  sum-loss=31.477716
+[fit] step  20/40  sum-loss=30.760822
+[fit] step  25/40  sum-loss=30.209110
+[fit] step  30/40  sum-loss=31.395293
+[fit] step  35/40  sum-loss=37.750324
+[fit] step  39/40  sum-loss=29.891532
+[fit] 12 candidates x 40 steps in 1333s (compile incl.)
+
+RECONSTRUCTION (1 episode, 12 candidates, 40 steps, lr=0.02, anchor=False)
+  joint RMSE : u=0 1.0643   winner 0.7322 rad
+  EE RMSE    : u=0 0.6133 m  winner 0.3815 m
+  per-candidate joint RMSE: [0.908 0.904 0.732 2.975 1.266 2.926 1.214 1.591 1.096 1.046 1.261 0.901]
+  loss history (every 5): [32.9  32.06 32.1  31.48 30.76 30.21 31.4  37.75]

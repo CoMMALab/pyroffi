@@ -311,11 +311,13 @@ def fit(problem, inner, K, scenes, demos, x0s, *, seed, n_steps, lr, z0=None,
         """Batched Adam over a leading start axis.
 
         The running best is kept on device and pulled once at the end.  That
-        was originally done to remove a suspected per-step host-sync stall, but
-        the stall does not exist: `outer.adam` measures 1.00x with and without
-        the per-step `float(...)`, because the loop is dominated by the solve
-        the sync was waiting on anyway.  Keep it as tidiness, not as a
-        speedup -- the reason 4 starts cost 2.3x one start is simply that the
+        was originally done to remove a suspected per-step host-sync stall,
+        which measured 1.00x at the time: the loop was dominated by the solve
+        the sync was waiting on anyway.  (`outer.adam` has since become a
+        fixed-length `lax.scan` with no per-step host interaction at all; this
+        loop is a separate, hand-rolled batched Adam and still steps eagerly.)
+        Keep it as tidiness, not as a speedup -- the reason 4 starts cost 2.3x
+        one start is simply that the
         GPU is near saturation at ~10 concurrent rollouts, so extra batch width
         queues rather than overlapping (measured ceiling ~1.5x for widening).
         """

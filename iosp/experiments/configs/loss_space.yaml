@@ -1,0 +1,21 @@
+experiment: loss_space
+module: iosp.experiments.e7_loss_space
+description: "E7: joint vs EE outer loss comparison"
+
+defaults:
+  n_iters: 60
+  steps: 40
+
+runs:
+  - name: joint_seed0
+    args: {space: joint, seed: 0}
+    out: iosp/data/results/loss_space/joint_seed0.npz
+  - name: ee_seed0
+    args: {space: ee, seed: 0}
+    out: iosp/data/results/loss_space/ee_seed0.npz
+
+env:
+  CUDA_VISIBLE_DEVICES: auto
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  PYTHONUNBUFFERED: "1"

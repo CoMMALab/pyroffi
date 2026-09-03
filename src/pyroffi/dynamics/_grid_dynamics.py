@@ -12,10 +12,17 @@ this is the main payoff of GRiD for trajectory optimization inner loops.
 Because the tangent rule is a plain linear map of the input tangents
 (analytic-Jacobian @ tangent), JAX serves **both** forward-mode
 (``jvp`` / ``jacfwd``) directly *and* reverse-mode (``grad`` / ``jacrev``) by
-transposing that same linear rule — a single analytic rule covers both. For
-second-order derivatives the analytic Jacobian kernels are treated as
-constants (their own derivatives are not available); use the pure-JAX
-``Robot.inverse_dynamics`` / ``Robot.forward_dynamics`` there instead.
+transposing that same linear rule — a single analytic rule covers both.
+
+Second-order (``inverse_dynamics`` only): ``inverse_dynamics_gradient`` and
+``mass_matrix``/``crba`` each carry their *own* analytic ``custom_jvp``, built
+from GRiD's ``idsva_so`` second-order kernel (see ``_idgrad_differentiable``
+/ ``_crba_differentiable`` below). That makes `_id_differentiable`'s own JVP
+rule twice-differentiable by ordinary JAX nested-JVP composition, so
+``jax.hessian(gd.inverse_dynamics)`` (or any ``jax.hessian`` of a cost built
+on it) works directly — no float64 twin or Gauss-Newton fallback needed, on
+this backend or the pure-JAX ``Robot.inverse_dynamics``.
+``forward_dynamics``/``mass_matrix_inv`` do not carry this yet.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ _SYMBOLS = {
     "crba": "GridCrbaFfi",
     "id_grad": "GridIdGradFfi",
     "fd_grad": "GridFdGradFfi",
+    "idsva_so": "GridIdsvaSoFfi",
 }
 
 _registered_libs: dict[str, dict[str, str]] = {}
@@ -178,9 +186,28 @@ class GRiDDynamics:
         self._id_raw_b = _batchable(self._id_raw)
         self._fd_raw_b = _batchable(self._fd_raw)
         self._minv_call = _batchable(self._minv_raw)
-        self._crba_call = _batchable(self._crba_raw)
-        self._idgrad_call = _batchable(
+        # Single-launch-vmappable *raw* (non-diff) leaf calls. custom_jvp is
+        # vmap-transparent on its own -- it pushes an outer jax.vmap straight
+        # into whichever of these its primal/tangent bodies call -- so the
+        # manual custom_vmap machinery belongs down here at the true FFI leaf,
+        # not wrapped a second time around the custom_jvp'd function itself
+        # (stacking `_batchable(custom_jvp(...))` made jacfwd(jacrev(...))
+        # recurse through nested vmap traces with multiplying batch sizes).
+        self._crba_raw_b = _batchable(self._crba_raw)
+        self._idgrad_raw_b = _batchable(
             lambda q, qd, qdd: self._grad_raw("id_grad", q, qd, qdd)
+        )
+        self._idsva_so_raw_b = _batchable(
+            lambda q, qd, qdd: self._idsva_so_call(q, qd, qdd)
+        )
+        # _idgrad_call/_crba_call carry their own custom_jvp (analytic, from
+        # GRiD's idsva_so second-order kernel -- see _idgrad_differentiable /
+        # _crba_differentiable below), so that differentiating *through* them
+        # -- which is what jax.hessian(inverse_dynamics) does -- has a real
+        # tangent rule instead of hitting a bare FFI call with none.
+        self._crba_call = lambda q: _crba_differentiable(self, q)
+        self._idgrad_call = lambda q, qd, qdd: _idgrad_differentiable(
+            self, q, qd, qdd
         )
         self._fdgrad_call = _batchable(
             lambda q, qd, u: self._grad_raw("fd_grad", q, qd, u)
@@ -322,6 +349,57 @@ class GRiDDynamics:
         return (
             jnp.concatenate([Gq, Gqd], axis=-1) * sign_rows
         ).reshape(*batch_axes, n, 2 * n)
+
+    def _idsva_so_raw(self, q: Array, qd: Array, qdd: Array) -> Array:
+        """Raw idsva_so output: (*batch, 4, n, n, n), GRiD joint order/sign.
+
+        Tensor `t` at index `a` along the leading 4-axis is (in GRiD's own
+        joint order/sign, all three trailing axes on that same basis):
+        ``[d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq]``, where (empirically
+        confirmed against central-difference `id_grad`, see git history) for
+        output torque row ``i`` and input axes ``j, k``:
+
+            d2tau_dq  [i,j,k] = d^2 tau_i / dq_j  dq_k    (symmetric j<->k)
+            d2tau_dqd [i,j,k] = d^2 tau_i / dqd_j dqd_k   (symmetric j<->k)
+            d2tau_cross[i,j,k] = d^2 tau_i / dqd_j dq_k
+                                = d(dtau_i/dq_k)/dqd_j    (so d(dtau/dq)/dqd
+                                  reads as cross[i,k,j])
+            dM_dq[i,j,k] = d M_ij / dq_k = d(dtau_i/dqdd_j)/dq_k
+                                = d(dtau_i/dq_k)/dqdd_j   (so d(dtau/dq)/dqdd
+                                  reads as dM_dq[i,k,j])
+        """
+        n = self.num_dof
+        batch_axes, (qf, qdf, qddf) = self._flatten(q, qd, qdd)
+        buf = self._call(
+            "idsva_so",
+            (qf.shape[0], 4 * n ** 3),
+            qf,
+            qdf,
+            qddf,
+            gravity=onp.float32(self.gravity),
+        )
+        return buf.reshape(*batch_axes, 4, n, n, n)
+
+    def _unpermute_sign3(self, T: Array) -> Array:
+        """Un-permute/sign all three trailing joint axes of a (..., n, n, n)
+        GRiD-order tensor into pyroffi actuated order (see `_mat_col_from_grid`
+        for the 2-axis analogue this generalizes)."""
+        ip = self._inv_perm
+        T = T[..., ip, :, :][..., :, ip, :][..., :, :, ip]
+        s = self._signs_act
+        return T * s[:, None, None] * s[None, :, None] * s[None, None, :]
+
+    def _idsva_so_call(
+        self, q: Array, qd: Array, qdd: Array
+    ) -> tuple[Array, Array, Array, Array]:
+        """`(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq)` in actuated order/sign,
+        each `(*batch, n, n, n)` -- see `_idsva_so_raw` for the index
+        convention. Non-differentiable (used only inside the first-order
+        gradient kernels' own `custom_jvp` tangent rules, as the analytic
+        second-derivative constant)."""
+        raw = self._idsva_so_raw(q, qd, qdd)
+        out = self._unpermute_sign3(raw)
+        return tuple(out[..., i, :, :, :] for i in range(4))
 
     def _mat_col_from_grid(self, G: Array) -> Array:
         """Un-permute/sign the column (input-joint) axis of (..., n, n)."""
@@ -579,7 +657,11 @@ def _id_differentiable(gd: GRiDDynamics, q, qd, qdd):
 def _id_jvp(gd, primals, tangents):
     q, qd, qdd = primals
     t_q, t_qd, t_qdd = tangents
-    out = gd._id_raw_b(q, qd, qdd)
+    # Recurse into the custom_jvp'd primal (not the bare `_id_raw_b` FFI call)
+    # so that forward-differentiating *through this tangent rule itself* --
+    # what jax.hessian's jacfwd(jacrev(...)) does -- has a JVP to hit here,
+    # rather than an FFI call with none.
+    out = _id_differentiable(gd, q, qd, qdd)
     n = gd.num_dof
     tan = jnp.zeros_like(out)
     if _nz(t_q) or _nz(t_qd):
@@ -608,6 +690,68 @@ def _id_jvp(gd, primals, tangents):
 
 
 _id_differentiable.defjvp(_id_jvp, symbolic_zeros=True)
+
+
+# ---------------------------------------------------------------------------
+# Second-order rules for the analytic-gradient kernels themselves (GRiD
+# idsva_so), so `_id_differentiable`'s own JVP rule -- which calls
+# `_idgrad_call`/`_crba_call` -- becomes twice-differentiable by ordinary
+# JAX nested-JVP composition. This is what makes `jax.hessian(...)` work
+# straight through `inverse_dynamics` on the GRiD backend; no separate
+# Gauss-Newton or float64-JAX-twin curvature is needed any more.
+# ---------------------------------------------------------------------------
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+def _idgrad_differentiable(gd: GRiDDynamics, q, qd, qdd):
+    return gd._idgrad_raw_b(q, qd, qdd)
+
+
+def _idgrad_jvp(gd, primals, tangents):
+    q, qd, qdd = primals
+    t_q, t_qd, t_qdd = tangents
+    G = _idgrad_differentiable(gd, q, qd, qdd)
+    n = gd.num_dof
+    tan_q = jnp.zeros_like(G[..., :n])
+    tan_qd = jnp.zeros_like(G[..., n:])
+    if _nz(t_q) or _nz(t_qd) or _nz(t_qdd):
+        d2tau_dq, d2tau_dqd, cross, dM_dq = gd._idsva_so_raw_b(q, qd, qdd)
+        # cross[i,j,k] = d^2 tau_i / dqd_j dq_k ; dM_dq[i,j,k] = d M_ij / dq_k.
+        if _nz(t_q):
+            tan_q = tan_q + jnp.einsum("...ibc,...c->...ib", d2tau_dq, t_q)
+            tan_qd = tan_qd + jnp.einsum("...ibc,...c->...ib", cross, t_q)
+        if _nz(t_qd):
+            tan_q = tan_q + jnp.einsum("...icb,...c->...ib", cross, t_qd)
+            tan_qd = tan_qd + jnp.einsum("...ibc,...c->...ib", d2tau_dqd, t_qd)
+        if _nz(t_qdd):
+            tan_q = tan_q + jnp.einsum("...icb,...c->...ib", dM_dq, t_qdd)
+    tan = jnp.concatenate([tan_q, tan_qd], axis=-1)
+    return G, tan.astype(G.dtype)
+
+
+_idgrad_differentiable.defjvp(_idgrad_jvp, symbolic_zeros=True)
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+def _crba_differentiable(gd: GRiDDynamics, q):
+    return gd._crba_raw_b(q)
+
+
+def _crba_jvp(gd, primals, tangents):
+    (q,) = primals
+    (t_q,) = tangents
+    M = _crba_differentiable(gd, q)
+    tan = jnp.zeros_like(M)
+    if _nz(t_q):
+        zeros = jnp.zeros_like(q)
+        _, _, _, dM_dq = gd._idsva_so_raw_b(q, zeros, zeros)
+        # dM_dq[i,j,k] = d M_ij / dq_k -- M(q) does not depend on qd/qdd, so
+        # they are passed as zeros purely to satisfy the kernel's signature.
+        tan = jnp.einsum("...ijk,...k->...ij", dM_dq, t_q)
+    return M, tan.astype(M.dtype)
+
+
+_crba_differentiable.defjvp(_crba_jvp, symbolic_zeros=True)
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(0,))

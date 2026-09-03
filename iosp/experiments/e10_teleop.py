@@ -1,53 +1,15 @@
-"""E10 -- can the sequential planner be recovered from HUMAN demonstrations?
+"""E10 — Recovery from HUMAN teleop demonstrations (FR3 + GELLO).
 
-Question
---------
-Every iosp result so far fits a demonstration this model generated, at a known
-`theta_star`.  That makes "did recovery work" exact, and it makes the loss have
-a zero.  Both properties are artefacts of self-demonstration.  E10 removes them:
-the demonstrations are teleoperated pick-and-place episodes recorded through a
-GELLO leader into the MuJoCo scene in `sim_teleop`, and there is no vector of
-weights that generated them.
+Fits teleoperated pick-and-place episodes, not self-demonstrations.  No ground-
+truth theta exists, so the claim is purely behavioural: fitted on some episodes,
+does the composed planner reproduce held-out ones?
 
-So the claim under test is NOT "the weights are recovered" -- that question is
-unanswerable here -- but the behavioural one, which is the claim worth making:
-FITTED ON SOME EPISODES, DOES THE COMPOSED PLANNER REPRODUCE HELD-OUT ONES?
-Three numbers decide it, all printed by `iosp.fit.procedure._report`:
+The loss floor is nonzero (model misspecification); score the DROP from init and
+the fit/gen gap, not the absolute value.  `clearance` is unidentifiable by
+construction (no obstacle in the recording scene).
 
-  * `fit RMSE` at `init (u=0)` vs at the wide fit -- did fitting do anything;
-  * `gen RMSE` at the fit -- does it carry to episodes the loss never saw;
-  * `r` of `K` -- how many cost directions ten human demonstrations resolve.
-
-The floor is not zero
----------------------
-Model misspecification is now a real term: whatever the demonstrator did that a
-four-phase IK-seeded trajopt cannot express is an irreducible residual.  A
-`fit RMSE` that stalls well above 0 is therefore the EXPECTED outcome, and the
-result is in the drop from init and in the fit/gen gap -- not in the absolute
-value.  Read it against E3, which is the same procedure on synthetic demos.
-
-Same scenes as the demonstrations
----------------------------------
-Each episode's own randomisation record supplies its scene: the cube where it
-actually was, the bucket where it actually was, `q_start` the demo's own first
-waypoint.  Nothing is rolled out on `iosp.config`'s canonical task.  The robot
-is the FR3 the episodes were recorded on (`iosp.model.fr3`), NOT the Panda every
-earlier iosp experiment used -- pyroffi's FR3 FK was checked against the
-recorded MuJoCo `ee_pos` and agrees to 1.3e-4 m.
-
-Two things this data cannot answer, by construction
----------------------------------------------------
-  * `clearance` is UNIDENTIFIABLE: the recording scene has no obstacle, and the
-    exporter emits a constant placeholder in every episode.  Expect it in the
-    null space; if it appears in `U_r`, distrust the spectrum.
-  * `upright` is weakly excited: a human doing pick-and-place keeps the gripper
-    roughly down throughout, so the feature barely varies over the demo set.
-
-Two modes, and why the default is multistart
---------------------------------------------
-`--mode multistart` (default) is `iosp.fit.multistart`: B IK branches x S cost
-seeds, every candidate a complete independent bilevel fit on its own FIXED
-branch, with ONE selection at the very end on TRAINING loss.  That is the right
+Two modes: `--mode multistart` (default, B×S candidates) or `--mode procedure`
+(single wide fit → Gram → refit).  See `E10_TELEOP.md` for details.
 default here for the reason the module documents -- a hard selection anywhere
 inside the differentiated forward map makes x*(theta) discontinuous and breaks
 the implicit adjoint -- and because on this problem a single start has been

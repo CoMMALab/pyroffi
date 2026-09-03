@@ -12,6 +12,10 @@ at `config.THETA_IK_STAR` / `config.Z_TRAJOPT_STAR`. That is deliberate — it
 makes "did recovery work?" a question with an exact answer instead of a
 judgement call.
 
+The exception is **E10**, which fits recorded human teleop instead, on an FR3
+rather than the Panda. It has its own constraints, gotchas and claim structure —
+see [`E10_TELEOP.md`](E10_TELEOP.md) before working on it.
+
 ## Layout
 
 ```
@@ -32,6 +36,7 @@ iosp/
   analysis/         aggregate multi-run sweeps into tables
   shelved/          deliberately out of scope, kept for the negative results
   scripts/          multi-GPU sweep drivers
+  tests/            regression tests (pytest); run `pytest iosp/tests/`
 ```
 
 Nothing in `config.py` imports from `iosp`. Before this layout, `study3`
@@ -72,6 +77,9 @@ Run each as `python -m iosp.experiments.<name>`. All GPU work needs
 | `e4_three_stage` | study4 | Invert spasm's three-stage forward pass (segments + a whole-trajectory refine). | Not yet validated — do not use it for a figure. |
 | `e5_tamp2d` | study5 | The same tied three-stage inversion on a cheap 2D TAMP benchmark. | The drawable sanity check for the composed method. |
 | `e7_loss_space` | scratch/joint_loss_test (now e7) | Score the outer loss in **joint** space instead of EE space. | Reconstruction −18.5% on 5/5 seeds; **generalization not established** (−3.5% ± 21.9%, 4/5). Mechanism is reconditioning (λ₁/λ₂ 30 → 4.05), *not* added rank. |
+| `e8_tetris` | — | Tetris-style packing variant of the composed task. | Stress test for multi-object composition. |
+| `e9_tower` | — | Tower-stacking variant of the composed task. | Vertical composition stress test. |
+| `e10_teleop` | — | Recovery from **human** teleop demos (FR3 + GELLO). | Behavioural claim only — no ground-truth θ*. See `E10_TELEOP.md`. |
 
 Numbered names are kept as stable IDs because the logs, notes and memory all
 refer to them; the old `study<n>` filenames map to the table above.

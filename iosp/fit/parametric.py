@@ -136,12 +136,12 @@ def build_parametric(seed=0, n_iters=60, n_restarts=1, space="ee",
     def ee_paths(u):
         """-> (2, T, 3): row 0 = scene A (fit), row 1 = scene B (held out)."""
         xs, ps = _rollout(u)
-        return jnp.stack([prob.full_ee_path(scenes, xs, ps, batch_index=i) for i in (0, 1)])
+        return prob.full_ee_paths(scenes, xs, ps)
 
     def joint_paths(u):
         """-> (2, T, dof), the same waypoints in configuration space."""
         xs, ps = _rollout(u)
-        return jnp.stack([prob.full_joint_path(scenes, xs, ps, batch_index=i) for i in (0, 1)])
+        return prob.full_joint_paths(scenes, xs, ps)
 
     paths = ee_paths if space == "ee" else joint_paths
 

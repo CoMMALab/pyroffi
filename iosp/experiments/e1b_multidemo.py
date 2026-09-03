@@ -1,29 +1,8 @@
-"""Diagnostic, NOT canonical: tests two hypotheses for why the corrected
-`run_canonical` (see `study1_minimal_identifiable.py`, alpha0-selection bug
-now fixed) produces a fit that is WORSE than the alpha=0 no-fit baseline on
-both param_err and held-out generalization RMSE, despite the certificate
-selecting a clean rank-2 subspace.
+"""E1b — Diagnostic: certificate/fit mismatch and optimizer budget hypotheses.
 
-H1 (primary): certificate/fit mismatch. `select_rank`'s Gram matrix is
-POOLED (averaged) over all 3 `CURATED_SCENES` demos, but `run_canonical`
-only ever fits `alpha` against ONE demo (`fit_scene_spec`, always "clear" in
-the two reported runs). Per-demo pairwise cosines printed by
-`run_certificate` show real correlation on "clear" ALONE (smooth vs
-clearance cos=-0.69, smooth vs line_dev cos=-0.65) even though the pooled
-certificate looks clean rank-2 -- i.e. the certificate's identifiability
-claim may not hold for a single demo, which is exactly the failure mode this
-script tests by fitting against all 3 demos jointly (matching what the
-certificate actually measures) instead of one.
-
-H2 (secondary): optimizer step size/budget. n_steps=12, lr=0.05 may
-overshoot a stiff/non-convex loss surface. Tested here by rerunning the
-ORIGINAL single-demo fit with a smaller lr and more steps, to see whether
-that alone recovers a sane fit without touching the multi-demo question.
-
-This script does NOT modify `study1_minimal_identifiable.py`'s canonical
-procedure -- it is a standalone diagnostic that imports and reuses its
-pieces (`_setup`, `_solve_all`, `theta_from_alpha_zero_prior`,
-`run_certificate`, `select_rank`) rather than duplicating them.
+Tests whether fitting against all 3 demos jointly (matching the pooled
+certificate) or tuning lr/steps resolves E1's fit-worse-than-baseline result.
+Standalone diagnostic that reuses E1's procedure components.
 """
 
 import time
@@ -155,8 +134,7 @@ def run_multi_demo_fit_vmap(theta_transport_star_override=None, seed=0, n_steps=
     theta_trajopt_star = theta_trajopt_star.at[_TRANSPORT_IDX].set(theta_transport_star)
 
     xs_gt, ps_gt = _solve_all(prob, scenes, inner_by_phase, theta_trajopt_star, x0_star)
-    demo_paths = jnp.stack(
-        [prob.full_ee_path(scenes, xs_gt, ps_gt, batch_index=i) for i in range(N)], axis=0)
+    demo_paths = prob.full_ee_paths(scenes, xs_gt, ps_gt)
 
     def loss(alpha):
         theta_transport = theta_from_alpha_zero_prior(alpha, cert["eigvecs"], selected_idx)
@@ -166,7 +144,7 @@ def run_multi_demo_fit_vmap(theta_transport_star_override=None, seed=0, n_steps=
         # is one traced forward+backward solve covering all N demos, not N
         # of them fused into one jit.
         xs, ps = _solve_all(prob, scenes, inner_by_phase, theta_trajopt, x0_star)
-        paths = jnp.stack([prob.full_ee_path(scenes, xs, ps, batch_index=i) for i in range(N)], axis=0)
+        paths = prob.full_ee_paths(scenes, xs, ps)
         return jnp.mean(jnp.sum((paths - demo_paths) ** 2, axis=-1))
 
     gf = jax.jit(jax.value_and_grad(loss))

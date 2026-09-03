@@ -12,33 +12,12 @@ import numpy as np
 
 from iosp.config import STANDOFF_SCALE
 
-# ---------------------------------------------------------------------------
-# coordinates: a dimensionally-homogeneous, gauge-fixed `u`
-# ---------------------------------------------------------------------------
+# z = [theta_ik | z_trajopt] mixes metres (~0.06) with logits (~O(1)).
+# Without rescaling, theta_ik swamps the eigenspectrum.
+# Fix: optimize u with z = Z_SCALE * u so all coordinates are O(1).
 #
-# CONFOUND 1 (units).  The natural parameter vector `z = [theta_ik(2) |
-# z_trajopt(7)]` concatenates standoff distances in METRES (~0.06) with softmax
-# LOGITS (~O(1)).  Eigendecomposition is not invariant to per-coordinate
-# rescaling, so in raw `z` the question "which directions are identifiable?" is
-# partly answered by the choice of units.  `identifiability_check.py` measured
-# how lopsided that is here: gradient norm 223.3 for `grasp.standoff` and 8.1
-# for `place.standoff` against <= 1.4 for every trajopt feature.  Left alone,
-# the two `theta_ik` directions swamp the spectrum and `U_r` collapses onto
-# them -- so the refit would silently never learn a single trajopt weight.
-#
-# Fix: optimize in `u`, with `z = Z_SCALE * u` and `Z_SCALE` a characteristic
-# magnitude per coordinate, so every coordinate of `u` is O(1) and a unit step
-# means the same thing everywhere.  This also repairs the fit itself, not just
-# the diagnosis: at `lr=0.05` in raw `z`, one Adam step moved a standoff by
-# 0.05m against a ground-truth value of 0.06m.
-#
-# CONFOUND 2 (gauge).  `softmax` is invariant to adding a constant to all of
-# its logits, so `(0,0,1,...,1)/sqrt(7)` is an EXACT null direction of `G` by
-# construction, independent of the demonstration.  It is one of the two exactly
-# -zero eigenvalues measured on Path A.  It also makes `||z_hat - z_star||` and
-# `captured_frac` ill-defined, since `z_star` and `z_star + c*1` are the same
-# cost.  Fix: `gauge_fix` centres the logit block, and every parameter-space
-# metric is computed on gauge-fixed vectors.
+# softmax is gauge-invariant (z + c*1 is the same cost), introducing an exact
+# null direction. gauge_fix centres the logit block to remove it.
 
 
 
