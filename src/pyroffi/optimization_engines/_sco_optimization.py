@@ -34,12 +34,20 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ..collision import RobotCollision, colldist_from_sdf
+from ._trajopt_core import (
+    _LS_ALPHAS,
+    _al_outer_loop,
+    _lbfgs_driver,
+    _lbfgs_two_loop,
+    AugmentedLagrangianTerm,
+    TrustRegionConfig,
+)
 
-# ---------------------------------------------------------------------------
-# Line-search step sizes (mirrors _ik_primitives._LS_ALPHAS)
-# ---------------------------------------------------------------------------
-
-_LS_ALPHAS = jnp.array([1.0, 0.5, 0.25, 0.1, 0.025])
+# ``_LS_ALPHAS`` / ``_lbfgs_two_loop`` now live in :mod:`_trajopt_core`; they are
+# re-exported here because the legacy :mod:`_contact_trajopt` still imports them
+# from this module. This module's own inner solve is a thin ``_lbfgs_driver``
+# call.
+_ = (_LS_ALPHAS, _lbfgs_two_loop)  # keep re-exports live for _contact_trajopt
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +97,25 @@ class ScoTrajOptConfig:
 
     # --- Trust region ---
     w_trust:         float = 0.5
-    """Penalty weight for deviating from the linearization point."""
+    """Penalty weight for deviating from the linearization point. With
+    ``adaptive_trust`` this is the *initial* trust coefficient, then resized by
+    the ratio test."""
+
+    adaptive_trust:  bool  = False
+    """Schulman-et-al. adaptive trust-region sizing. When True, the trust
+    coefficient is grown/shrunk each outer iteration by the actual-vs-predicted
+    merit-improvement ratio, and a poorly-predicted step is rejected instead of
+    accepted. Default False keeps the fixed-weight trust region (byte-identical
+    to the previous SCO behavior)."""
+    tr_tighten:      float = 4.0
+    """adaptive_trust only: multiplier (>1) on the trust coef for a rejected step."""
+    tr_loosen:       float = 0.25
+    """adaptive_trust only: multiplier (<1) on the trust coef for a good step."""
+    tr_shrink_ratio: float = 0.25
+    tr_expand_ratio: float = 0.75
+    tr_accept_ratio: float = 0.1
+    tr_coef_min:     float = 1e-2
+    tr_coef_max:     float = 1e4
 
     # --- Joint limits ---
     w_limits:        float = 1.0
@@ -110,57 +136,6 @@ class ScoTrajOptConfig:
 
 # Backward-compatible alias.
 TrajOptConfig = ScoTrajOptConfig
-
-
-# ---------------------------------------------------------------------------
-# L-BFGS two-loop recursion  (Nocedal; self-contained copy)
-# ---------------------------------------------------------------------------
-
-def _lbfgs_two_loop(
-    g:       Float[Array, "n"],
-    s_buf:   Float[Array, "m n"],
-    y_buf:   Float[Array, "m n"],
-    rho_buf: Float[Array, "m"],
-    m_used:  Array,          # traced int32
-    newest:  Array,          # traced int32
-    m_lbfgs: int,            # static Python int — loops are unrolled
-) -> Float[Array, "n"]:
-    """Nocedal two-loop recursion returning the L-BFGS search direction -H*g.
-
-    Inactive history slots are masked to no-ops so the function is safe
-    to call before the history is fully populated.  When m_used == 0 the
-    result is the zero vector; the caller should fall back to -g/||g||.
-    """
-    alpha_arr = jnp.zeros(m_lbfgs)
-    q = g
-
-    for i in range(m_lbfgs):
-        buf_idx = (newest - i + m_lbfgs) % m_lbfgs
-        active  = i < m_used
-        si      = s_buf[buf_idx]
-        yi      = y_buf[buf_idx]
-        rho_i   = rho_buf[buf_idx]
-        alpha_i = rho_i * jnp.dot(si, q)
-        alpha_arr = jnp.where(active, alpha_arr.at[buf_idx].set(alpha_i), alpha_arr)
-        q = jnp.where(active, q - alpha_i * yi, q)
-
-    # Shanno-Kettler H₀ scaling from the most recent pair
-    sy    = jnp.dot(s_buf[newest], y_buf[newest])
-    yy    = jnp.dot(y_buf[newest], y_buf[newest])
-    gamma = sy / (yy + 1e-18)
-    r     = gamma * q
-
-    for step in range(m_lbfgs):
-        buf_idx = (newest - m_used + 1 + step + m_lbfgs) % m_lbfgs
-        active  = step < m_used
-        si      = s_buf[buf_idx]
-        yi      = y_buf[buf_idx]
-        rho_i   = rho_buf[buf_idx]
-        alpha_i = alpha_arr[buf_idx]
-        beta    = rho_i * jnp.dot(yi, r)
-        r       = jnp.where(active, r + si * (alpha_i - beta), r)
-
-    return -r
 
 
 # ---------------------------------------------------------------------------
@@ -252,167 +227,117 @@ def _collision_dists_reduced(
 
 
 # ---------------------------------------------------------------------------
-# Jacobian computation
+# SCO solve for a single trajectory (Schulman et al. 2013)
 # ---------------------------------------------------------------------------
 
-def _compute_coll_dists_and_jacs(
-    trajs:       Float[Array, "B T DOF"],
+def _collision_residual(
+    x_flat:      Float[Array, "n"],
     robot:       Robot,
     robot_coll:  RobotCollision,
     world_geoms: tuple,
-    temperature: float,
-) -> tuple[Float[Array, "B T G"], Float[Array, "B T G DOF"]]:
-    """Per-group smooth-min distances and their Jacobians at every waypoint.
+    cfg:         ScoTrajOptConfig,
+    T:           int,
+    DOF:         int,
+) -> Float[Array, "T*G"]:
+    """Per-waypoint, per-group signed collision violation ``margin - d`` as an
+    inequality residual (feasible ⇔ ``<= 0``).
 
-    Uses forward-mode AD (``jax.jacfwd``) which requires only DOF=7 JVPs
-    instead of the G or P VJPs that reverse-mode would need.  Combined with
-    the per-group reduction (G ≈ 4 vs P ≈ 252), this cuts Jacobian memory
-    and compile time by roughly two orders of magnitude.
+    ``d`` is the per-group smooth-minimum clearance (self + one per world
+    geometry), so the residual is one scalar per ``(timestep, group)``. The
+    augmented-Lagrangian term squares its positive part into the same convex
+    hinge ``max(0, margin - d)²`` the old fixed-weight penalty used — but now
+    with a dual and a per-term ``rho`` continuation, and *linearized* about the
+    outer iterate by :func:`_al_outer_loop`'s ``sco_linearize`` (this is the
+    Schulman convexification, via ``jax.linearize`` instead of a hand-built
+    Jacobian einsum)."""
+    t = x_flat.reshape(T, DOF)
 
-    Returns:
-        d_k:  [B, T, G]      — per-group smooth-min distances
-        J_k:  [B, T, G, DOF] — ∂d_reduced/∂q at each waypoint
-    """
-    def per_cfg(cfg):
-        d = _collision_dists_reduced(cfg, robot, robot_coll, world_geoms, temperature)
-        J = jax.jacfwd(_collision_dists_reduced, argnums=0)(
-            cfg, robot, robot_coll, world_geoms, temperature
+    def per_cfg(c):
+        return _collision_dists_reduced(
+            c, robot, robot_coll, world_geoms, cfg.smooth_min_temperature
         )
-        return d, J
 
-    d_k, J_k = jax.vmap(jax.vmap(per_cfg))(trajs)
-    return d_k, J_k
+    d = jax.vmap(per_cfg)(t)                       # [T, G]
+    return (cfg.collision_margin - d).reshape(-1)  # [T*G]
 
 
-# ---------------------------------------------------------------------------
-# Inner L-BFGS solver (single trajectory)
-# ---------------------------------------------------------------------------
-
-def _lbfgs_inner_solve(
-    traj:    Float[Array, "T DOF"],
-    q_k:     Float[Array, "T DOF"],
-    d_k:     Float[Array, "T P"],
-    J_k:     Float[Array, "T P DOF"],
-    lower:   Float[Array, "DOF"],
-    upper:   Float[Array, "DOF"],
-    cfg:     ScoTrajOptConfig,
-    w_coll:  Array,                    # traced scalar from outer carry
+def _sco_solve_one(
+    traj:        Float[Array, "T DOF"],
+    start:       Float[Array, "DOF"],
+    goal:        Float[Array, "DOF"],
+    robot:       Robot,
+    robot_coll:  RobotCollision,
+    world_geoms: tuple,
+    lower:       Float[Array, "DOF"],
+    upper:       Float[Array, "DOF"],
+    cfg:         ScoTrajOptConfig,
 ) -> Float[Array, "T DOF"]:
-    """Solve the convex inner subproblem for a single trajectory with L-BFGS.
+    """One trajectory's SCO solve, routed through the shared AL outer loop.
 
-    The inner objective is convex in q because:
-      - Smoothness and limits are exact quadratics.
-      - The linearized collision hinge max(0, margin - d_lin(q))² is convex
-        (hinge of an affine function, squared).
-      - The trust-region term ||q - q_k||² is quadratic.
-
-    Start and goal waypoints are pinned by zeroing their gradient components.
+    Traditional Schulman-et-al. SCO: each outer iteration linearizes the
+    non-convex collision constraint at the current iterate (``sco_linearize``),
+    then solves a convex subproblem — exact quadratic smoothness/limits, the
+    convex linearized-collision hinge, and a trust region ``||q - q_k||²`` about
+    that iterate — with L-BFGS. The collision constraint carries a real dual and
+    a ``rho`` penalty continuation (the AL upgrade over the old duals-free
+    penalty-only loop). Endpoints are pinned every inner step and re-pinned each
+    outer step.
     """
-    m    = cfg.m_lbfgs       # static Python int — used in range() loops
-    T    = traj.shape[0]
-    DOF  = traj.shape[1]
-    n    = T * DOF
+    T = traj.shape[0]
+    DOF = traj.shape[1]
+    n = T * DOF
 
-    # Mask that zeros gradients at the first and last waypoints, pinning them.
-    endpoint_mask = (
-        jnp.ones(n)
-        .at[:DOF].set(0.0)
-        .at[n - DOF:].set(0.0)
-    )
+    endpoint_mask = jnp.ones(n).at[:DOF].set(0.0).at[n - DOF:].set(0.0)
 
-    def cost_fn(x_flat: Float[Array, "n"]) -> Array:
+    # With adaptive TR the trust term is owned + resized by `_al_outer_loop`; with
+    # the fixed variant it stays a constant penalty here (byte-identical to before).
+    if cfg.adaptive_trust:
+        trust = TrustRegionConfig(
+            coef0=cfg.w_trust, tighten=cfg.tr_tighten, loosen=cfg.tr_loosen,
+            shrink_ratio=cfg.tr_shrink_ratio, expand_ratio=cfg.tr_expand_ratio,
+            accept_ratio=cfg.tr_accept_ratio,
+            coef_min=cfg.tr_coef_min, coef_max=cfg.tr_coef_max,
+        )
+    else:
+        trust = None
+
+    def base_cost(x_flat, x_k):
         t = x_flat.reshape(T, DOF)
-        c  = cfg.w_smooth * _smoothness_cost(t, cfg.w_vel, cfg.w_acc, cfg.w_jerk)
+        c = cfg.w_smooth * _smoothness_cost(t, cfg.w_vel, cfg.w_acc, cfg.w_jerk)
         c += cfg.w_limits * _limits_cost(t, lower, upper)
-
-        # Linearized collision: d_lin ≈ d_k + J_k @ (q - q_k)
-        delta_q = t - q_k                                        # [T, DOF]
-        d_lin   = d_k + jnp.einsum("tpd,td->tp", J_k, delta_q) # [T, P]
-        violation = jnp.maximum(0.0, cfg.collision_margin - d_lin)
-        c += w_coll * jnp.sum(violation ** 2)
-
-        # Trust region
-        c += cfg.w_trust * jnp.sum(delta_q ** 2)
+        if not cfg.adaptive_trust:
+            c += cfg.w_trust * jnp.sum((x_flat - x_k) ** 2)  # fixed SCO trust region
         return c
 
-    x0           = traj.reshape(n)
-    cost0, g0    = jax.value_and_grad(cost_fn)(x0)
-    g0           = g0 * endpoint_mask
-
-    init_carry = (
-        x0,                      # current iterate
-        x0,                      # best iterate seen so far
-        cost0,                   # best cost seen so far
-        x0,                      # x_prev  (dummy for iter 0)
-        g0,                      # g_prev  (dummy for iter 0)
-        jnp.zeros((m, n)),       # s_buf
-        jnp.zeros((m, n)),       # y_buf
-        jnp.zeros(m),            # rho_buf
-        jnp.int32(0),            # m_used
-        jnp.int32(0),            # newest
-        jnp.int32(0),            # iter_count
+    coll_term = AugmentedLagrangianTerm(
+        residual_fn=lambda x: _collision_residual(
+            x, robot, robot_coll, world_geoms, cfg, T, DOF
+        ),
+        kind="ineq",
+        rho0=cfg.w_collision,
+        rho_max=cfg.w_collision_max,
+        penalty_scale=cfg.penalty_scale,
+        name="collision",
     )
 
-    def lbfgs_step(carry, _):
-        (x, best_x, best_cost,
-         x_prev, g_prev,
-         s_buf, y_buf, rho_buf,
-         m_used, newest, iter_count) = carry
-
-        cost_val, g = jax.value_and_grad(cost_fn)(x)
-        g = g * endpoint_mask
-
-        # --- Update L-BFGS curvature history ---
-        s_k   = x - x_prev
-        y_k   = g - g_prev
-        sy    = jnp.dot(s_k, y_k)
-        yy    = jnp.dot(y_k, y_k)
-        valid = (sy > 1e-10 * yy + 1e-30) & (iter_count > 0)
-
-        new_newest    = (newest + 1) % m
-        actual_newest = jnp.where(valid, new_newest, newest)
-        # Update only the newest slot: O(n) rather than O(m * n).
-        s_buf   = s_buf.at[new_newest].set(jnp.where(valid, s_k, s_buf[new_newest]))
-        y_buf   = y_buf.at[new_newest].set(jnp.where(valid, y_k, y_buf[new_newest]))
-        rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / (sy + 1e-30)), rho_buf)
-        m_used  = jnp.where(valid & (m_used < m), m_used + 1, m_used)
-        newest  = actual_newest
-
-        # --- L-BFGS search direction ---
-        dir_lbfgs = _lbfgs_two_loop(g, s_buf, y_buf, rho_buf, m_used, newest, m)
-        dir_gd    = -g / (jnp.linalg.norm(g) + 1e-18)
-        direction = jnp.where(m_used > 0, dir_lbfgs, dir_gd)
-        direction = direction * endpoint_mask   # keep endpoints pinned
-
-        # --- 5-point line search ---
-        suff_thresh = cost_val * (1.0 - 1e-4)
-        trial_costs = jax.vmap(lambda a: cost_fn(x + a * direction))(_LS_ALPHAS)
-        has_suff    = trial_costs < suff_thresh
-        best_idx    = jnp.where(
-            jnp.any(has_suff),
-            jnp.argmax(has_suff),
-            jnp.argmin(trial_costs),
+    def inner_solve(z0, cost_fn):
+        return _lbfgs_driver(
+            z0, cost_fn,
+            n_iters=cfg.n_inner_iters, m_lbfgs=cfg.m_lbfgs,
+            loop="scan", endpoint_mask=endpoint_mask, best_by="cost",
+            gd_dir="norm",
         )
-        alpha   = _LS_ALPHAS[best_idx]
-        x_new   = x + alpha * direction
-        new_cost = trial_costs[best_idx]
 
-        improved  = new_cost < best_cost
-        best_x    = jnp.where(improved, x_new, best_x)
-        best_cost = jnp.where(improved, new_cost, best_cost)
+    def repin(z):
+        t = z.reshape(T, DOF).at[0].set(start).at[-1].set(goal)
+        return t.reshape(-1)
 
-        return (
-            x_new, best_x, best_cost,
-            x, g,
-            s_buf, y_buf, rho_buf,
-            m_used, newest, iter_count + 1,
-        ), None
-
-    (_, best_x, _, _, _, _, _, _, _, _, _), _ = jax.lax.scan(
-        lbfgs_step, init_carry, None, length=cfg.n_inner_iters,
+    z, _, _ = _al_outer_loop(
+        traj.reshape(n), inner_solve, (coll_term,), base_cost,
+        n_outer_iters=cfg.n_outer_iters, repin_fn=repin, sco_linearize=True,
+        trust=trust,
     )
-
-    return best_x.reshape(T, DOF)
+    return z.reshape(T, DOF)
 
 
 # ---------------------------------------------------------------------------
@@ -463,35 +388,16 @@ def _sco_trajopt_jax(
     # Pin endpoints in the initial batch
     trajs = init_trajs.at[:, 0, :].set(start).at[:, -1, :].set(goal)
 
-    def outer_step(carry, _):
-        trajs, w_coll = carry
-
-        # Step 1: linearize collision at the current trajectory
-        d_k, J_k = _compute_coll_dists_and_jacs(
-            trajs, robot, robot_coll, world_geoms, opt_cfg.smooth_min_temperature
+    # SCO per trajectory, in parallel: each is its own augmented-Lagrangian
+    # outer loop (linearize collision at the iterate -> convex subproblem with
+    # trust region -> dual ascent + penalty continuation). The per-outer-iter
+    # collision linearization that the old hand-built `_compute_coll_dists_and_jacs`
+    # produced is now done inside `_al_outer_loop` via `sco_linearize`.
+    final_trajs = jax.vmap(
+        lambda traj: _sco_solve_one(
+            traj, start, goal, robot, robot_coll, world_geoms, lower, upper, opt_cfg
         )
-
-        # Step 2: solve the convex inner subproblem for every trajectory in parallel
-        new_trajs = jax.vmap(
-            lambda traj, dk, Jk: _lbfgs_inner_solve(
-                traj, traj, dk, Jk, lower, upper, opt_cfg, w_coll
-            )
-        )(trajs, d_k, J_k)
-
-        # Re-pin endpoints (numerical safety)
-        new_trajs = new_trajs.at[:, 0, :].set(start).at[:, -1, :].set(goal)
-
-        # Step 3: scale up the collision penalty for the next outer iteration
-        w_coll = jnp.minimum(w_coll * opt_cfg.penalty_scale, opt_cfg.w_collision_max)
-
-        return (new_trajs, w_coll), None
-
-    (final_trajs, _), _ = jax.lax.scan(
-        outer_step,
-        (trajs, jnp.array(opt_cfg.w_collision, dtype=jnp.float32)),
-        None,
-        length=opt_cfg.n_outer_iters,
-    )
+    )(trajs)
 
     # Rank by full nonlinear cost at the maximum collision weight
     costs = jax.vmap(

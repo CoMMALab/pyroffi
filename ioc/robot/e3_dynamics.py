@@ -59,6 +59,7 @@ def run_trial(
     problem, theta_star_full, n_contexts, seed, demo_noise, payload_kg, n_newton,
     n_outer_steps, lr, n_unroll_tail, adjoint_ridge, conv_tol, check_grads,
     torque_backend, forward_solver, unrolled_forward_solver,
+    constrained=False, tau_limit_scale=1.0,
 ):
     rng = np.random.default_rng(seed)
     payload = bases.make_payload(problem, payload_kg)
@@ -66,11 +67,32 @@ def run_trial(
     res_kin, kin_names = bases.kinematic(problem, "k3")
     res_jax, _ = bases.dynamic(problem, payload, "jax")
 
+    # A torque limit is a property of the robot, not the cost model, so the same
+    # theta-independent constraint is applied to every inner solver and to demo
+    # generation; the constrained implicit adjoint (see ioc.inner) differentiates
+    # the augmented stationarity with the multipliers frozen.
+    constraint_kw = {}
+    if constrained:
+        constraints_fn = bases.torque_limit_constraint(
+            problem, payload_wrench=payload, torque_backend=torque_backend,
+            tau_limit_scale=tau_limit_scale,
+        )
+        # Plain augmented Lagrangian (no SCO linearization, no trust term): the
+        # inner solve then minimizes C + penalty EXACTLY, so the returned x* is
+        # stationary of precisely what the frozen-multiplier adjoint
+        # differentiates -- the cleanest IFT, and the augmented-stationarity
+        # screen (CONFOUND 4) is a true validity check.  SCO / adaptive trust
+        # add non-constraint terms that only agree with the adjoint at full
+        # convergence and otherwise inflate the stationarity residual.
+        constraint_kw = dict(constraints_fn=constraints_fn, use_sco=False,
+                             n_outer_iters=12, trust=None)
+
     def build_full(scales):
         return make_inner_solver(
             res_full, scales, adjoint_ridge=adjoint_ridge,
             forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
+            **constraint_kw,
         )
 
     # --- well-specified (dynamic) problem: generates the demonstrations -------
@@ -105,6 +127,7 @@ def run_trial(
             res_jax, scales_ref, adjoint_ridge=adjoint_ridge,
             forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
+            **constraint_kw,
         )
         loss_ref = jax.jit(
             prob.make_outer(problem, inner_ref.solve_implicit, scenes, demos, x0s)
@@ -159,6 +182,7 @@ def run_trial(
         res_kin, scales_kin, adjoint_ridge=adjoint_ridge,
         forward_solver=forward_solver,
         unrolled_forward_solver=unrolled_forward_solver,
+        **constraint_kw,
     )
     results["kinematic"] = fit(inner_kin, kin_names, "kinematic")
 
@@ -205,6 +229,8 @@ def main(
     torque_backend: str = "grid",
     dynamics_n_iters: int = 200,
     dynamics_m_lbfgs: int = 8,
+    constrained: bool = False,
+    tau_limit_scale: float = 1.0,
     out: str = "e3_results.json",
 ):
     """The forward solve that finds x* always runs on pyroffi's contact-free
@@ -234,6 +260,7 @@ def main(
             conv_tol, check_grads, torque_backend,
             forward_solver=forward_solver,
             unrolled_forward_solver=unrolled_forward_solver,
+            constrained=constrained, tau_limit_scale=tau_limit_scale,
         )
 
     with open(out, "w") as f:
@@ -242,6 +269,8 @@ def main(
             "feature_names": list(bases.DYNAMIC_NAMES),
             "payload_kg": payload_kg,
             "demo_noise": demo_noise,
+            "constrained": constrained,
+            "tau_limit_scale": tau_limit_scale,
             "results": all_results,
         }, f, indent=2)
     print(f"\nwrote {out}")

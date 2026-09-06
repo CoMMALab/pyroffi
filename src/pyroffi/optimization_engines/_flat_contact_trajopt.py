@@ -66,12 +66,11 @@ from ..dynamics import _contact as C
 from ..dynamics._contact import ContactSystem
 from ._contact_trajopt import _fd_vel_acc
 from ._sco_optimization import (
-    _LS_ALPHAS,
     _collision_dists_reduced,
-    _lbfgs_two_loop,
     _limits_cost,
     _smoothness_cost,
 )
+from ._trajopt_core import _adaptive_trust_step, _lbfgs_driver, _make_trust
 
 
 def _collision_cost(
@@ -108,6 +107,44 @@ def _collision_cost(
 
         d = jax.vmap(groups)(q_i)  # (T, 1 + n_world)
         hinge = jnp.maximum(0.0, cfg.collision_margin - d) ** 2
+        total += cfg.w_self_collision * jnp.sum(hinge[:, 0])
+        total += cfg.w_collision * jnp.sum(hinge[:, 1:])
+    return total
+
+
+def _collision_cost_lin(
+    q: Float[Array, "T n"],
+    q_k: Float[Array, "T n"],
+    system: ContactSystem,
+    colls: tuple,
+    world_geoms: tuple,
+    cfg: "FlatContactTrajOptConfig",
+) -> Array:
+    """Schulman-SCO linearization of :func:`_collision_cost`.
+
+    Identical hinge, but the (non-convex) per-waypoint reduced clearance ``d(q)``
+    is replaced by its first-order model ``d(q_k) + J(q_k)(q - q_k)`` about the
+    frozen outer/stage iterate ``q_k`` — so the inner L-BFGS subproblem sees a
+    convex hinge of an affine function, the defining move of SCO. Used only when
+    ``cfg.use_sco`` is set (and collision is active); the exact nonlinear term
+    above is the default."""
+    total = jnp.zeros((), q.dtype)
+    idx = 0
+    for m, coll in zip(system.manipulators, colls):
+        o, idx = idx, idx + m.num_dof
+        if coll is None:
+            continue
+        q_i = q[:, o : o + m.num_dof]
+        qk_i = q_k[:, o : o + m.num_dof]
+
+        def groups_all(qq, coll=coll, m=m):
+            return jax.vmap(lambda c: _collision_dists_reduced(
+                c, m.robot, coll, world_geoms, cfg.collision_temperature
+            ))(qq)
+
+        d0, jvp = jax.linearize(groups_all, qk_i)
+        d_lin = d0 + jvp(q_i - qk_i)  # (T, 1 + n_world), affine in q_i
+        hinge = jnp.maximum(0.0, cfg.collision_margin - d_lin) ** 2
         total += cfg.w_self_collision * jnp.sum(hinge[:, 0])
         total += cfg.w_collision * jnp.sum(hinge[:, 1:])
     return total
@@ -163,6 +200,28 @@ class FlatContactTrajOptConfig:
     #   never approaches the tolerance, so the check never fires.
     grad_tol: float = 0.0
     """Inner L-BFGS stops once ``max|grad|`` drops below this. 0 disables."""
+
+    use_sco: bool = False
+    """Schulman-SCO the (opt-in) collision term: linearize the per-waypoint
+    clearance about each stage's incoming iterate so the inner subproblem sees a
+    convex affine-hinge instead of the raw non-convex distance. No effect unless
+    a collision weight is also nonzero; the default (False) leaves the exact
+    nonlinear term and a byte-identical graph."""
+
+    # --- Adaptive (Schulman) trust region ---------------------------------
+    #     Adds a resized trust region ``coef ||z - z_k||²`` around each stage,
+    #     accepting/rejecting the step by the actual-vs-predicted ratio test.
+    #     Meaningful together with ``use_sco`` (the ratio judges the linearized
+    #     collision model). Default off ⇒ the exact stage loop, byte-identical.
+    adaptive_trust: bool = False
+    tr_coef0: float = 1.0
+    tr_tighten: float = 4.0
+    tr_loosen: float = 0.25
+    tr_shrink_ratio: float = 0.25
+    tr_expand_ratio: float = 0.75
+    tr_accept_ratio: float = 0.1
+    tr_coef_min: float = 1e-2
+    tr_coef_max: float = 1e4
 
     # --- Joint-space regularity ---
     w_q_smooth: float = 0.2
@@ -436,6 +495,7 @@ def _flat_cost(
     cfg: FlatContactTrajOptConfig,
     colls: tuple = (),
     world_geoms: tuple = (),
+    z_k: Float[Array, "nz"] | None = None,
 ) -> Array:
     ndof = system.num_dof
     k = system.num_manipulators
@@ -495,7 +555,11 @@ def _flat_cost(
     # Guarded on the *static* config, so with the default weights the term is
     # not traced at all and the graph is byte-for-byte what it was before.
     if cfg.w_collision or cfg.w_self_collision:
-        cost += _collision_cost(q, system, colls, world_geoms, cfg)
+        if cfg.use_sco and z_k is not None:
+            q_k = z_k[n_delta : n_delta + n_q].reshape(T, ndof)
+            cost += _collision_cost_lin(q, q_k, system, colls, world_geoms, cfg)
+        else:
+            cost += _collision_cost(q, system, colls, world_geoms, cfg)
 
     # --- Allocate forces (exact object dynamics) -------------------------
     # Balance about the *actual* object centre (contact-point centroid), so the
@@ -525,78 +589,20 @@ def _flat_cost(
 # ---------------------------------------------------------------------------
 
 def _inner_solve(z0, endpoint_mask, cost_fn, cfg: FlatContactTrajOptConfig):
-    m = cfg.m_lbfgs
-    nz = z0.shape[0]
-    cost0, g0 = jax.value_and_grad(cost_fn)(z0)
-    g0 = g0 * endpoint_mask
+    """One inner L-BFGS solve, delegating to the shared driver.
 
-    init = (
-        z0, z0, cost0, z0, g0,
-        jnp.zeros((m, nz)), jnp.zeros((m, nz)), jnp.zeros(m),
-        jnp.int32(0), jnp.int32(0), jnp.int32(0),
-        jnp.bool_(False),  # converged
+    ``while_loop`` form (capped at ``n_inner_iters``, ``grad_tol``-gated early
+    exit), best-by-cost, endpoint-masked — the same behavior this engine's own
+    copy had. Safe because ``flat_contact_trajopt`` is only ever called under
+    ``stop_gradient`` (the IOC gradient comes from the analytic adjoint, not from
+    differentiating this loop).
+    """
+    return _lbfgs_driver(
+        z0, cost_fn,
+        n_iters=cfg.n_inner_iters, m_lbfgs=cfg.m_lbfgs,
+        grad_tol=cfg.grad_tol, loop="while",
+        endpoint_mask=endpoint_mask, best_by="cost", gd_dir="norm",
     )
-
-    def body(carry):
-        (x, best_x, best_cost, x_prev, g_prev,
-         s_buf, y_buf, rho_buf, m_used, newest, it, _) = carry
-        cost_val, g = jax.value_and_grad(cost_fn)(x)
-        g = g * endpoint_mask
-        s_k = x - x_prev
-        y_k = g - g_prev
-        sy = jnp.dot(s_k, y_k)
-        yy = jnp.dot(y_k, y_k)
-        valid = (sy > 1e-10 * yy + 1e-30) & (it > 0)
-        new_newest = (newest + 1) % m
-        actual_newest = jnp.where(valid, new_newest, newest)
-        # Update only the newest slot. Selecting on the *row* is O(nz); the
-        # earlier `where` over the whole updated buffer was O(m * nz) for the
-        # same result.
-        s_buf = s_buf.at[new_newest].set(jnp.where(valid, s_k, s_buf[new_newest]))
-        y_buf = y_buf.at[new_newest].set(jnp.where(valid, y_k, y_buf[new_newest]))
-        rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / (sy + 1e-30)), rho_buf)
-        m_used = jnp.where(valid & (m_used < m), m_used + 1, m_used)
-        newest = actual_newest
-        dir_lbfgs = _lbfgs_two_loop(g, s_buf, y_buf, rho_buf, m_used, newest, m)
-        dir_gd = -g / (jnp.linalg.norm(g) + 1e-18)
-        direction = jnp.where(m_used > 0, dir_lbfgs, dir_gd) * endpoint_mask
-        suff = cost_val * (1.0 - 1e-4)
-        trial = jax.vmap(lambda a: cost_fn(x + a * direction))(_LS_ALPHAS)
-        has_suff = trial < suff
-        idx = jnp.where(jnp.any(has_suff), jnp.argmax(has_suff), jnp.argmin(trial))
-        alpha = _LS_ALPHAS[idx]
-        x_new = x + alpha * direction
-        new_cost = trial[idx]
-        improved = new_cost < best_cost
-        best_x = jnp.where(improved, x_new, best_x)
-        best_cost = jnp.where(improved, new_cost, best_cost)
-        # Stationary point: further steps cannot move `best_x`. Static-gated so
-        # the disabled default emits no reduction at all.
-        converged = (
-            jnp.max(jnp.abs(g)) < cfg.grad_tol
-            if cfg.grad_tol > 0.0
-            else jnp.bool_(False)
-        )
-        return (
-            x_new, best_x, best_cost, x, g,
-            s_buf, y_buf, rho_buf, m_used, newest, it + 1,
-            converged,
-        )
-
-    # `while_loop` (not a fixed-length `scan`): with `grad_tol` disabled
-    # (default) `converged` is always `False` and this runs exactly
-    # `n_inner_iters` steps, same as before; enabling it stops paying for the
-    # remaining budget once the gradient norm bottoms out. Safe here because
-    # `flat_contact_trajopt` is only ever called under `stop_gradient` inside
-    # `ioc.inner.solve_implicit` (the IOC gradient comes from the analytic
-    # implicit-function-theorem `_bwd`, not from differentiating this loop) --
-    # reverse-mode AD through `while_loop` is unsupported by JAX regardless.
-    def cond_fn(carry):
-        it, converged = carry[10], carry[-1]
-        return jnp.logical_and(it < cfg.n_inner_iters, jnp.logical_not(converged))
-
-    final = jax.lax.while_loop(cond_fn, body, init)
-    return final[1]
 
 
 # ---------------------------------------------------------------------------
@@ -645,22 +651,59 @@ def _flat_contact_jax(
     mask = mask.at[n_delta : n_delta + ndof].set(0.0)
     mask = mask.at[n_delta + n_q - ndof : n_delta + n_q].set(0.0)
 
-    def stage(carry, _):
-        z, w_track = carry
-        cost_fn = lambda zz: _flat_cost(
-            zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg,
-            colls, world_geoms,
-        )
-        z = _inner_solve(z, mask, cost_fn, opt_cfg)
-        w_track = jnp.minimum(w_track * opt_cfg.track_scale, opt_cfg.w_track_max)
-        return (z, w_track), None
+    trust = _make_trust(opt_cfg)
 
-    (z, _), _ = jax.lax.scan(
-        stage,
-        (z, jnp.array(opt_cfg.w_track, jnp.float32)),
-        None,
-        length=opt_cfg.n_stages,
-    )
+    def _flat_merit(zz, z_k, w_track, linearize):
+        """Stage cost for the trust ratio test: collision linearized about
+        ``z_k`` (the model) or exact (the truth); no trust term."""
+        return _flat_cost(
+            zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg,
+            colls, world_geoms, z_k if linearize else None,
+        )
+
+    if trust is None:
+        def stage(carry, _):
+            z, w_track = carry
+            # Freeze the stage iterate for the (opt-in) SCO collision
+            # linearization; ignored by the exact-collision default.
+            z_k = jax.lax.stop_gradient(z)
+            cost_fn = lambda zz: _flat_cost(
+                zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg,
+                colls, world_geoms, z_k,
+            )
+            z = _inner_solve(z, mask, cost_fn, opt_cfg)
+            w_track = jnp.minimum(w_track * opt_cfg.track_scale, opt_cfg.w_track_max)
+            return (z, w_track), None
+
+        (z, _), _ = jax.lax.scan(
+            stage, (z, jnp.array(opt_cfg.w_track, jnp.float32)),
+            None, length=opt_cfg.n_stages,
+        )
+    else:
+        def stage(carry, _):
+            z, w_track, tr_coef = carry
+            z_k = jax.lax.stop_gradient(z)
+            cost_fn = lambda zz: _flat_cost(
+                zz, system, T_obj0, offsets, lower, upper, w_track, T, opt_cfg,
+                colls, world_geoms, z_k,
+            ) + tr_coef * jnp.sum((zz - z_k) ** 2)
+            z_trial = _inner_solve(z, mask, cost_fn, opt_cfg)
+            # Schulman ratio test on the linearized-collision model.
+            m_zk = _flat_merit(z_k, z_k, w_track, linearize=True)
+            m_model = _flat_merit(z_trial, z_k, w_track, linearize=True)
+            m_true = _flat_merit(z_trial, z_k, w_track, linearize=False)
+            z, tr_coef, _ = _adaptive_trust_step(
+                z_k, z_trial, m_zk, m_model, m_true, tr_coef, trust
+            )
+            w_track = jnp.minimum(w_track * opt_cfg.track_scale, opt_cfg.w_track_max)
+            return (z, w_track, tr_coef), None
+
+        (z, _, _), _ = jax.lax.scan(
+            stage,
+            (z, jnp.array(opt_cfg.w_track, jnp.float32),
+             jnp.array(trust.coef0, jnp.float32)),
+            None, length=opt_cfg.n_stages,
+        )
 
     delta = z[:n_delta].reshape(T, 6)
     q = z[n_delta : n_delta + n_q].reshape(T, ndof)

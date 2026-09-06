@@ -81,6 +81,11 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 
+from pyroffi.optimization_engines._trajopt_core import (
+    _al_outer_loop,
+    _al_penalty,
+)
+
 
 @dataclasses.dataclass(frozen=True)
 class InnerSolver:
@@ -120,6 +125,11 @@ def make_inner_solver(
     restart_seed_fn=None,
     forward_solver=None,
     unrolled_forward_solver=None,
+    constraints_fn=None,
+    use_sco=False,
+    n_outer_iters=10,
+    al_dual_scale=1.0,
+    trust=None,
 ):
     """Build the inner solver for `residual_fn(x, ctx) -> tuple of residuals`.
 
@@ -142,6 +152,17 @@ def make_inner_solver(
     `DynamicsTrajOptConfig(early_stop=False, unroll_tail=...)`.  Defaults to
     `forward_solver` if omitted (fine as long as that solver is itself built
     with `early_stop=False`).
+
+    `constraints_fn` (optional) `Callable[[ctx], tuple[AugmentedLagrangianTerm]]`
+    makes the forward solve *constrained*: each particle settles in a feasible
+    local optimum via an augmented-Lagrangian outer loop around `forward_solver`
+    (`use_sco` linearizes inequality residuals à la Schulman; `trust` is an
+    optional `TrustRegionConfig` for adaptive sizing; `n_outer_iters` /
+    `al_dual_scale` control the AL loop). The constraints must be
+    theta-INDEPENDENT. The implicit adjoint then linearizes the *augmented*
+    stationarity `grad_x[C + penalties] = 0` with the converged multipliers
+    frozen -- a single-gradient IFT, not the KKT system. `constraints_fn=None`
+    (default) is byte-identical to the unconstrained solver above.
     """
     if forward_solver is None:
         raise ValueError(
@@ -189,8 +210,86 @@ def make_inner_solver(
         n = H.shape[0]
         return H + lam * (jnp.trace(H) / n + 1.0) * jnp.eye(n, dtype=H.dtype)
 
+    # --- Constrained (augmented-Lagrangian) forward + augmented stationarity --
+    #
+    # When `constraints_fn(ctx) -> tuple[AugmentedLagrangianTerm]` is supplied,
+    # each particle settles in a *feasible* local optimum: the base cost
+    # C_theta is minimized subject to the (theta-INDEPENDENT) constraint terms
+    # via a dual-ascent AL outer loop (`_al_outer_loop`), optionally with SCO
+    # linearization / adaptive trust region.  The implicit adjoint then
+    # differentiates the stationarity of the AUGMENTED objective
+    #
+    #     grad_x [ C_theta(x) + sum_c penalty_c(x; lambda*, rho*) ] = 0
+    #
+    # with the converged multipliers (lambda*, rho*) frozen (stop_gradient) --
+    # a single-gradient IFT, NOT the full KKT system (no complementarity is
+    # differentiated).  Because the constraints carry no theta, the mixed term
+    # B = grad^2_{x,theta} is unchanged; only the curvature H picks up the
+    # penalty Hessian.  See the module docstring / `stationarity`.
+
+    def _aug_cost(x, theta, ctx, terms, duals, rhos):
+        c = cost(x, theta, ctx)
+        for term, d, rho in zip(terms, duals, rhos):
+            c = c + _al_penalty(term, term.residual_fn(x), d, rho)
+        return c
+
+    _grad_x_aug = jax.grad(_aug_cost, argnums=0)
+    _hess_x_aug = jax.hessian(_aug_cost, argnums=0)
+
     def _solve_one(x0, theta, ctx):
         return forward_solver(x0, lambda x: cost(x, theta, ctx))
+
+    def _solve_one_constrained(x0, theta, ctx):
+        """Constrained local solve -> (x*, duals*, rhos*).  `terms` is rebuilt
+        from `ctx` by the caller (constraints depend on scene, not on x)."""
+        terms = constraints_fn(ctx)
+        z, duals, rhos = _al_outer_loop(
+            x0,
+            lambda z0_, cf: forward_solver(z0_, cf),
+            terms,
+            lambda z, zk: cost(z, theta, ctx),
+            n_outer_iters=n_outer_iters,
+            dual_scale=al_dual_scale,
+            sco_linearize=use_sco,
+            trust=trust,
+            return_solve_multipliers=True,
+        )
+        return z, duals, rhos
+
+    def _solve_full(x0, theta, ctx):
+        """Multistart forward solve returning (x*, duals*, rhos*).  With
+        `constraints_fn=None`, duals/rhos are empty tuples and the selection is
+        the plain best-cost basin (byte-identical to the unconstrained `solve`).
+        The constrained path selects the basin by AUGMENTED cost, so an
+        infeasible-but-cheap basin does not win over a feasible one."""
+        terms_probe = None if constraints_fn is None else constraints_fn(ctx)
+
+        def one(s0):
+            if constraints_fn is None:
+                return _solve_one(s0, theta, ctx), (), ()
+            return _solve_one_constrained(s0, theta, ctx)
+
+        def sel_cost(x, duals, rhos):
+            if constraints_fn is None:
+                return cost(x, theta, ctx)
+            return _aug_cost(x, theta, ctx, terms_probe, duals, rhos)
+
+        if n_restarts <= 1:
+            starts = x0[None]
+        elif restart_seed_fn is not None:
+            starts = restart_seed_fn(x0, ctx, n_restarts)
+        else:
+            keys = jax.random.split(jax.random.key(0), n_restarts - 1)
+            starts = jnp.stack(
+                [x0] + [x0 + restart_jitter * jax.random.normal(k, x0.shape)
+                       for k in keys]
+            )
+
+        xs, duals, rhos = jax.vmap(one)(starts)
+        costs = jax.vmap(sel_cost)(xs, duals, rhos)
+        i = jnp.argmin(costs)
+        pick = lambda t: jax.tree.map(lambda a: a[i], t)
+        return xs[i], pick(duals), pick(rhos)
 
     def solve(x0, theta, ctx):
         """Forward solve; the best of `n_restarts` local solves when > 1.
@@ -216,7 +315,14 @@ def make_inner_solver(
         the other side of a bump/obstacle -- so the population that gets
         vmapped through `_solve_one` actually characterizes the field rather
         than resampling one basin n_restarts times.
+
+        With `constraints_fn` supplied the whole selection is delegated to
+        `_solve_full` (feasible basins, augmented-cost argmin); the code below is
+        the exact unconstrained path every existing caller still hits.
         """
+        if constraints_fn is not None:
+            x, _, _ = _solve_full(x0, theta, ctx)
+            return x
         if n_restarts <= 1:
             return _solve_one(x0, theta, ctx)
         if restart_seed_fn is not None:
@@ -240,29 +346,57 @@ def make_inner_solver(
         return unrolled_forward_solver(x0, lambda x: cost(x, theta, ctx))
 
     def stationarity(x0, theta, ctx):
-        """||grad_x C|| at the solution -- implicit diff assumes this is ~0."""
-        return jnp.linalg.norm(grad_x(solve(x0, theta, ctx), theta, ctx))
+        """Stationarity residual at the solution -- implicit diff assumes ~0.
+
+        Unconstrained: ``||grad_x C||``.  Constrained: ``||grad_x [C + AL
+        penalties]||`` at the converged multipliers -- the AUGMENTED
+        stationarity the constrained adjoint actually linearizes, so the
+        CONFOUND-4 screen checks the right residual (bare ``grad_x C`` is
+        nonzero at a constrained optimum and would false-alarm)."""
+        if constraints_fn is None:
+            return jnp.linalg.norm(grad_x(solve(x0, theta, ctx), theta, ctx))
+        x, duals, rhos = _solve_full(x0, theta, ctx)
+        terms = constraints_fn(ctx)
+        return jnp.linalg.norm(_grad_x_aug(x, theta, ctx, terms, duals, rhos))
 
     @jax.custom_vjp
     def solve_implicit(x0, theta, ctx):
         return solve(x0, theta, ctx)
 
     def _fwd(x0, theta, ctx):
-        xs = jax.lax.stop_gradient(solve(x0, theta, ctx))
-        return xs, (xs, theta, ctx)
+        if constraints_fn is None:
+            xs = jax.lax.stop_gradient(solve(x0, theta, ctx))
+            return xs, (xs, theta, ctx, None, None)
+        xs, duals, rhos = _solve_full(x0, theta, ctx)
+        xs = jax.lax.stop_gradient(xs)
+        duals = jax.lax.stop_gradient(duals)
+        rhos = jax.lax.stop_gradient(rhos)
+        return xs, (xs, theta, ctx, duals, rhos)
 
     def _bwd(res, g_out):
-        xs, theta, ctx = res
-        H = hess_x(xs, theta, ctx)
+        xs, theta, ctx, duals, rhos = res
+        if duals is None:
+            # Unconstrained: differentiate stationarity of the bare cost.
+            H = hess_x(xs, theta, ctx)
+            gfn = lambda th: grad_x(xs, th, ctx)
+        else:
+            # Constrained: differentiate stationarity of the AUGMENTED
+            # objective with the multipliers frozen (single-gradient IFT, not
+            # KKT).  The penalty carries no theta, so its theta-VJP is zero and
+            # B = grad^2_{x,theta} is unchanged; only H gains the penalty
+            # Hessian.
+            terms = constraints_fn(ctx)
+            H = _hess_x_aug(xs, theta, ctx, terms, duals, rhos)
+            gfn = lambda th: _grad_x_aug(xs, th, ctx, terms, duals, rhos)
         # Ridge only for numerical invertibility.  Reusing the LM damping here
         # would be a bug: that damping exists to make the *forward* step safe,
         # and it is many orders of magnitude larger than what conditioning
         # needs, so it biases H^-1 and corrupts the adjoint.
         H = _damped(H, adjoint_ridge)
         # dx*/dtheta = -H^-1 B, so the cotangent is -B^T H^-T g_out, and B^T u
-        # is one VJP of grad_x C with respect to theta.
+        # is one VJP of grad_x (C or augmented) with respect to theta.
         u = jnp.linalg.solve(H.T, g_out)
-        _, vjp_theta = jax.vjp(lambda th: grad_x(xs, th, ctx), theta)
+        _, vjp_theta = jax.vjp(gfn, theta)
         (g_theta,) = vjp_theta(u)
         return jnp.zeros_like(xs), -g_theta, jax.tree.map(jnp.zeros_like, ctx)
 

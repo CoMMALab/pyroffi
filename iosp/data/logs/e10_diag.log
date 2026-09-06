@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "/home/sadmin/Work/pyroffi/scratch/e10_diag.py", line 12, in <module>
-    from iosp import config
-ModuleNotFoundError: No module named 'iosp'
-ERROR conda.cli.main_run:execute(142): `conda run python scratch/e10_diag.py` failed. (See above for error)

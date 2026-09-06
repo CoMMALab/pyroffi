@@ -97,18 +97,37 @@ def run_implicit(built, u0):
 def run_fd(built, u0):
     print("\n=== Finite differences ===", flush=True)
     K = built["K"]
-    loss_fn = lambda u: built["gf"](u)[0]
+    loss_fn = built["loss"]  # value-only: FD must not build the adjoint Hessian
 
     fd_gf = outer_opt.fd_grad_fn(loss_fn, FD_EPS, batched=False)
 
     t_compile_start = time.perf_counter()
-    _ = fd_gf(u0)
+    _ = fd_gf(u0)  # warm the single value-only loss compile (then cached)
     t_compile = time.perf_counter() - t_compile_start
     print(f"  compile: {t_compile:.1f}s", flush=True)
 
+    # EAGER Adam outer loop -- NOT `outer_opt.adam`, whose `lax.scan` inlines all
+    # K+1 forward solves into one scan body: that compile alone consumed >90 GB
+    # host RAM and OOM'd.  Run eagerly instead: `fd_gf` executes its K+1 probes
+    # one at a time (each a call into the already-compiled value-only loss), so
+    # only one forward solve is ever live.  The AdamW math and step count are
+    # identical to `outer_opt.adam`, so the fitted u is unchanged.
+    import optax
+    opt = optax.adamw(LR, weight_decay=0.0)
+    z = u0
+    state = opt.init(z)
+    best_z, best_val = z, float("inf")
+    trace = []
     t0 = time.perf_counter()
-    u_hat, trace = outer_opt.adam(fd_gf, u0, lr=LR, n_steps=N_OUTER_STEPS,
-                                  solves_per_step=K + 1)
+    for step in range(N_OUTER_STEPS):
+        val, g = fd_gf(z)
+        val = float(val)
+        if val < best_val:
+            best_val, best_z = val, z
+        updates, state = opt.update(g, state, z)
+        z = optax.apply_updates(z, updates)
+        trace.append((int((step + 1) * (K + 1)), val))
+    u_hat = best_z
     t_infer = time.perf_counter() - t0
     print(f"  fit: {t_infer:.1f}s  loss {trace[0][1]:.4f} → {trace[-1][1]:.4f}", flush=True)
 
@@ -124,7 +143,7 @@ def run_fd(built, u0):
 
 def run_cmaes(built, u0):
     print("\n=== CMA-ES ===", flush=True)
-    loss_fn = jax.jit(lambda u: built["gf"](u)[0])
+    loss_fn = built["loss"]  # value-only: no gradient/Hessian needed
 
     t_compile_start = time.perf_counter()
     _ = loss_fn(u0)
@@ -132,8 +151,11 @@ def run_cmaes(built, u0):
     print(f"  compile: {t_compile:.1f}s", flush=True)
 
     t0 = time.perf_counter()
+    # Pass the loss straight through: cma_es evaluates it inside `jax.lax.map`,
+    # which TRACES it, so a `float(...)` wrapper raises ConcretizationTypeError.
+    # `built["loss"]` already returns a jax scalar.
     u_hat, trace = outer_opt.cma_es(
-        lambda u: float(loss_fn(u)),
+        loss_fn,
         np.asarray(u0),
         sigma0=0.5,
         budget_solves=CMA_BUDGET_SOLVES,

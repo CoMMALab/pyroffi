@@ -28,5 +28,6 @@ runs:
 env:
   CUDA_VISIBLE_DEVICES: auto
   XLA_PYTHON_CLIENT_PREALLOCATE: "false"
-  XLA_FLAGS: "--xla_disable_hlo_passes=fusion"
+  # XLA_FLAGS: "--xla_disable_hlo_passes=fusion"  # disabling fusion caused the
+  # jit_scan compile blowup (minutes/OOM) after the f2a9ba7 jaxify; fusion ON.
   PYTHONUNBUFFERED: "1"

@@ -36,6 +36,8 @@ def __getattr__(name: str):
         "capture_attachments",
         "capture_grasp_offsets",
         "object_pose_world",
+        "object_dynamics_residual",
+        "dynamics_feasibility_residual",
     ):
         from . import _contact
 

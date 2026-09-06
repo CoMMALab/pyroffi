@@ -1,0 +1,161 @@
+% Experiments section — IOC + IOSP
+% Assumes: graphicx, subfigure/subcaption, booktabs, amsmath loaded in main doc
+% Image paths assume images/ contains all figures
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate our method in two settings. \textbf{IOC} (\S\ref{sec:exp_ioc}) recovers cost weights from demonstrations on single trajectory-optimization segments---first on 2D benchmarks with known ground-truth costs, then on a 7-DOF manipulator.
+\textbf{IOSP} (\S\ref{sec:exp_iosp}) extends recovery to composed task skeletons spanning IK through multi-segment manipulation, on synthetic domains and on human teleoperation.
+
+All experiments use JAX with double precision (\texttt{JAX\_ENABLE\_X64=1}) and implicit differentiation through the trajectory-optimization solution via the implicit function theorem. The outer loop fits cost weights~$\theta$ by minimizing the rollout error of $x^*(\theta)$ against demonstrations, using Adam with analytic gradients from the implicit adjoint. We compare against finite differences (FD), CMA-ES, unrolled differentiation, and Inverse KKT where applicable.
+
+%% ===================================================================
+\subsection{IOC: single-segment inverse optimal control}
+\label{sec:exp_ioc}
+
+\subsubsection{Scaling with cost dimension}
+\label{sec:exp_scaling}
+
+We measure how reconstruction cost and compute scale with the number of cost features~$K$ on the 7-DOF Panda.
+As $K$ grows, the sensitivity Gram $G = J^\top J$ becomes increasingly rank-deficient: the identifiable subspace has dimension~$r \leq K$, and directions in the null space are unrecoverable from demonstration data alone.
+We report cost regret (the suboptimality of the recovered cost under the true weights) rather than raw parameter error, since weight error along low-eigenvalue directions does not correspond to behavioural error.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/fig1_scaling.png}
+    \caption{Scaling of implicit-adjoint IOC with cost dimension~$K$ on the 7-DOF Panda. Left: reconstruction error (cost regret) as a function of~$K$. Right: wall-clock time. The implicit adjoint scales gracefully; FD and CMA-ES both scale with the number of forward solves.}
+    \label{fig:scaling_cost_parameters}
+\end{figure}
+
+\subsubsection{Cost field reconstruction}
+\label{sec:exp_field}
+
+To visualise recovery quality beyond scalar metrics, we use a 2D benchmark with a known cost field defined by a mixture of radial basis functions.
+The solver observes trajectories through this field and attempts to reconstruct the cost landscape.
+We test two regimes: a wide (unimodal) field and a narrow (multimodal) field, each under increasing demonstration noise~$\sigma$.
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/fig3_recovery.png}
+        \label{fig:fig3a}
+    \end{subfigure}
+    \vspace{0.5em}
+    \begin{subfigure}[t]{\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/fig3b_recovery_highnoise.png}
+        \label{fig:fig3b}
+    \end{subfigure}
+    \caption{Cost field reconstruction under the implicit adjoint. Top: low noise ($\sigma = 0.01$). Bottom: high noise ($\sigma = 0.05$). The recovered cost field closely matches the ground truth in both regimes, degrading gracefully with noise.}
+    \label{fig:cost_field_reconstruction}
+\end{figure*}
+
+\subsubsection{Noise robustness on the 7-DOF arm}
+\label{sec:exp_noise_robot}
+
+We ablate noise sensitivity on the Panda by adding zero-mean Gaussian noise to the demonstrated trajectories and measuring reconstruction quality as a function of~$\sigma$.
+The implicit adjoint degrades smoothly; at moderate noise levels it still recovers cost weights that produce trajectories within millimetres of the demonstration.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/fig4_noise_robot.png}
+    \caption{Reconstruction error on the 7-DOF Panda under increasing demonstration noise~$\sigma$. The implicit adjoint degrades gracefully; CMA-ES is competitive at low noise but more variable.}
+    \label{fig:noise_ablation}
+\end{figure}
+
+\subsubsection{KKT seeding of the implicit fit}
+\label{sec:exp_kkt_seed}
+
+The Inverse KKT estimator solves $B(c)\,\theta = 0$ at the demonstration to obtain a closed-form weight estimate.
+While this estimate is inconsistent when the demonstration is noisy or the problem has inequality constraints, it provides a strong initialisation for the implicit-adjoint fit.
+We compare random initialisation against KKT-seeded initialisation across both field regimes and noise levels.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/fig5_kkt_seed_ablation.png}
+    \caption{KKT seeding of the implicit-adjoint fit. At low noise the KKT seed provides orders-of-magnitude improvement; at higher noise ($\sigma \geq 0.02$) with more demonstrations ($R=4$), the benefit diminishes as the implicit fit converges regardless.}
+    \label{fig:kkt_seed}
+\end{figure}
+
+%% ===================================================================
+\subsection{IOSP: inverse optimal control on composed task skeletons}
+\label{sec:exp_iosp}
+
+Single-segment IOC assumes the planner solves one optimisation problem. Real manipulation tasks are composed: an IK solve selects a grasp configuration, then chained trajectory-optimisation segments (approach, grasp, transport, place) execute the task.
+IOSP inverts this entire skeleton by differentiating through the composed forward map---IK through all segments---using the same implicit adjoint, with literal (undetached) data flow between stages.
+
+\subsubsection{Identifiability under composition}
+\label{sec:exp_identifiability}
+
+When cost features are shared across segments, the sensitivity Gram of the composed problem can be rank-deficient even when each segment's Gram is full-rank.
+We decompose recovery error into its identifiable and null-space components using the eigendecomposition of the composed Gram.
+This analysis reveals that apparent recovery failures are often projections onto unidentifiable directions rather than optimisation failures.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/fig_eigenspectrum.png}
+    \caption{Eigenspectrum of the composed sensitivity Gram on the pick-and-place skeleton. The sharp spectral drop separates identifiable directions (left of the gap) from the null space. Recovery error concentrates almost entirely in the null component.}
+    \label{fig:eigenspectrum}
+\end{figure}
+
+\subsubsection{Multistart robustness}
+\label{sec:exp_multistart}
+
+The composed forward map is non-convex, with basins induced by IK branch selection.
+We run 9 candidates (3 IK branches $\times$ 3 cost initialisations) and select the winner on training loss.
+On a held-out scene at $2\times$ displacement, the selected candidate generalises: training-loss selection matches held-out selection on the majority of seeds, with regret below $0.2$~mm when it does not.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/fig2_multistart.png}
+    \caption{Multistart robustness on the composed pick-and-place task. Each panel shows candidate trajectories at the final outer step; the selected winner (training loss) closely tracks the demonstration on both the fit and held-out scenes. Branch dominates start in determining the basin.}
+    \label{fig:multistart}
+\end{figure}
+
+\subsubsection{Domain evaluation}
+\label{sec:exp_domains}
+
+We evaluate IOSP on three synthetic manipulation domains of increasing complexity: pick-and-place, tetris-style packing, and block stacking.
+Each domain uses a known ground-truth~$\theta^*$; demonstrations are rollouts of the composed planner at~$\theta^*$.
+We report held-out end-effector RMSE against a uniform-weight baseline and an oracle (rollout at the true weights), as well as normalised cost regret and context-projected parameter error.
+
+\input{tables/table_domains}
+
+\subsubsection{Human teleoperation}
+\label{sec:exp_teleop}
+
+We evaluate IOSP on 10 teleoperated pick-and-place episodes recorded on an FR3 through a GELLO leader.
+No ground-truth~$\theta^*$ exists; the claim is purely behavioural---does the fitted planner reproduce held-out episodes?
+We fit on 8 episodes and evaluate on the remaining 2, using 12 candidates (4 IK branches $\times$ 3 cost starts).
+The IK grasp and release orientations are anchored to each episode's demonstrated configuration; without this anchoring, orientation mismatch dominates the residual and masks the cost recovery signal.
+
+We compare implicit differentiation against finite differences, CMA-ES, and unrolled differentiation.
+
+\input{tables/table_e10_methods}
+
+\begin{table}[t]
+\centering
+\small
+\caption{IOSP evaluation on human teleoperation: per-episode reconstruction quality. 8~fit / 2~held-out split, 12 candidates, winner selected on training loss.}
+\label{tab:teleop_perepisode}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{Fit episodes} & \multicolumn{2}{c}{Held-out episodes} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Metric & Mean & Std & Mean & Std \\
+\midrule
+Joint RMSE (rad) & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+EE RMSE (m)      & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    % TODO: add teleop reconstruction figure when available
+    % \includegraphics[width=\linewidth]{images/fig_teleop_reconstruction.png}
+    \caption{Teleop reconstruction: fitted planner rollout (blue) vs.\ demonstrated trajectory (black) on a held-out episode. \texttt{[placeholder]}}
+    \label{fig:teleop_reconstruction}
+\end{figure}

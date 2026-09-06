@@ -54,7 +54,63 @@ from ioc.bench2d.run import build_solver
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
 FIGS = os.path.join(HERE, "figures")
+FIGDATA = os.path.join(DATA, "figdata")
 ROOT = os.path.dirname(HERE)
+
+
+# ---------------------------------------------------------------------------
+# Figure-data persistence
+#
+# Several figures below build their environments and *solve* their
+# demonstrations/fits inline rather than reading collected JSON. That coupling
+# meant an expensive multi-method fit only ever lived inside a matplotlib
+# process: a plotting bug, a font error, or an OOM lost the numbers. Each such
+# figure is now split into a `_<name>_compute()` that returns a plain
+# dict of numpy arrays and a `_<name>_render(data)` that draws from it. The
+# public `fig_<name>` computes (unless a cached file exists and recompute is
+# off), writes the dict to `data/figdata/<name>.npz`, then renders *from the
+# on-disk file* -- so the persisted data is always exactly what the panel
+# shows, and re-rendering never needs the solver.
+# ---------------------------------------------------------------------------
+
+
+def _figdata_path(name):
+    return os.path.join(FIGDATA, f"{name}.npz")
+
+
+def save_figdata(name, data):
+    """Persist an arbitrary dict of numpy arrays / nested dicts for a figure."""
+    os.makedirs(FIGDATA, exist_ok=True)
+    np.savez(_figdata_path(name), payload=np.array(data, dtype=object))
+    print(f"  [figdata] wrote data/figdata/{name}.npz")
+
+
+def load_figdata(name):
+    p = _figdata_path(name)
+    if not os.path.exists(p):
+        return None
+    return np.load(p, allow_pickle=True)["payload"].item()
+
+
+def _cached(name, compute, recompute):
+    """Ensure `data/figdata/<name>.npz` is current, then return its contents.
+
+    Rendering always reads back from disk so the persisted file is verified to
+    round-trip and is guaranteed identical to what the figure draws.
+    """
+    if recompute or load_figdata(name) is None:
+        save_figdata(name, compute())
+    return load_figdata(name)
+
+
+class _FieldCtx:
+    """Minimal stand-in for a `bench2d` context exposing just what the field
+    renderers (`_field_grid`, `_draw_field_background`) read, so a saved
+    (centers, widths) pair can be drawn without rebuilding a full context."""
+
+    def __init__(self, centers, widths):
+        self.centers = np.asarray(centers)
+        self.widths = np.asarray(widths)
 
 # --- T-RO page geometry ------------------------------------------------------
 COL1, COL2 = 3.5, 7.16  # inches
@@ -374,24 +430,63 @@ def _plate(ax, demos, n_show, lw=1.15):
         ax.plot(*p[-1], marker="*", ms=5.4, color=DEMO_C, zorder=4)
 
 
-def fig_environments():
+def _environments_compute():
+    """Solve the three benchmark plates' demonstrations and return, per panel,
+    the scene geometry and demonstrated trajectories."""
+    T, M = 30, 4
+
+    # (a) racing circuit: weights chosen so the boundary binds and the line has
+    # to compromise (a near-zero boundary weight lets demos cut the infield).
+    racing = _make_env("racing", 1, M, T, 3, 0.45,
+                       theta=[0.30, 0.40, 0.15, 0.15])  # time, boundary, smooth, curv
+
+    # (b) cost field: hand-placed layout (see rationale in the render).
+    _field_centers = [
+        (0.0, 0.0), (0.2, 0.1),
+        (-2.3, 1.75), (2.3, 1.75), (-2.3, -1.75), (2.3, -1.75),
+    ]
+    _field_widths = [0.4, 0.35, 0.4, 0.4, 0.4, 0.4]
+    _field_pairs = [
+        ((-2.2, 0.9), (2.2, 0.9)),
+        ((-2.2, 0.6), (2.2, 1.1)),
+        ((-2.2, -0.9), (2.2, -0.9)),
+        ((-2.2, -0.6), (2.2, -1.1)),
+    ]
+    th_field = [0.16, 0.10, 0.30, 0.10, 0.085, 0.085, 0.085, 0.085]
+    field = _make_env("field", 6, M, T, 0, 0.4, theta=th_field,
+                      bump_layout=(_field_centers, _field_widths),
+                      demo_pairs=_field_pairs)
+    fc0 = jax.tree.map(lambda x: x[0], field["ctxs"])
+
+    # (c) car / unicycle: one shared slalom, several start/goal pairs.
+    uni = _make_env("unicycle", 1, M, T, 2, 0.45,
+                    theta=[0.20, 0.15, 0.10, 0.35, 0.20], n_obstacles=3,
+                    shared_obstacle=[(-1.05, 0.22, 0.42), (0.0, -0.26, 0.44),
+                                     (1.05, 0.22, 0.42)])
+    return dict(
+        T=T, M=M,
+        racing_cfg=racing["cfg"],
+        racing_demos=np.asarray(racing["demos"]),
+        field_centers=np.asarray(fc0.centers), field_widths=np.asarray(fc0.widths),
+        field_theta=np.asarray(field["theta"]), field_demos=np.asarray(field["demos"]),
+        uni_obstacles=np.asarray(uni["ctxs"].obstacles[0]),
+        uni_demos=np.asarray(uni["demos"]),
+    )
+
+
+def _environments_render(data):
     """Environment plates in the style of Levine & Koltun (2012, Fig. 3-5):
     the scene geometry with demonstrations drawn on it, one context per panel."""
-    T, M = 30, 4
+    M = int(data["M"])
     fig, axes = plt.subplots(1, 3, figsize=(COL2, 2.25),
                              gridspec_kw=dict(width_ratios=[1.0, 1.25, 1.25]))
 
     # (a) racing circuit ------------------------------------------------------
-    # Weights chosen so the boundary binds and the line has to compromise: a
-    # near-zero boundary weight would let the demonstrations cut the infield,
-    # which is not what the benchmark poses.
-    env = _make_env("racing", 1, M, T, 3, 0.45,
-                    theta=[0.30, 0.40, 0.15, 0.15])  # time, boundary, smooth, curv
     ax = axes[0]
-    rmax = _draw_circuit(ax, env["cfg"])
+    rmax = _draw_circuit(ax, data["racing_cfg"])
     # Three stints, not four: each spans most of a lap, so a fourth adds
     # overlap without adding information.
-    _plate(ax, env["demos"], 3)
+    _plate(ax, data["racing_demos"], 3)
     ax.set_xlim(-rmax - 0.12, rmax + 0.12)
     ax.set_ylim(-rmax - 0.12, rmax + 0.12)
 
@@ -411,27 +506,12 @@ def fig_environments():
     #     horizontal centre, with a genuine near-zero-cost gap on each side
     #     (bump width 0.4 at a lane offset of ~1.0 puts exposure at <1% of
     #     peak) rather than a path grazing the cost hill's edge.
-    _field_centers = [
-        (0.0, 0.0), (0.2, 0.1),
-        (-2.3, 1.75), (2.3, 1.75), (-2.3, -1.75), (2.3, -1.75),
-    ]
-    _field_widths = [0.4, 0.35, 0.4, 0.4, 0.4, 0.4]
-    _field_pairs = [
-        ((-2.2, 0.9), (2.2, 0.9)),
-        ((-2.2, 0.6), (2.2, 1.1)),
-        ((-2.2, -0.9), (2.2, -0.9)),
-        ((-2.2, -0.6), (2.2, -1.1)),
-    ]
-    th_field = [0.16, 0.10, 0.30, 0.10, 0.085, 0.085, 0.085, 0.085]
-    env = _make_env("field", 6, M, T, 0, 0.4, theta=th_field,
-                    bump_layout=(_field_centers, _field_widths),
-                    demo_pairs=_field_pairs)
     ax = axes[1]
-    c0 = jax.tree.map(lambda x: x[0], env["ctxs"])
-    im = _draw_field_background(ax, c0, env["theta"])
+    c0 = _FieldCtx(data["field_centers"], data["field_widths"])
+    im = _draw_field_background(ax, c0, data["field_theta"])
     ax.scatter(np.asarray(c0.centers)[:, 0], np.asarray(c0.centers)[:, 1],
                s=4, c="0.25", zorder=2, linewidths=0)
-    _plate(ax, env["demos"], M)
+    _plate(ax, data["field_demos"], M)
     ax.set_xlim(-2.5, 2.5)
     ax.set_ylim(-1.9, 1.9)
     cb = fig.colorbar(im, ax=ax, fraction=0.036, pad=0.02)
@@ -442,16 +522,12 @@ def fig_environments():
     # (c) car / unicycle ------------------------------------------------------
     # One shared slalom, several start/goal pairs: the plate then reads as a
     # single environment rather than four overlaid ones.
-    env = _make_env("unicycle", 1, M, T, 2, 0.45,
-                    theta=[0.20, 0.15, 0.10, 0.35, 0.20], n_obstacles=3,
-                    shared_obstacle=[(-1.05, 0.22, 0.42), (0.0, -0.26, 0.44),
-                                     (1.05, 0.22, 0.42)])
     ax = axes[2]
-    for ox, oy, orr in np.asarray(env["ctxs"].obstacles[0]):
+    for ox, oy, orr in np.asarray(data["uni_obstacles"]):
         ax.add_patch(Circle((ox, oy), orr, facecolor=OBS_C, edgecolor="0.5",
                             lw=0.5, zorder=1))
     for i in range(M):
-        s_ = env["demos"][i]
+        s_ = data["uni_demos"][i]
         p, phi = s_[:, :2], s_[:, 2]
         ax.plot(p[:, 0], p[:, 1], color=DEMO_C, lw=1.15, alpha=0.95, zorder=3,
                 solid_capstyle="round", path_effects=HALO)
@@ -487,6 +563,11 @@ def fig_environments():
     finish(fig, "fig2_environments")
 
 
+def fig_environments(recompute=True):
+    _environments_render(_cached("fig2_environments", _environments_compute,
+                                 recompute))
+
+
 # ---------------------------------------------------------------------------
 # Fig. 2b - IOC ambiguity: one start/goal, several cost-explained paths
 # ---------------------------------------------------------------------------
@@ -504,20 +585,26 @@ _AMBIG_STYLE = {
 }
 
 
-def fig_ambiguity():
-    """One demonstration scene, several plausible costs.
-
-    The identifiability problem this study addresses is not abstract: the same
-    start, goal and obstacles admit distinct locally-optimal paths depending on
-    the (unknown) weighting between speed, turn, steering-smoothness, obstacle
-    clearance and the nonholonomic residual. Each curve here is a real solve of
-    `bench2d`'s unicycle benchmark under one hand-chosen theta -- not an
-    illustrative sketch -- sharing the scene from `fig_environments`' car panel
-    so the two figures are directly comparable.
-    """
+def _ambiguity_compute():
+    """Solve `bench2d`'s unicycle under each hand-chosen theta; return the
+    demonstrated states (x, y, phi) per cost, plus the shared scene geometry."""
     T, M = 30, 1
     start_goal = [((-2.3, 0.0, 0.0), (2.3, 0.0, 0.0))]
     obstacles = [(-1.05, 0.22, 0.42), (0.0, -0.26, 0.44), (1.05, 0.22, 0.42)]
+    paths = {}
+    for key, (theta, desc) in _AMBIG_THETAS.items():
+        env = _make_env("unicycle", 1, M, T, 2, 0.45, theta=theta,
+                        n_obstacles=3, shared_obstacle=obstacles,
+                        demo_pairs=start_goal)
+        paths[key] = np.asarray(env["demos"][0])  # (T, 3): x, y, phi
+    return dict(paths=paths, obstacles=np.asarray(obstacles, float),
+                start_goal=np.asarray([(*s, *g) for s, g in start_goal], float))
+
+
+def _ambiguity_render(data):
+    obstacles = data["obstacles"]
+    start_goal = [(tuple(r[:3]), tuple(r[3:])) for r in data["start_goal"]]
+    paths = data["paths"]
 
     fig, ax = plt.subplots(figsize=(COL1, COL1 * 0.78))
     for ox, oy, orr in obstacles:
@@ -525,11 +612,9 @@ def fig_ambiguity():
                             lw=0.5, zorder=1))
 
     for key, (theta, desc) in _AMBIG_THETAS.items():
-        env = _make_env("unicycle", 1, M, T, 2, 0.45, theta=theta,
-                        n_obstacles=3, shared_obstacle=obstacles,
-                        demo_pairs=start_goal)
         st = _AMBIG_STYLE[key]
-        p, phi = env["demos"][0][:, :2], env["demos"][0][:, 2]
+        s_ = paths[key]
+        p, phi = s_[:, :2], s_[:, 2]
         ax.plot(p[:, 0], p[:, 1], color=st["color"], ls=st["ls"], lw=1.5,
                 alpha=0.95, zorder=3, solid_capstyle="round", path_effects=HALO,
                 label=f"{key} ({desc})")
@@ -557,6 +642,20 @@ def fig_ambiguity():
                 fontsize=9, y=1.02, fontweight="bold")
     fig.tight_layout(rect=(0, 0.08, 1, 0.93))
     finish(fig, "fig2b_ambiguity")
+
+
+def fig_ambiguity(recompute=True):
+    """One demonstration scene, several plausible costs.
+
+    The identifiability problem this study addresses is not abstract: the same
+    start, goal and obstacles admit distinct locally-optimal paths depending on
+    the (unknown) weighting between speed, turn, steering-smoothness, obstacle
+    clearance and the nonholonomic residual. Each curve here is a real solve of
+    `bench2d`'s unicycle benchmark under one hand-chosen theta -- not an
+    illustrative sketch -- sharing the scene from `fig_environments`' car panel
+    so the two figures are directly comparable.
+    """
+    _ambiguity_render(_cached("fig2b_ambiguity", _ambiguity_compute, recompute))
 
 
 # ---------------------------------------------------------------------------
@@ -596,33 +695,12 @@ def _tag_inside(ax, text):
                       alpha=0.82))
 
 
-def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
-                 name="fig3_recovery", n_show=4, n_restarts=7, fd_eps=1e-4):
-    """Recovered cost field, for the implicit method and both zero-solve baselines.
-
-    Three things this figure has to get right, none of which are cosmetic:
-
-    * **Name the method.**  A panel captioned only "recovered" leaves the reader
-      guessing which of six methods produced it.  Every recovery panel is
-      labelled, and the analytic baselines are shown beside ours on identical
-      data so the comparison is visible rather than asserted.
-    * **One colour scale.**  The panels share a single `vmax` and one colorbar.
-      Per-panel normalization (what this figure used to do) rescales a recovered
-      field to fill the same ramp as the truth, so a uniformly-too-weak fit is
-      drawn identically to a correct one -- it hides exactly the error the
-      figure exists to show.
-    * **The noisy regime.**  Demonstrations carry the same sigma=0.02 noise as
-      every dataset in the study.  On *noiseless* demonstrations Inverse KKT is
-      exact by construction -- it fits grad_x J = 0, which holds exactly at an
-      unperturbed optimum -- so it reaches L1 = 0.00 and the panel says nothing
-      about the regime the paper's claims live in.  This figure used to be
-      built on noiseless demonstrations.
-    * **An identifiable target.**  The bump layout is the scattered,
-      varied-width one; on the old equal-width grid at this bump width the
-      feature Gram was numerically rank-deficient, so *no* method could recover
-      theta and the panel was measuring the benchmark's degeneracy rather than
-      the method's accuracy.  lambda_2 of the Gram is reported with the figure.
-    """
+def _recovery_compute(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
+                      name="fig3_recovery", n_show=4, n_restarts=7, fd_eps=1e-4):
+    """Fit every method on the multimodal `field` benchmark and return the
+    recovered weight vectors, the recovered trajectories for the shown demos,
+    the demonstrations, the field geometry, and the Gram spectrum -- everything
+    `_recovery_render` needs, with no solver in the loop."""
     T, M = 30, 8
     # n_restarts>1 with topo_restarts=True replaces i.i.d. jitter multistart
     # with structured lateral-detour seeds (see `pb.make_topo_seed_fn`): on
@@ -663,15 +741,6 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     x0, d, K = env["x0"], env["d"], env["K"]
     inner = env["inner"]
 
-    def loss(z):
-        t = jax.nn.softmax(z)
-
-        def one(c, dm, xx):
-            p = b2d.unpack(si(xx, t, c), c, T, d)[:, :2]
-            return jnp.mean(jnp.sum((p - dm[:, :2]) ** 2, axis=-1))
-
-        return jnp.mean(jax.vmap(one)(ctxs, demos, x0))
-
     def loss_of(solver):
         def loss(z):
             t = jax.nn.softmax(z)
@@ -704,10 +773,11 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     z_cmaes, _ = outer_opt.cma_es(li, jnp.zeros(K), budget_solves=budget,
                                   solves_per_eval=per_solve, seed=0, trace_best=True)
 
-    # The two zero-solve baselines, fitted on exactly the same demonstrations.
+    # The zero-solve baselines, fitted on exactly the same demonstrations.
     z_kkt = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=600)
     z_cioc = analytic.cioc_fit(inner.grad_x, inner.gn_system, ctxs, demos, K,
                                n_steps=600)
+    z_eiv = analytic.eiv_fit(inner.grad_x, ctxs, demos, K)
     _, G = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=1, lr=0.0,
                             return_gram=True)
     ev = np.linalg.eigvalsh(np.asarray(G) / np.trace(np.asarray(G)) * K)
@@ -717,30 +787,82 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
             ("fd", jax.nn.softmax(z_fd)),
             ("cmaes", jax.nn.softmax(z_cmaes)),
             ("kkt", jax.nn.softmax(z_kkt)),
-            ("cioc", jax.nn.softmax(z_cioc))]
+            ("cioc", jax.nn.softmax(z_cioc)),
+            ("eiv", jax.nn.softmax(z_eiv))]
     th_hat = fits[0][1]
     xhat = jax.vmap(lambda x, c: si(x, th_hat, c))(x0, ctxs)
 
     c0 = jax.tree.map(lambda x: x[0], ctxs)
-    # Shared ceiling across every field panel, including the recovered ones.
-    vmax = max(_field_grid(c0, th)[2].max()
-               for th in [env["theta"]] + [t for _, t in fits])
-
     errs = {m: float(jnp.sum(jnp.abs(th - env["theta"]))) for m, th in fits}
     best = min(errs, key=errs.get)
 
-    fig = plt.figure(figsize=(COL2, 2.15))
-    # 7 field panels (ground truth + all 6 baseline methods); the second-to-
-    # last column is an empty spacer that reserves room for the colorbar's
-    # tick labels, without which they are overdrawn by the trajectory panel.
-    n_panels = len(panels := [(env["theta"], "ground truth", None, False)] + [
-        (th, STYLE[m]["label"], errs[m], m == best) for m, th in fits])
-    gs = fig.add_gridspec(1, n_panels + 2,
-                          width_ratios=[1] * n_panels + [0.34, 1], wspace=0.10)
-    axes = [fig.add_subplot(gs[0, i]) for i in range(n_panels)]
-    axt = fig.add_subplot(gs[0, n_panels + 1])
+    show = list(range(min(n_show, M)))
+    paths = [np.asarray(b2d.unpack(xhat[i], jax.tree.map(lambda x: x[i], ctxs),
+                                   T, d))[:, :2] for i in show]
 
-    for ax, (th, lab, err, is_best) in zip(axes, panels):
+    print(f"  [{name}] sigma={demo_noise:g}  "
+          f"Gram lambda_2/lambda_K = {ev[1] / ev[-1]:.2e}  "
+          + "  ".join(f"{m}_L1={errs[m]:.3f}" for m, _ in fits)
+          + f"  best={best}")
+    return dict(
+        name=name, demo_noise=demo_noise, n_show=n_show, M=M,
+        centers=np.asarray(c0.centers), widths=np.asarray(c0.widths),
+        theta_star=np.asarray(env["theta"]),
+        fit_methods=[m for m, _ in fits],
+        fit_thetas=np.asarray([np.asarray(th) for _, th in fits]),
+        errs={m: errs[m] for m in errs}, best=best,
+        demos=np.asarray(demos), paths=np.asarray(paths),
+        gram_ev=np.asarray(ev),
+    )
+
+
+def _recovery_render(data):
+    """Recovered cost field, for the implicit method and both zero-solve baselines.
+
+    Three things this figure has to get right, none of which are cosmetic:
+
+    * **Name the method.**  A panel captioned only "recovered" leaves the reader
+      guessing which of six methods produced it.  Every recovery panel is
+      labelled, and the analytic baselines are shown beside ours on identical
+      data so the comparison is visible rather than asserted.
+    * **One colour scale.**  The panels share a single `vmax` and one colorbar.
+      Per-panel normalization rescales a recovered field to fill the same ramp
+      as the truth, so a uniformly-too-weak fit is drawn identically to a
+      correct one -- it hides exactly the error the figure exists to show.
+    * **The noisy regime.**  Demonstrations carry the same sigma noise as every
+      dataset in the study; on noiseless demonstrations Inverse KKT is exact by
+      construction and the panel says nothing about the regime the paper's
+      claims live in.
+    """
+    name = str(data["name"])
+    demo_noise = float(data["demo_noise"])
+    n_show, M = int(data["n_show"]), int(data["M"])
+    c0 = _FieldCtx(data["centers"], data["widths"])
+    theta_star = np.asarray(data["theta_star"])
+    d = 2  # only the (x, y) columns of the demonstrations/paths are drawn
+    fits = list(zip([str(m) for m in data["fit_methods"]],
+                    [np.asarray(t) for t in data["fit_thetas"]]))
+    errs, best = data["errs"], str(data["best"])
+    demos, paths = np.asarray(data["demos"]), [np.asarray(p) for p in data["paths"]]
+
+    # Shared ceiling across every field panel, including the recovered ones.
+    vmax = max(_field_grid(c0, th)[2].max()
+               for th in [theta_star] + [t for _, t in fits])
+
+    panels = [(theta_star, "ground truth", None, False)] + [
+        (th, STYLE[m]["label"], errs[m], m == best) for m, th in fits]
+    n_panels = len(panels)  # 8: ground truth + 7 methods
+    n_cols, n_rows = 4, 2
+
+    fig = plt.figure(figsize=(COL2, 3.4))
+    gs = fig.add_gridspec(n_rows, n_cols + 2,
+                          width_ratios=[1] * n_cols + [0.05, 1.4],
+                          hspace=0.45, wspace=0.08)
+    axes = []
+    for idx, (th, lab, err, is_best) in enumerate(panels):
+        r, c = divmod(idx, n_cols)
+        ax = fig.add_subplot(gs[r, c])
+        axes.append(ax)
         im = _draw_field_background(ax, c0, th, vmax=vmax)
         ax.scatter(np.asarray(c0.centers)[:, 0], np.asarray(c0.centers)[:, 1],
                    s=5, c="k", zorder=3, linewidths=0)
@@ -749,44 +871,28 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
         ax.set_aspect("equal")
         ax.set_xticks([])
         ax.set_yticks([])
-        # Method above the panel, its error below: a single stacked xlabel put
-        # the identity and the score in the same visual slot as the neighbouring
-        # panel's, which made the four hard to scan.
         ax.set_title(lab, fontsize=7, pad=3)
         if err is not None:
             ax.set_xlabel(rf"$\|\hat\theta-\theta^\star\|_1={err:.2f}$",
                           labelpad=3, fontsize=7,
                           fontweight="bold" if is_best else "normal")
-    # Anchored to the last field panel, so the bar is exactly as tall as the
-    # maps it describes.  A colorbar in its own gridspec column spans the whole
-    # figure height instead, which `aspect="equal"` makes much taller than the
-    # panels.
-    cb = fig.colorbar(im, cax=axes[-1].inset_axes([1.05, 0.0, 0.045, 1.0]))
+    cb = fig.colorbar(im, cax=axes[-1].inset_axes([1.08, 0.0, 0.06, 1.0]))
     cb.set_label("cost", fontsize=6.5, labelpad=1)
     cb.ax.tick_params(labelsize=6, width=0.5, length=2)
     cb.outline.set_linewidth(0.5)
 
-    # Trajectories for the implicit fit, drawn over the true field so the reader
-    # can see *why* the paths bend where they do.  Limits come from the data
-    # (the old panel clipped its own trajectories), and the field is rendered
-    # over those limits rather than a fixed box, so there is no bare margin.
-    # A subset of contexts: all M overlaid is a hairball at this panel size, and
-    # the panel is here to show the *character* of the fit, not to be counted.
+    # Trajectory panel spanning both rows on the right.
+    axt = fig.add_subplot(gs[:, n_cols + 1])
     show = list(range(min(n_show, M)))
-    paths = [np.asarray(b2d.unpack(xhat[i], jax.tree.map(lambda x: x[i], ctxs),
-                                   T, d))[:, :2] for i in show]
     allp = np.concatenate([demos[show][:, :, :2].reshape(-1, 2)] + paths)
     pad = 0.12
     ext = _match_aspect(
         (min(-2.5, allp[:, 0].min() - pad), max(2.5, allp[:, 0].max() + pad),
          min(-1.9, allp[:, 1].min() - pad), max(1.9, allp[:, 1].max() + pad)),
         5.0 / 3.8)
-    _draw_field_background(axt, c0, env["theta"], extent=ext, vmax=vmax)
+    _draw_field_background(axt, c0, theta_star, extent=ext, vmax=vmax)
     for j, i in enumerate(show):
         dm = demos[i][:, :2]
-        # The noisy observation is what every method is actually given.  At high
-        # sigma the difference between it and the smooth fit is the whole story,
-        # so draw it as the scattered samples it is rather than a clean line.
         axt.plot(dm[:, 0], dm[:, 1], color=DEMO_C, lw=0.7, alpha=0.55,
                  zorder=3, label="demonstration" if j == 0 else None)
         axt.scatter(dm[:, 0], dm[:, 1], s=1.6, color=DEMO_C, alpha=0.85,
@@ -801,7 +907,6 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     axt.set_yticks([])
     axt.set_title("trajectories", fontsize=7, pad=3)
     axt.set_xlabel(rf"$\sigma={demo_noise:g}$", labelpad=3, fontsize=7)
-    # Lower left, so it does not sit under the panel tag at upper left.
     axt.legend(loc="lower left", ncol=1, fontsize=5.8, handlelength=1.6,
                borderpad=0.25, labelspacing=0.25,
                bbox_to_anchor=(0.005, 0.005), framealpha=0.82, frameon=True)
@@ -813,11 +918,7 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
     noise_lab = "High" if "highnoise" in name else "Low"
     fig.suptitle(f"Recovered Cost Fields Under {noise_lab} Demonstration Noise "
                 f"($\\sigma={demo_noise:g}$)", fontsize=9, y=0.99, fontweight="bold")
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.92, bottom=0.16)
-    print(f"  [{name}] sigma={demo_noise:g}  "
-          f"Gram lambda_2/lambda_K = {ev[1] / ev[-1]:.2e}  "
-          + "  ".join(f"{m}_L1={errs[m]:.3f}" for m, _ in fits)
-          + f"  best={best}")
+    fig.subplots_adjust(left=0.005, right=0.995, top=0.91, bottom=0.06)
     finish(fig, name)
     return errs
 
@@ -827,7 +928,18 @@ def fig_recovery(budget=8000, lr=0.1, n_iter=800, demo_noise=0.02,
 # ---------------------------------------------------------------------------
 
 
-def fig_recovery_highnoise(sigma=0.05, **kw):
+def fig_recovery(recompute=True, name="fig3_recovery", **kw):
+    """Recovered cost fields (implicit vs. baselines) on the multimodal field.
+
+    Solves inline, persists the recovered weights / trajectories / geometry to
+    `data/figdata/<name>.npz`, then draws from that file. The Gram lambda_2 and
+    the identifiability rationale are documented on `_recovery_render`.
+    """
+    data = _cached(name, lambda: _recovery_compute(name=name, **kw), recompute)
+    return _recovery_render(data)
+
+
+def fig_recovery_highnoise(recompute=True, sigma=0.05, **kw):
     """The same recovery panel in the high-noise regime, where the bilevel
     methods separate from the analytic ones.
 
@@ -842,7 +954,8 @@ def fig_recovery_highnoise(sigma=0.05, **kw):
     reported (`fig3_recovery` at sigma=0.02) rather than only the flattering one;
     the crossover is the result, not the win.
     """
-    return fig_recovery(demo_noise=sigma, name="fig3b_recovery_highnoise", **kw)
+    return fig_recovery(recompute=recompute, demo_noise=sigma,
+                        name="fig3b_recovery_highnoise", **kw)
 
 
 def fig_noise():
@@ -866,6 +979,9 @@ def fig_noise():
 
     fig, ax = plt.subplots(1, 1, figsize=(COL1, 2.4))
     for m in methods:
+        # Skip methods absent from the data (e.g. "eiv" before re-collection).
+        if any(m not in t["methods"] for s in sig for t in rows[s].values()):
+            continue
         st = STYLE[m]
         vals = [[t["methods"][m]["theta_l1"] for t in rows[s].values()] for s in sig]
         med = np.array([np.median(v) for v in vals])
@@ -1107,6 +1223,7 @@ def _regime_trial(seed, demo_noise, budget=8000, n_iter=800, n_restarts=7,
     z_kkt = analytic.kkt_fit(inner.grad_x, ctxs, demos, K, n_steps=600)
     z_cioc = analytic.cioc_fit(inner.grad_x, inner.gn_system, ctxs, demos, K,
                                n_steps=600)
+    z_eiv = analytic.eiv_fit(inner.grad_x, ctxs, demos, K)
     # Do-nothing baseline: an unfit random draw, not the zeros(K) the other
     # methods start their optimization from -- matches `bench2d.run`'s own
     # "random" convention (`z0 = rng.normal(scale=0.5, size=K)`).
@@ -1114,6 +1231,7 @@ def _regime_trial(seed, demo_noise, budget=8000, n_iter=800, n_restarts=7,
     fits = {"implicit": jax.nn.softmax(z), "unrolled": jax.nn.softmax(z_unrolled),
             "fd": jax.nn.softmax(z_fd), "cmaes": jax.nn.softmax(z_cmaes),
             "kkt": jax.nn.softmax(z_kkt), "cioc": jax.nn.softmax(z_cioc),
+            "eiv": jax.nn.softmax(z_eiv),
             "random": jax.nn.softmax(z_random)}
 
     x_star = jax.vmap(lambda x, c: si(x, theta_star, c))(x0, ctxs)
@@ -1126,7 +1244,30 @@ def _regime_trial(seed, demo_noise, budget=8000, n_iter=800, n_restarts=7,
     return out
 
 
-def fig_regime(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
+_REGIME_METHODS = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "eiv",
+                   "random")
+
+
+def _regime_compute(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
+    """Sweep demonstration noise, fitting every method over `n_seeds` draws per
+    sigma; return the per-(sigma, seed) L1 weight error and cost regret."""
+    methods = _REGIME_METHODS
+    sig = np.asarray(sigmas, float)
+    l1 = {m: [] for m in methods}
+    regret = {m: [] for m in methods}
+    for s in sig:
+        trials = [_regime_trial(seed, float(s)) for seed in range(n_seeds)]
+        for m in methods:
+            l1[m].append([t[m][0] for t in trials])
+            regret[m].append([t[m][1] for t in trials])
+        print(f"  [fig5] sigma={s:g}  " + "  ".join(
+            f"{m}_l1={np.median([t[m][0] for t in trials]):.3f}" for m in methods))
+    return dict(sig=sig, methods=list(methods),
+                l1={m: np.asarray(l1[m]) for m in methods},
+                regret={m: np.asarray(regret[m]) for m in methods})
+
+
+def _regime_render(data):
     """Distribution of recovery error vs. demonstration noise, on the same
     multimodal field `fig_recovery`/`fig_recovery_highnoise` use at two fixed
     sigma points.  This sweeps sigma continuously (several seeds per point) to
@@ -1136,19 +1277,13 @@ def fig_regime(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
     the demonstration stays near-optimal; `implicit` re-solves and fits
     rollout behaviour, which degrades far more gracefully as sigma grows.
     """
-    methods = ("implicit", "unrolled", "fd", "cmaes", "kkt", "cioc", "eiv", "random")
-    sig = np.asarray(sigmas, float)
-    per_sigma = []
-    for s in sig:
-        trials = [_regime_trial(seed, float(s)) for seed in range(n_seeds)]
-        per_sigma.append(trials)
-        print(f"  [fig5] sigma={s:g}  " + "  ".join(
-            f"{m}_l1={np.median([t[m][0] for t in trials]):.3f}" for m in methods))
+    methods = [str(m) for m in data["methods"]]
+    sig = np.asarray(data["sig"])
 
     fig, ax = plt.subplots(1, 1, figsize=(COL1, 2.4))
     for m in methods:
         st = STYLE[m]
-        vals = [[t[m][0] for t in trials] for trials in per_sigma]
+        vals = np.asarray(data["l1"][m])  # (n_sigma, n_seeds)
         med = np.array([np.median(v) for v in vals])
         q1 = np.array([np.percentile(v, 25) for v in vals])
         q3 = np.array([np.percentile(v, 75) for v in vals])
@@ -1166,7 +1301,26 @@ def fig_regime(sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
     finish(fig, "fig5_noise_field")
 
 
-def main(only: str = ""):
+def fig_regime(recompute=True, sigmas=(0.0, 0.01, 0.02, 0.05, 0.08), n_seeds=5):
+    """Recovery error vs. demonstration noise on the multimodal field. Sweeps
+    inline, persists the per-(sigma, seed) errors to
+    `data/figdata/fig5_noise_field.npz`, then draws from that file."""
+    data = _cached("fig5_noise_field",
+                   lambda: _regime_compute(sigmas=sigmas, n_seeds=n_seeds),
+                   recompute)
+    return _regime_render(data)
+
+
+def main(only: str = "", recompute: bool = True):
+    """Render the paper figures.
+
+    `--no-recompute` renders the inline-built figures (ambiguity, environments,
+    recovery, recovery_highnoise, regime) from their cached
+    `data/figdata/<name>.npz` instead of re-solving -- fast, and the default
+    once the data has been generated once. The disk-backed figures (scaling,
+    noise, kkt_seed, kkt_seed_trace) always read their collected JSON and ignore
+    this flag.
+    """
     set_style()
     todo = {
         "scaling": fig_scaling,
@@ -1179,6 +1333,10 @@ def main(only: str = ""):
         "kkt_seed_trace": fig_kkt_seed_trace,
         "regime": fig_regime,
     }
+    # Figures that build their data inline accept `recompute`; the JSON-backed
+    # ones do not (they always render from their collected file).
+    cacheable = {"environments", "ambiguity", "recovery", "recovery_highnoise",
+                 "regime"}
     # `--only` takes a comma-separated list: the curated paper slate is a
     # subset of `todo`, and regenerating it should be one command.
     want = [n.strip() for n in only.split(",") if n.strip()] if only else []
@@ -1190,7 +1348,7 @@ def main(only: str = ""):
         if want and name not in want:
             continue
         print(f"[{name}]")
-        fn()
+        fn(recompute=recompute) if name in cacheable else fn()
 
 
 if __name__ == "__main__":

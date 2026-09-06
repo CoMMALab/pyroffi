@@ -39,6 +39,7 @@ from ioc.analytic import cioc_fit, eiv_fit, kkt_fit
 from ioc.inner import InnerSolver, make_inner_solver
 from ioc.metrics import cosine, simplex_metrics
 from ioc.outer import adam, adam_scan, cma_es, fd_grad_fn
+from ioc.legacy import pdp_oc
 
 __all__ = [
     "InnerSolver",
@@ -51,5 +52,6 @@ __all__ = [
     "fd_grad_fn",
     "kkt_fit",
     "make_inner_solver",
+    "pdp_oc",
     "simplex_metrics",
 ]

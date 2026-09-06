@@ -1,4 +1,0 @@
---- blocks3_seed0 ---
-2026-08-31 18:49:56.592 | INFO     | pyroffi.collision._robot_collision:_compute_active_pair_indices_from_srdf:792 - Loaded 36 disabled collision pairs from SRDF
-2026-08-31 18:49:57.446 | INFO     | pyroffi.collision._robot_collision:from_urdf:701 - Created RobotCollision with 13 links and 42 active self-collision pairs, using spherical collision models.
-[build] 19.4s  K=6 ['effort', 'smooth', 'clearance', 'orient', 'z_align', 'skeleton']  stack_level=3  fit/test=6/6

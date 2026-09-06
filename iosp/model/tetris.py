@@ -65,6 +65,41 @@ UP_AXIS = jnp.array([0.0, 0.0, 1.0])
 IK_RNG_KEY = jax.random.PRNGKey(0)
 IK_CONTINUITY_WEIGHT = 1.0
 
+TORQUE_DT = 0.1     # [s] waypoint spacing for the finite-difference qd/qdd
+GRAVITY = -9.81
+
+
+SELF_MARGIN = 0.01   # [m] self-collision clearance margin (hinge point)
+
+
+def _self_collision_residual(robot_coll, robot, q):
+    """Smooth arm SELF-collision residual (arm-vs-arm), the term SPaSM prices in
+    `arm_collision_cost` but iosp's obstacle-only `clearance` lacks.
+
+    `compute_self_collision_distance` returns per-pair distances over the active
+    (SRDF-filtered, non-adjacent) self-collision pairs, so a soft-min over them
+    -- not the built-in hard min -- keeps this smooth for the implicit-diff
+    adjoint (cf. `clearance_residual`'s soft-min fix).  Returns (T,)."""
+    d = jax.vmap(lambda qi: robot_coll.compute_self_collision_distance(robot, qi))(q)
+    d_min = -SOFTMIN_TAU * jax.scipy.special.logsumexp(-d / SOFTMIN_TAU, axis=-1)
+    return jax.nn.softplus(SOFTNESS * (SELF_MARGIN - d_min)) / SOFTNESS
+
+
+def _torque_residual(robot, q, dt=TORQUE_DT, gravity=GRAVITY):
+    """RNEA joint torques at the interior knots (GRiD inverse dynamics).
+
+    The `torque` cost feature: prices dynamic effort (mass/gravity/Coriolis),
+    not just kinematic velocity, so the demonstrations are dynamically -- not
+    only geometrically -- meaningful.  Central differences for qd/qdd, matching
+    `ioc.robot.bases.dynamic`; routed through GRiD's CUDA FFI (`use_cuda=True`),
+    whose analytic `idsva_so` custom_jvp keeps `jax.hessian` (the implicit
+    adjoint) working through it."""
+    qd = (q[2:] - q[:-2]) / (2.0 * dt)
+    qdd = (q[2:] - 2.0 * q[1:-1] + q[:-2]) / (dt ** 2)
+    qm = q[1:-1]
+    tau = robot.inverse_dynamics(qm, qd, qdd, gravity=gravity, use_cuda=True)
+    return tau.reshape(-1)
+
 
 def create_tetris_spheres(shape="L", sph_radius=SPH_RADIUS):
     """Spherized tetromino, matching SPaSM's `create_tetris_spheres`."""
@@ -137,9 +172,9 @@ assert PHASE_SPAN["return_traj"][1] == N_FULL
 IDX_PICK = PHASE_SPAN["approach"][1] - 1
 IDX_PLACE = PHASE_SPAN["place_traj"][1] - 1
 
-FEATURE_NAMES = ("effort", "smooth", "clearance", "orient", "skeleton")
+FEATURE_NAMES = ("effort", "smooth", "clearance", "orient", "torque", "skeleton")
 K = len(FEATURE_NAMES)
-SEGMENT_FEATURES = ("effort", "smooth", "clearance", "orient")
+SEGMENT_FEATURES = ("effort", "smooth", "clearance", "orient", "torque")
 K_SEG = len(SEGMENT_FEATURES)
 
 
@@ -238,7 +273,9 @@ class TetrisProblem:
         base = RobotProblem.load(urdf_path, srdf_path, mesh_dir, n_timesteps=2)
         seg = {p: dataclasses.replace(base, n_timesteps=SEGMENT_LEN[p])
                for p in PHASES}
-        seg["full"] = dataclasses.replace(base, n_timesteps=N_FULL)
+        seg["full"] = dataclasses.replace(
+            base, n_timesteps=N_FULL,
+            pinned_rows=((IDX_PICK, "q_pick"), (IDX_PLACE, "q_place")))
         return TetrisProblem(base=base, seg=seg)
 
     # -- IK ------------------------------------------------------------------
@@ -258,12 +295,16 @@ class TetrisProblem:
             q = problem.unpack(x_flat, scene)
             v = q[1:] - q[:-1]
             a = q[2:] - 2.0 * q[1:-1] + q[:-2]
-            clearance = _multi_sphere_clearance(
-                self.base.robot_coll, self.base.robot, q,
-                scene.obs_center.reshape(-1, 3),
-                scene.obs_radius.reshape(-1))
+            clearance = jnp.concatenate([
+                _multi_sphere_clearance(
+                    self.base.robot_coll, self.base.robot, q,
+                    scene.obs_center.reshape(-1, 3),
+                    scene.obs_radius.reshape(-1)),
+                _self_collision_residual(
+                    self.base.robot_coll, self.base.robot, q)[..., None]], axis=-1)
             orient = _orient_residual(self.base.robot, self.ee_index, q)
-            return (v.reshape(-1), a.reshape(-1), clearance, orient)
+            torque = _torque_residual(self.base.robot, q)
+            return (v.reshape(-1), a.reshape(-1), clearance, orient, torque)
 
         return residual_fn
 
@@ -274,15 +315,19 @@ class TetrisProblem:
             q = problem.unpack(x_flat, scene)
             v = q[1:] - q[:-1]
             a = q[2:] - 2.0 * q[1:-1] + q[:-2]
-            clearance = _multi_sphere_clearance(
-                self.base.robot_coll, self.base.robot, q,
-                scene.obs_center.reshape(-1, 3),
-                scene.obs_radius.reshape(-1))
+            clearance = jnp.concatenate([
+                _multi_sphere_clearance(
+                    self.base.robot_coll, self.base.robot, q,
+                    scene.obs_center.reshape(-1, 3),
+                    scene.obs_radius.reshape(-1)),
+                _self_collision_residual(
+                    self.base.robot_coll, self.base.robot, q)[..., None]], axis=-1)
             orient = _orient_residual(self.base.robot, self.ee_index, q)
+            torque = _torque_residual(self.base.robot, q)
             skel = jnp.concatenate([
                 q[IDX_PICK] - scene.q_pick,
                 q[IDX_PLACE] - scene.q_place])
-            return (v.reshape(-1), a.reshape(-1), clearance, orient, skel)
+            return (v.reshape(-1), a.reshape(-1), clearance, orient, torque, skel)
 
         return residual_fn
 
@@ -318,8 +363,7 @@ class TetrisProblem:
         vals = jax.vmap(jax.vmap(raw, in_axes=(None, 0)),
                         in_axes=(0, None))(scenes, keys)
         scales = jnp.mean(jnp.abs(vals.reshape(-1, vals.shape[-1])), axis=0)
-        assert bool(jnp.all(scales > 1e-8)), \
-            f"refine: degenerate feature scale {scales}"
+        scales = jnp.where(scales > 1e-8, scales, 1.0)  # pinned feature -> benign 0 scale
         return scales
 
     def ee_positions(self, q):
@@ -394,11 +438,17 @@ def _ik_batch(problem, target_pos, refs):
     ).astype(refs.dtype)
 
 
-def make_tetris_forward_solver(n_iters=60):
+def make_tetris_forward_solver(n_iters=60, robot=None, method=None, gd_lr=0.1):
     from pyroffi.optimization_engines import DynamicsTrajOptConfig, dynamics_trajopt
-    cfg = DynamicsTrajOptConfig(n_iters=n_iters, early_stop=False, unroll_tail=0,
-                                soft_line_search=False,
-                                soft_curvature_gate=False)
+    method = method or os.environ.get("IOSP_TRAJOPT", "lbfgs")
+    if method == "projected_gd":
+        lo = tuple(float(v) for v in np.asarray(robot.joints.lower_limits))
+        hi = tuple(float(v) for v in np.asarray(robot.joints.upper_limits))
+        cfg = DynamicsTrajOptConfig(n_iters=n_iters, method="projected_gd",
+                                    gd_lr=gd_lr, q_lo=lo, q_hi=hi, dof=len(lo))
+    else:
+        cfg = DynamicsTrajOptConfig(n_iters=n_iters, early_stop=False, unroll_tail=0,
+                                    soft_line_search=False, soft_curvature_gate=False)
     return lambda x0, cost_fn: dynamics_trajopt(x0, cost_fn, cfg)
 
 

@@ -188,7 +188,7 @@ def main(
     print(f"\nwrote {out}")
 
     print("\n=== solves to convergence, median over seeds ===")
-    shown = [m for m in ["implicit", "fd", "cmaes", "kkt"]
+    shown = [m for m in ["implicit", "fd", "cmaes", "kkt", "eiv"]
              if m in all_results[f"{bases[0]}_s0"]]
     print(f"{'basis':>6s} {'K':>3s} " + " ".join(f"{m:>12s}" for m in shown))
     for basis in bases:

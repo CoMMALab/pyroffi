@@ -39,6 +39,9 @@ GRAVITY = -9.81
 K3_NAMES = ("effort", "collision", "smooth")
 DYNAMIC_NAMES = ("effort", "collision", "smooth", "torque")
 
+# Franka Panda per-joint torque limits [Nm] (arm joints 1-7).
+PANDA_TAU_MAX = jnp.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0])
+
 
 def x_dtype():
     """float64 when x64 is enabled, else float32 -- the graph's working dtype."""
@@ -139,6 +142,48 @@ def dynamic(problem, payload_wrench=None, torque_backend="grid"):
         return (r_effort, r_coll, r_smooth, torque_residual(q))
 
     return residual_fn, DYNAMIC_NAMES
+
+
+def torque_limit_constraint(problem, payload_wrench=None, torque_backend="grid",
+                            tau_limit_scale=1.0, rho0=1.0, rho_max=1e4,
+                            penalty_scale=3.0):
+    """A theta-INDEPENDENT torque-limit inequality for `ioc.inner`'s constrained
+    path: `constraints_fn(scene) -> (AugmentedLagrangianTerm,)` enforcing
+    ``|tau(q)| <= tau_max`` per joint, where ``tau`` is computed by exactly the
+    same central-difference RNEA (same DT, gravity, payload, backend) as the
+    `dynamic` basis's torque *feature*, so the hard limit and the soft feature
+    are consistent.  ``tau_max = PANDA_TAU_MAX * tau_limit_scale``.
+
+    The limit is a property of the robot, not the cost model, so the same
+    constraint is applied to every inner solver (full / kinematic / ref) and to
+    demonstration generation."""
+    from pyroffi.optimization_engines._trajopt_core import AugmentedLagrangianTerm
+
+    tau_max = PANDA_TAU_MAX[: problem.dof] * tau_limit_scale
+
+    def constraints_fn(scene):
+        def residual(x_flat):
+            q = problem.unpack(x_flat, scene)
+            qd = (q[2:] - q[:-2]) / (2.0 * DT)
+            qdd = (q[2:] - 2.0 * q[1:-1] + q[:-2]) / (DT**2)
+            qm = q[1:-1]
+            f_ext = None
+            if payload_wrench is not None:
+                f_ext = jnp.broadcast_to(
+                    payload_wrench, qm.shape[:1] + payload_wrench.shape
+                )
+            tau = problem.robot.inverse_dynamics(
+                qm, qd, qdd, gravity=GRAVITY,
+                use_cuda=(torque_backend == "grid"), f_ext=f_ext,
+            )
+            return jnp.maximum(0.0, jnp.abs(tau) - tau_max).reshape(-1).astype(x_dtype())
+
+        return (AugmentedLagrangianTerm(
+            residual_fn=residual, kind="ineq",
+            rho0=rho0, rho_max=rho_max, penalty_scale=penalty_scale,
+            name="torque_limit"),)
+
+    return constraints_fn
 
 
 def rff(problem, M, key, lengthscale=1.0):

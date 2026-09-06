@@ -1,17 +1,25 @@
-"""Contact-free, single-arm L-BFGS trajectory optimization over an arbitrary cost.
+"""Tier 1 — dynamics-aware L-BFGS trajopt over an arbitrary cost.
 
-Structurally the same skeleton as :func:`~pyroffi.optimization_engines.
-contact_rich_trajopt` and :func:`~pyroffi.optimization_engines.
-flat_contact_trajopt` -- L-BFGS with a 5-point line search, built from the same
-``_lbfgs_two_loop`` / ``_LS_ALPHAS`` primitives in ``_sco_optimization.py`` --
-with all contact/grasp/object machinery removed. There is no
-``ManipulatorSpec``, no ``ContactSystem`` and no augmented-Lagrangian outer
-loop: with no hard grasp/object constraints to relax, a single L-BFGS minimize
-of the caller's ``cost_fn`` is the whole solver.
+Built on the shared :mod:`_trajopt_core` primitives. In its default
+configuration this is exactly the contact-free, single-arm L-BFGS solver that
+``ioc`` / ``iosp`` (SPaSM / inverse-SPaSM) call as their forward solver: a single
+L-BFGS minimize of the caller's ``cost_fn(x) -> scalar``, tracking the
+best-*stationarity* iterate, with the ``early_stop`` / ``unroll_tail`` /
+``soft_line_search`` / ``soft_curvature_gate`` semantics the implicit-adjoint IOC
+pipeline depends on.
 
-Unlike the two contact engines, the cost is not fixed internal weights -- it is
-supplied by the caller as an arbitrary ``cost_fn(x) -> scalar``, so this engine
-can serve directly as the forward solver for ``ioc.inner.make_inner_solver``.
+Opt-in, all defaulting to preserve exact current behavior, it also exposes:
+
+* ``constraints`` — an arbitrary tuple of
+  :class:`~pyroffi.optimization_engines._trajopt_core.AugmentedLagrangianTerm`,
+  folded into a generic AL outer loop. Empty ⇒ the single-solve behavior above.
+* ``use_sco`` — Sequential Convex Optimization: each AL outer iteration
+  linearizes every supplied *inequality* residual at the current iterate before
+  the inner solve (à la Schulman et al. 2013), generalized beyond collision.
+* ``robot`` / ``grid`` — when supplied, tier 1 auto-adds kinematic smoothness /
+  joint-limit terms and a dynamics-feasibility (torque-limit) AL term, so a
+  standalone caller gets a dynamics-feasible solve without hand-writing the cost.
+  Existing ``ioc`` / ``iosp`` callers pass neither, so their graph is untouched.
 """
 
 from __future__ import annotations
@@ -19,12 +27,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-import jax
-import jax.numpy as jnp
 from jax import Array
 from jaxtyping import Float
 
-from ._sco_optimization import _LS_ALPHAS, _lbfgs_two_loop
+from ._trajopt_core import (
+    AugmentedLagrangianTerm,
+    _al_outer_loop,
+    _lbfgs_driver,
+    _make_trust,
+    _projected_gd,
+)
 
 
 @dataclass(frozen=True)
@@ -34,78 +46,122 @@ class DynamicsTrajOptConfig:
     n_iters: int = 200
     """Number of L-BFGS steps."""
 
+    method: str = "lbfgs"
+    """"lbfgs" (default, unchanged) or "projected_gd".  The projected-GD path is
+    a SPaSM-style solver: plain gradient descent from the (already valid)
+    straight-line seed with a linearly-decayed step, PROJECTED onto the joint
+    box after every step.  It stays in the neighborhood of the feasible init and
+    cannot diverge out of joint limits the way an unconstrained L-BFGS step can
+    on the composed pick-place objective."""
+
+    gd_lr: float = 0.1
+    """projected_gd only: initial GD step, decayed linearly to 0 over n_iters."""
+
+    q_lo: tuple = ()
+    """projected_gd only: per-DOF lower joint limits (hashable tuple).  Empty
+    disables the box projection (pure GD)."""
+
+    q_hi: tuple = ()
+    """projected_gd only: per-DOF upper joint limits (hashable tuple)."""
+
+    dof: int = 0
+    """projected_gd only: DOF, to reshape the flat iterate to (T_interior, dof)
+    for per-waypoint box projection."""
+
     m_lbfgs: int = 8
     """L-BFGS history size (number of curvature pairs)."""
 
     grad_tol: float = 1e-6
     """Inner L-BFGS stops once ``max|grad|`` drops below this. 0 disables (falls
-    back to the fixed ``n_iters`` budget). Unlike the AL-penalty engines
-    (`flat_contact_trajopt`, `contact_rich_trajopt`), this solver's objective is
-    an unconstrained blend supplied directly by the caller, so the gradient norm
-    genuinely does approach zero at a local optimum and this check is worth
-    having on by default. Only meaningful when ``early_stop=True``."""
+    back to the fixed ``n_iters`` budget). Only meaningful when
+    ``early_stop=True``."""
 
     early_stop: bool = True
     """True: run the ``while_loop`` early-stopping form -- cheap, but not
     reverse-mode differentiable (JAX cannot backprop through a data-dependent
-    trip count), so this form must only ever be called under `stop_gradient`
-    (e.g. as the forward solve inside `ioc.inner.solve_implicit`, whose gradient
-    comes from the analytic adjoint, not from differentiating this loop).
+    trip count), so this form must only ever be called under `stop_gradient`.
 
     False: run a fixed-length, reverse-mode-differentiable form instead --
-    `jax.lax.scan` for exactly ``n_iters`` steps, optionally split so the first
-    ``n_iters - unroll_tail`` steps run under `stop_gradient` and only the last
-    ``unroll_tail`` are actually unrolled and differentiated (Domke 2012
-    truncated unrolling, same head/tail split as `ioc.inner.solve_unrolled`
-    used with its retired internal Gauss-Newton loop). This is the form to use
-    wherever the *caller* needs to backprop through the solve itself."""
+    `jax.lax.scan` for exactly ``n_iters`` steps, optionally split so only the
+    last ``unroll_tail`` are actually unrolled and differentiated (Domke 2012
+    truncated unrolling)."""
 
     unroll_tail: int = 0
     """Only used when ``early_stop=False``. Number of trailing steps that carry
     gradients; 0 (or >= n_iters) unrolls and differentiates the whole solve."""
 
     soft_line_search: bool = False
-    """Opt-in, default False (every existing caller unaffected).
-
-    The line search below picks among ``_LS_ALPHAS`` by
-    ``best_idx = argmax(has_suff)`` -- a hard, discrete selection.  When this
-    solve sits inside a larger differentiable pipeline whose INPUTS (not its
-    own theta) shift the trajectory continuously -- e.g. a boundary condition
-    fed in from an upstream differentiable IK stage, as in ``iosp.pickplace``
-    -- an infinitesimal shift in that input can flip which alpha first
-    satisfies sufficient decrease, and the flip compounds across ``n_iters``
-    steps into a genuinely discontinuous final iterate.  This is the same
-    failure class as the documented "collision hard-max nonsmooth" bug and
-    ``clearance_residual``'s soft-min fix in ``ioc.robot.problem``: a hard
-    argmax/max hiding a discontinuity that breaks implicit differentiation's
-    precondition that the solution vary smoothly with the inputs.  Setting
-    this True replaces the hard argmax with a softmax blend over the trial
-    costs (see the call site) at a fixed temperature -- enough to kill the
-    discontinuity, not a fancy line search."""
+    """Opt-in, default False. Replaces the hard argmax over ``_LS_ALPHAS`` with a
+    softmax blend over the trial costs, to keep the solve continuous in an
+    upstream differentiable input (e.g. an IK boundary condition). See the shared
+    driver for the mechanism."""
 
     soft_curvature_gate: bool = False
-    """Opt-in, default False (every existing caller unaffected).
+    """Opt-in, default False. Replaces the discrete curvature-pair admit/reject
+    and the hard L-BFGS/GD direction switch with smooth blends, for the same
+    reason as ``soft_line_search``. See the shared driver."""
 
-    Separate flag from `soft_line_search` -- different mechanism, same failure
-    class.  The hard version admits/rejects a curvature pair with
-    ``valid = (sy > 1e-10*yy + 1e-30) & (iter_count > 0)``: whether a pair
-    crosses that threshold depends on trajectory values that vary continuously
-    with an upstream boundary condition (e.g. `iosp.pickplace`'s IK-derived
-    `q_pick`/`q_place`), so a pair can flip discretely from
-    admitted/full-weight to rejected/zero-weight as that boundary shifts
-    infinitesimally, and the flip compounds across ``n_iters`` steps.  It also
-    gates a hard ``direction = where(m_used > 0, dir_lbfgs, dir_gd)`` switch.
+    # --- Opt-in tier-1 SCO / augmented-Lagrangian extensions --------------
+    #     All default to preserve the exact single-solve behavior above.
 
-    Setting this True: (1) always writes the ring buffer (no discrete
-    admit/reject on `s_buf`/`y_buf`/`rho_buf`, so their contents are a smooth
-    function of `sy`/`yy`); (2) makes `m_used` a deterministic function of the
-    iteration index alone (`min(iter_count+1, m)`) instead of a
-    trajectory-dependent counter, which makes the old `m_used > 0` switch
-    theta-independent and therefore harmless without its own smoothing; (3)
-    replaces the curvature *quality* signal with a smooth blend weight
-    `w = sigmoid((sy - 1e-10*yy) / tau)` and interpolates
-    `direction = w * dir_lbfgs + (1-w) * dir_gd` instead of a hard switch on
-    pair validity."""
+    constraints: tuple = ()
+    """Tuple of
+    :class:`~pyroffi.optimization_engines._trajopt_core.AugmentedLagrangianTerm`.
+    Empty (default) ⇒ a single L-BFGS solve of ``cost_fn``, exactly as before.
+    Non-empty ⇒ ``cost_fn`` becomes the AL *base* cost and these terms are folded
+    into a generic AL outer loop with their own duals and penalties."""
+
+    use_sco: bool = False
+    """When True (and ``constraints`` non-empty), each AL outer iteration
+    linearizes every *inequality* residual at the current iterate before the
+    inner solve, à la Sequential Convex Optimization. Equality terms are left
+    exact. No effect when ``constraints`` is empty."""
+
+    n_outer_iters: int = 10
+    """AL / SCO outer iterations (only used when ``constraints`` is non-empty)."""
+
+    constraint_tol: float = 0.0
+    """Outer loop stops once every term's ``max|residual|`` is below this. 0
+    disables (runs the full ``n_outer_iters`` budget)."""
+
+    dual_scale: float = 1.0
+    """Scaling on the AL dual-ascent step."""
+
+    robot: object = None
+    """Optional :class:`~pyroffi.Robot`. When supplied together with ``grid`` (and
+    ``dof`` for the reshape), tier 1 auto-adds kinematic smoothness / joint-limit
+    terms and a dynamics-feasibility AL term for a standalone dynamics-feasible
+    solve. Left ``None`` by every ``ioc`` / ``iosp`` caller."""
+
+    grid: object = None
+    """Optional :class:`~pyroffi.dynamics.GRiDDynamics`, paired with ``robot``."""
+
+    tau_max: float = 87.0
+    """Torque limit for the auto-added dynamics-feasibility term (robot/grid)."""
+
+    auto_dt: float = 0.1
+    """Timestep for finite-difference velocities/accelerations in the auto-added
+    dynamics-feasibility term."""
+
+    w_smooth: float = 1.0
+    w_limits: float = 1.0
+    """Weights for the auto-added kinematic terms (robot/grid path only)."""
+
+    # --- Adaptive (Schulman) trust region for the AL/SCO outer loop --------
+    #     Only active when ``constraints`` is non-empty (the AL path); best paired
+    #     with ``use_sco`` (the ratio test judges the linearized model). Default
+    #     off ⇒ no trust region, byte-identical to the plain AL loop.
+    adaptive_trust: bool = False
+    """Enable Schulman actual-vs-predicted trust-region resizing in the AL loop."""
+    tr_coef0: float = 1.0
+    """Initial trust-region coefficient."""
+    tr_tighten: float = 4.0
+    tr_loosen: float = 0.25
+    tr_shrink_ratio: float = 0.25
+    tr_expand_ratio: float = 0.75
+    tr_accept_ratio: float = 0.1
+    tr_coef_min: float = 1e-2
+    tr_coef_max: float = 1e4
 
 
 def dynamics_trajopt(
@@ -115,201 +171,106 @@ def dynamics_trajopt(
 ) -> Float[Array, "n"]:
     """Minimize ``cost_fn`` over a flat decision vector with L-BFGS.
 
-    Same carry/step/line-search shape as ``_sco_optimization._lbfgs_inner_solve``
-    (Nocedal two-loop direction, 5-point backtracking line search, best-iterate
-    tracking), closing over an arbitrary ``cost_fn`` rather than a hardwired
-    collision-linearization objective.
+    Default (``method="lbfgs"``, ``constraints=()``, ``robot=None``): a single
+    L-BFGS solve tracking the best-stationarity iterate — the exact forward solver
+    ``ioc.inner.make_inner_solver`` wires in. ``method="projected_gd"`` runs the
+    SPaSM box-projected GD fallback instead.
+
+    With ``constraints`` (and/or ``robot``/``grid``) supplied, the solve becomes
+    a generic augmented-Lagrangian outer loop over those terms, optionally with
+    SCO linearization of inequality residuals (``use_sco``).
     """
-    m = opt_cfg.m_lbfgs
-    n = x0.shape[0]
+    if opt_cfg.method == "projected_gd":
+        return _projected_gd(
+            x0, cost_fn,
+            n_iters=opt_cfg.n_iters, gd_lr=opt_cfg.gd_lr,
+            q_lo=opt_cfg.q_lo, q_hi=opt_cfg.q_hi, dof=opt_cfg.dof,
+        )
 
-    cost0, g0 = jax.value_and_grad(cost_fn)(x0)
+    loop = "while" if opt_cfg.early_stop else "unroll"
 
-    init_carry = (
-        x0,                # current iterate
-        x0,                # best-STATIONARITY iterate seen so far (gradient computed AT this x)
-        jnp.max(jnp.abs(g0)),  # best max|grad| seen so far
-        x0,                # x_prev  (dummy for iter 0)
-        g0,                # g_prev  (dummy for iter 0)
-        jnp.zeros((m, n)),  # s_buf
-        jnp.zeros((m, n)),  # y_buf
-        jnp.zeros(m),       # rho_buf
-        jnp.int32(0),        # m_used
-        jnp.int32(0),        # newest
-        jnp.int32(0),        # iter_count
-        jnp.bool_(False),    # converged
+    def inner_solve(z0, cf):
+        return _lbfgs_driver(
+            z0, cf,
+            n_iters=opt_cfg.n_iters, m_lbfgs=opt_cfg.m_lbfgs,
+            grad_tol=opt_cfg.grad_tol, loop=loop,
+            unroll_tail=opt_cfg.unroll_tail,
+            soft_line_search=opt_cfg.soft_line_search,
+            soft_curvature_gate=opt_cfg.soft_curvature_gate,
+            best_by="grad",
+        )
+
+    constraints = _build_constraints(x0, opt_cfg)
+    base_cost, extra = _augmented_base_cost(cost_fn, opt_cfg)
+
+    if not constraints:
+        # Exact legacy path: a single inner solve of the (possibly kinematic-
+        # augmented) cost. With robot=None this is byte-identical to before.
+        return inner_solve(x0, base_cost if extra else cost_fn)
+
+    z, _, _ = _al_outer_loop(
+        x0, inner_solve, constraints, lambda z, zk: base_cost(z),
+        n_outer_iters=opt_cfg.n_outer_iters,
+        dual_scale=opt_cfg.dual_scale,
+        constraint_tol=opt_cfg.constraint_tol,
+        sco_linearize=opt_cfg.use_sco,
+        trust=_make_trust(opt_cfg),
     )
+    return z
 
-    def lbfgs_step(carry):
-        (x, best_x, best_gnorm,
-         x_prev, g_prev,
-         s_buf, y_buf, rho_buf,
-         m_used, newest, iter_count, _) = carry
 
-        cost_val, g = jax.value_and_grad(cost_fn)(x)
-        gnorm = jnp.max(jnp.abs(g))
+# ---------------------------------------------------------------------------
+# Opt-in robot/grid auto-terms
+# ---------------------------------------------------------------------------
 
-        # Track the best point by the gradient actually measured AT it -- not
-        # by cost at line-search trial points, which are never re-differentiated
-        # and so were previously returned with no gradient guarantee at all
-        # (the grad_tol check below ran on `x`, but the function returned
-        # `best_x`, a possibly-unrelated line-search trial point; a solve could
-        # report converged while handing back a non-stationary point).
-        improved = gnorm < best_gnorm
-        best_x = jnp.where(improved, x, best_x)
-        best_gnorm = jnp.where(improved, gnorm, best_gnorm)
+def _augmented_base_cost(cost_fn, opt_cfg):
+    """``(base_cost_fn, added_anything)``.
 
-        s_k = x - x_prev
-        y_k = g - g_prev
-        sy = jnp.dot(s_k, y_k)
-        yy = jnp.dot(y_k, y_k)
+    When ``robot``/``grid`` are supplied, add kinematic smoothness + joint-limit
+    penalties to the caller's cost (the AL base). Otherwise return ``cost_fn``
+    unchanged and ``False`` (the legacy graph).
+    """
+    if opt_cfg.robot is None or opt_cfg.dof <= 0:
+        return cost_fn, False
 
-        if opt_cfg.soft_curvature_gate:
-            # Always advance the ring buffer and always store the pair -- no
-            # discrete admit/reject, so s_buf/y_buf/rho_buf are smooth
-            # functions of sy/yy (see the config flag's docstring).  `newest`
-            # and `m_used` are iteration-index-only (not trajectory-value
-            # dependent), so they stay exact integers safely: nothing here
-            # depends on a theta-varying comparison.
-            new_newest = (newest + 1) % m
-            s_buf = s_buf.at[new_newest].set(s_k)
-            y_buf = y_buf.at[new_newest].set(y_k)
-            safe_sy = jnp.where(jnp.abs(sy) > 1e-30, sy, 1.0)
-            rho_buf = rho_buf.at[new_newest].set(1.0 / (safe_sy + 1e-30))
-            m_used = jnp.minimum(iter_count + 1, m)
-            newest = new_newest
+    from ._sco_optimization import _limits_cost, _smoothness_cost
 
-            dir_lbfgs = _lbfgs_two_loop(g, s_buf, y_buf, rho_buf, m_used, newest, m)
-            dir_gd = -g / jnp.sqrt(jnp.sum(g**2) + 1e-18)
-            # Smooth curvature-quality weight replacing the hard `valid` gate
-            # and the hard `m_used > 0` direction switch.  tau is scaled to
-            # THIS pair's own (sy, yy) magnitude -- not a fixed constant --
-            # for the same reason `soft_line_search`'s temperature had to be
-            # rescaled: a fixed-magnitude tau either saturates back to a hard
-            # gate (too small relative to sy) or melts the weight to a
-            # constant ~0.5 regardless of curvature quality (too large).
-            margin_curv = sy - 1e-10 * yy
-            tau_curv = 0.1 * (jnp.abs(sy) + 1e-10 * jnp.abs(yy)) + 1e-12
-            w = jax.nn.sigmoid(margin_curv / tau_curv) * (iter_count > 0)
-            direction = w * dir_lbfgs + (1.0 - w) * dir_gd
-        else:
-            valid = (sy > 1e-10 * yy + 1e-30) & (iter_count > 0)
+    dof = opt_cfg.dof
+    robot = opt_cfg.robot
+    lower = robot.joints.lower_limits
+    upper = robot.joints.upper_limits
 
-            new_newest = (newest + 1) % m
-            actual_newest = jnp.where(valid, new_newest, newest)
-            s_buf = s_buf.at[new_newest].set(jnp.where(valid, s_k, s_buf[new_newest]))
-            y_buf = y_buf.at[new_newest].set(jnp.where(valid, y_k, y_buf[new_newest]))
-            # Guard the reciprocal itself (not just its result) against sy ~ 0
-            # on the invalid branch: `jnp.where` still differentiates both
-            # branches, so an unguarded `1/(sy+eps)` blows up at sy=0 (iter 0,
-            # s_k=0) and leaks a NaN gradient through the select even though
-            # that branch is never selected. Only matters under
-            # `early_stop=False`, where this loop is actually differentiated.
-            safe_sy = jnp.where(valid, sy, 1.0)
-            rho_buf = jnp.where(valid, rho_buf.at[new_newest].set(1.0 / (safe_sy + 1e-30)), rho_buf)
-            m_used = jnp.where(valid & (m_used < m), m_used + 1, m_used)
-            newest = actual_newest
+    def base(x):
+        t = x.reshape(-1, dof)
+        c = cost_fn(x)
+        c = c + opt_cfg.w_smooth * _smoothness_cost(t, 1.0, 0.5, 0.1)
+        c = c + opt_cfg.w_limits * _limits_cost(t, lower, upper)
+        return c
 
-            dir_lbfgs = _lbfgs_two_loop(g, s_buf, y_buf, rho_buf, m_used, newest, m)
-            # `jnp.linalg.norm(g)` has an undefined gradient at g=0 (0/0 inside
-            # sqrt's derivative); once `m_used > 0` this branch is unselected
-            # but `where`'s backward still differentiates it and 0*nan=nan
-            # leaks through, so this smooth epsilon-inside-sqrt form is
-            # required (not just cosmetic) whenever `early_stop=False`
-            # differentiates this step.
-            dir_gd = -g / jnp.sqrt(jnp.sum(g**2) + 1e-18)
-            direction = jnp.where(m_used > 0, dir_lbfgs, dir_gd)
+    return base, True
 
-        suff_thresh = cost_val * (1.0 - 1e-4)
-        trial_costs = jax.vmap(lambda a: cost_fn(x + a * direction))(_LS_ALPHAS)
 
-        if opt_cfg.soft_line_search:
-            # Softmax over the signed sufficient-decrease margin instead of a
-            # hard argmax -- see the config flag's docstring.
-            #
-            # MEASURED bug in an earlier version of this: scaling the
-            # temperature by `|cost_val| * 1e-2` used the wrong reference
-            # scale.  `cost_val` (the pre-step cost, e.g. O(1) or O(1e4)) has
-            # no fixed relationship to the SPREAD across the 5 trial costs --
-            # what actually determines whether softmax saturates.  Measured
-            # case: cost_val ~ 5.7, margin spread ~ 4.0 across trials, but
-            # tau = cost_val*1e-2 ~ 0.057 -> margin/tau up to 72 ->
-            # softmax weights [1.0, 6e-15, ...] -- numerically bit-identical
-            # to hard argmax despite the graph genuinely containing a softmax
-            # (confirmed via `jax.make_jaxpr`: argmax present in the hard
-            # path, absent in this one) -- a "the flag reached the graph but
-            # the graph is numerically degenerate" failure, not a wiring bug.
-            # Fixed by scaling tau to the trial costs' OWN spread instead, so
-            # the blend is always meaningfully soft regardless of the
-            # absolute cost magnitude.
-            margin = suff_thresh - trial_costs
-            spread = jnp.max(trial_costs) - jnp.min(trial_costs)
-            tau = 0.1 * spread + 1e-6
-            weights = jax.nn.softmax(margin / tau)
-            alpha = jnp.dot(weights, _LS_ALPHAS)
-        else:
-            has_suff = trial_costs < suff_thresh
-            best_idx = jnp.where(
-                jnp.any(has_suff),
-                jnp.argmax(has_suff),
-                jnp.argmin(trial_costs),
+def _build_constraints(x0, opt_cfg) -> tuple:
+    """Assemble the AL constraint tuple: caller-supplied plus, if robot/grid are
+    given, an auto dynamics-feasibility (torque-limit) inequality term."""
+    constraints = tuple(opt_cfg.constraints)
+    if opt_cfg.robot is not None and opt_cfg.grid is not None and opt_cfg.dof > 0:
+        from ..dynamics._contact import dynamics_feasibility_residual
+
+        dof = opt_cfg.dof
+        grid = opt_cfg.grid
+
+        def residual(x):
+            t = x.reshape(-1, dof)
+            return dynamics_feasibility_residual(
+                grid, t, opt_cfg.auto_dt, opt_cfg.tau_max
             )
-            alpha = _LS_ALPHAS[best_idx]
-        x_new = x + alpha * direction
 
-        converged = (
-            gnorm < opt_cfg.grad_tol
-            if opt_cfg.grad_tol > 0.0
-            else jnp.bool_(False)
+        constraints = constraints + (
+            AugmentedLagrangianTerm(
+                residual_fn=residual, kind="ineq",
+                rho0=1.0, rho_max=1e3, penalty_scale=2.0,
+                name="torque_limit",
+            ),
         )
-
-        return (
-            x_new, best_x, best_gnorm,
-            x, g,
-            s_buf, y_buf, rho_buf,
-            m_used, newest, iter_count + 1,
-            converged,
-        )
-
-    if opt_cfg.early_stop:
-        # `while_loop` (not a fixed-length `scan`) so a solve that hits
-        # `grad_tol` stops paying for the remaining budget. Safe here because
-        # this form is only ever called under `stop_gradient` (e.g. inside
-        # `ioc.inner.solve_implicit`, whose gradient comes from the analytic
-        # implicit-function-theorem `_bwd`, not from differentiating this loop)
-        # -- reverse-mode AD through `while_loop` is unsupported by JAX
-        # regardless, so this branch must never be differentiated through.
-        def cond_fn(carry):
-            iter_count, converged = carry[10], carry[-1]
-            return jnp.logical_and(iter_count < opt_cfg.n_iters, jnp.logical_not(converged))
-
-        final_carry = jax.lax.while_loop(cond_fn, lbfgs_step, init_carry)
-    else:
-        # Fixed-length, reverse-mode-differentiable form: `n_iters` L-BFGS
-        # steps via `scan`, with the head (`n_iters - unroll_tail` steps)
-        # under `stop_gradient` and only the tail actually unrolled --
-        # truncated unrolling (Domke 2012), same head/tail split
-        # `ioc.inner.solve_unrolled`'s retired Gauss-Newton loop used.
-        tail = opt_cfg.unroll_tail if 0 < opt_cfg.unroll_tail < opt_cfg.n_iters else opt_cfg.n_iters
-        n_head = opt_cfg.n_iters - tail
-
-        def scan_step(carry, _):
-            return lbfgs_step(carry), None
-
-        head_carry, _ = jax.lax.scan(scan_step, init_carry, None, length=n_head)
-        carry = jax.lax.stop_gradient(head_carry)
-        for _ in range(tail):
-            carry = jax.checkpoint(lbfgs_step)(carry)
-        # Return the *final* iterate, not best-so-far: `best_x`/`best_gnorm`
-        # are updated inside the stop_gradiented head, so once the head
-        # converges the tail's differentiable steps almost never improve on
-        # an already-tiny gradient norm, and `best_x` silently stays pinned to
-        # a value with no gradient path through theta at all (measured: exact
-        # zero gradient, cos=0 against FD, no error raised). Domke unrolling
-        # differentiates the trajectory the tail actually walks, so the last
-        # point of that walk is the only correct thing to return here.
-        return carry[0]
-
-    best_x = final_carry[1]
-
-    return best_x
+    return constraints

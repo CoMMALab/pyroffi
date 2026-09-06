@@ -116,3 +116,56 @@ def test_contact_rich_single_manipulator():
     assert forces.shape == (T, 1, 3)
     assert np.isfinite(np.array(forces)).all()
     assert float(resid[2]) == 0.0  # no grasp-closure residual for a single arm
+
+
+def test_dynamics_feasibility_residual_as_al_drives_torque_down():
+    """`dynamics_feasibility_residual` folded into the generic AL loop as an
+    inequality term genuinely drives `max|tau| - tau_max` to ~0, where the old
+    fixed-weight hinge would leave measurable violation.
+
+    A single Panda tracking a fast wiggle needs torque above a deliberately-low
+    `tau_max`; the AL term should pull the trajectory into feasibility.
+    """
+    from pyroffi.dynamics import GRiDDynamics
+    from pyroffi.dynamics._contact import dynamics_feasibility_residual
+    from pyroffi.optimization_engines import dynamics_trajopt, DynamicsTrajOptConfig
+    from pyroffi.optimization_engines._trajopt_core import AugmentedLagrangianTerm
+
+    urdf = yourdfpy.URDF.load(PANDA_URDF, load_meshes=False)
+    robot = pyroffi.Robot.from_urdf(urdf)
+    grid = GRiDDynamics(urdf)
+    dof = int(grid.num_dof)
+    T = 12
+    dt = 0.05
+    tau_max = 15.0  # low on purpose so the seed is infeasible
+
+    mid = (robot.joints.lower_limits + robot.joints.upper_limits) / 2
+    key = jax.random.PRNGKey(0)
+    wiggle = 0.5 * jax.random.normal(key, (T, dof))
+    x0 = (mid[None, :] + wiggle).reshape(-1)
+
+    def base_cost(x):
+        t = x.reshape(T, dof)
+        return jnp.sum((t - (mid[None, :] + wiggle)) ** 2)  # stay near the wiggle
+
+    def residual(x):
+        return dynamics_feasibility_residual(grid, x.reshape(T, dof), dt, tau_max)
+
+    def max_violation(x):
+        return float(jnp.max(residual(x)))
+
+    seed_viol = max_violation(x0)
+
+    term = AugmentedLagrangianTerm(
+        residual_fn=residual, kind="ineq", rho0=1.0, rho_max=1e4, penalty_scale=2.5,
+    )
+    cfg = DynamicsTrajOptConfig(
+        n_iters=40, early_stop=True, constraints=(term,),
+        n_outer_iters=15, dof=dof,
+    )
+    x = dynamics_trajopt(x0, base_cost, cfg)
+
+    assert seed_viol > 1.0, f"seed should be infeasible, got {seed_viol}"
+    assert max_violation(x) < 0.1 * seed_viol, (
+        f"AL torque term did not drive feasibility: {seed_viol} -> {max_violation(x)}"
+    )

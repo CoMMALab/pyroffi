@@ -27,13 +27,13 @@ from ioc.inner import make_inner_solver
 from iosp.model import tower as tw
 from iosp.config import URDF_PATH, SRDF_PATH, MESH_DIR
 
-Z_STAR = jnp.array([0.5, 1.5, 1.0, 0.8, 1.2, 2.0], dtype=jnp.float32)
+Z_STAR = jnp.array([0.5, 1.5, 1.0, 0.8, 1.2, 1.0, 2.0], dtype=jnp.float32)  # ...,z_align,torque,skeleton
 PARAM_NAMES = list(tw.FEATURE_NAMES)
 
 
 def build(seed=0, n_iters=60, n_scenes=6, stack_level=0):
     prob = tw.TowerProblem.load(str(URDF_PATH), str(SRDF_PATH), str(MESH_DIR))
-    fs = tw.make_tower_forward_solver(n_iters=n_iters)
+    fs = tw.make_tower_forward_solver(n_iters=n_iters, robot=prob.base.robot)
 
     rng = np.random.default_rng(seed)
     scenes_all = tw.sample_tower_scenes(rng, 2 * n_scenes,

@@ -302,6 +302,12 @@ def build_teleop(demo_dir=DEFAULT_DEMO_DIR, teleop_root=DEFAULT_TELEOP_ROOT,
 
     return dict(
         gf=jax.jit(jax.value_and_grad(loss_a)),
+        # Value-only loss: FD/CMA-ES need the loss VALUE, never its gradient.
+        # Routing them through `gf(u)[0]` made every probe also build the
+        # implicit adjoint's dense Hessian (see ioc.inner), which is what drove
+        # the FD stage to >108 GB host RAM and OOM.  `loss` gives byte-identical
+        # values with none of that curvature work.
+        loss=jax.jit(loss_a),
         paths_fn=paths_j, demo_paths=demo, space=space,
         ee_paths_fn=ee_paths_j, ee_demo_paths=ee_demo,
         jac_fn=ident.make_jac_fn(lambda u: paths(u)[fit_idx]),

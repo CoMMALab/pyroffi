@@ -1,0 +1,20 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\caption{Method comparison on FR3 human teleoperation (8~fit / 2~held-out, $K{=}11$ cost weights). Implicit differentiation achieves the best reconstruction at a fraction of the cost of black-box methods.}
+\label{tab:e10_methods}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{Joint RMSE (rad)} & \multicolumn{2}{c}{EE RMSE (m)} & & \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Method & Fit & Held-out & Fit & Held-out & Loss & Time (min) \\
+\midrule
+Random weights & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & -- \\
+Implicit diff. & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+Finite diff.   & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+CMA-ES         & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+Unrolled       & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -194,7 +194,7 @@ SKELETON_PLACE = (PHASE_SPAN["transport"][1] - 1,)                            # 
 # would only rescale that segment's cost by a constant, which leaves its argmin
 # unchanged -- so segments simply carry the first three features, and the
 # whitening scales stay per-stage (sigma is units, theta is preference).
-SHARED_FEATURES = ("smooth", "clearance", "upright")
+SHARED_FEATURES = ("smooth", "clearance", "upright", "torque")
 THETA_SHARED_NAMES = SHARED_FEATURES + ("skeleton",)
 K_SHARED = len(THETA_SHARED_NAMES)
 
@@ -234,7 +234,7 @@ IK_CONTINUITY_WEIGHT = 1.0
 
 
 def make_composed_forward_solver(n_iters=60, *, soft_line_search=True,
-                                 soft_curvature_gate=True):
+                                 soft_curvature_gate=True, robot=None, method=None):
     """The forward solve for the 4 chained trajopt segments -- deliberately
     NOT `ioc.robot.e1_identifiability.make_dynamics_forward_solver`'s default
     (early-stopping `while_loop`, `DynamicsTrajOptConfig(early_stop=True)`).
@@ -299,9 +299,16 @@ def make_composed_forward_solver(n_iters=60, *, soft_line_search=True,
     # behaves like the single segment here is NOT yet measured; until it is,
     # treat `soft_line_search=soft_curvature_gate=False` as the candidate
     # configuration for any run whose gradient fidelity matters.
-    opt_cfg = DynamicsTrajOptConfig(n_iters=n_iters, early_stop=False, unroll_tail=0,
-                                     soft_line_search=soft_line_search,
-                                     soft_curvature_gate=soft_curvature_gate)
+    method = method or os.environ.get("IOSP_TRAJOPT", "lbfgs")
+    if method == "projected_gd" and robot is not None:
+        lo = tuple(float(v) for v in np.asarray(robot.joints.lower_limits))
+        hi = tuple(float(v) for v in np.asarray(robot.joints.upper_limits))
+        opt_cfg = DynamicsTrajOptConfig(n_iters=n_iters, method="projected_gd",
+                                        gd_lr=0.1, q_lo=lo, q_hi=hi, dof=len(lo))
+    else:
+        opt_cfg = DynamicsTrajOptConfig(n_iters=n_iters, early_stop=False, unroll_tail=0,
+                                        soft_line_search=soft_line_search,
+                                        soft_curvature_gate=soft_curvature_gate)
 
     def forward_solver(x0, cost_fn):
         return dynamics_trajopt(x0, cost_fn, opt_cfg)
@@ -527,7 +534,10 @@ class PickPlaceProblem:
         # differs only in n_timesteps, exactly as the segments do.  Keyed
         # "full" in the same dict rather than a separate field so nothing that
         # iterates `seg` over PHASES sees a change.
-        seg["full"] = dataclasses.replace(base, n_timesteps=N_FULL)
+        seg["full"] = dataclasses.replace(
+            base, n_timesteps=N_FULL,
+            pinned_rows=(tuple((i, "q_pick") for i in SKELETON_PICK)
+                         + tuple((i, "q_goal") for i in SKELETON_PLACE)))
         return PickPlaceProblem(base=base, seg=seg)
 
     # -- IK stage ----------------------------------------------------------
@@ -736,6 +746,15 @@ class PickPlaceProblem:
             quat = problem.robot.forward_kinematics(q)[..., problem.ee_index, 0:4]
             lo, hi = (0, q.shape[0]) if upright_span is None else upright_span
             out.append(quat[lo:hi, 1:3].reshape(-1))
+        if "torque" in features:
+            # GRiD RNEA torque at interior knots (dynamic-effort feature); see
+            # iosp.model.tetris._torque_residual / ioc.robot.bases.dynamic.
+            dt, g = 0.1, -9.81
+            qd = (q[2:] - q[:-2]) / (2.0 * dt)
+            qdd = (q[2:] - 2.0 * q[1:-1] + q[:-2]) / (dt ** 2)
+            tau = problem.robot.inverse_dynamics(q[1:-1], qd, qdd, gravity=g,
+                                                 use_cuda=True)
+            out.append(tau.reshape(-1))
         return out
 
     def shared_segment_residual_fn(self, phase):
@@ -876,7 +895,7 @@ class PickPlaceProblem:
         vals = jax.vmap(jax.vmap(raw, in_axes=(None, 0)), in_axes=(0, None))(
             full_scenes, keys)
         scales = jnp.mean(jnp.abs(vals.reshape(-1, vals.shape[-1])), axis=0)
-        assert bool(jnp.all(scales > 1e-8)), f"refine: degenerate feature scale {scales}"
+        scales = jnp.where(scales > 1e-8, scales, 1.0)  # pinned feature -> benign 0 scale
         return scales
 
     # -- full composed forward solve ----------------------------------------

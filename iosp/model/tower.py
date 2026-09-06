@@ -47,7 +47,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
 from ioc.robot.problem import RobotProblem, Scene
 from iosp.model.tetris import (
     _multi_sphere_clearance, _orient_residual, _target_pose_batch,
-    _ik_batch, CLEARANCE_MARGIN, SOFTMIN_TAU, SOFTNESS,
+    _ik_batch, _torque_residual, _self_collision_residual, CLEARANCE_MARGIN, SOFTMIN_TAU, SOFTNESS,
     DOWN_WXYZ, UP_AXIS, IK_RNG_KEY, IK_CONTINUITY_WEIGHT,
 )
 
@@ -77,9 +77,11 @@ assert PHASE_SPAN["return_traj"][1] == N_FULL
 IDX_PICK = PHASE_SPAN["approach"][1] - 1
 IDX_PLACE = PHASE_SPAN["place_traj"][1] - 1
 
-FEATURE_NAMES = ("effort", "smooth", "clearance", "orient", "z_align", "skeleton")
+FEATURE_NAMES = ("effort", "smooth", "clearance", "orient", "z_align",
+                 "torque", "skeleton")
 K = len(FEATURE_NAMES)
-SEGMENT_FEATURES = ("effort", "smooth", "clearance", "orient", "z_align")
+SEGMENT_FEATURES = ("effort", "smooth", "clearance", "orient", "z_align",
+                    "torque")
 K_SEG = len(SEGMENT_FEATURES)
 
 Q_HOME = jnp.array([0.0, -0.785, 0.0, -1.571, 0.0, 1.571, 0.785],
@@ -152,7 +154,9 @@ class TowerProblem:
         base = RobotProblem.load(urdf_path, srdf_path, mesh_dir, n_timesteps=2)
         seg = {p: dataclasses.replace(base, n_timesteps=SEGMENT_LEN[p])
                for p in PHASES}
-        seg["full"] = dataclasses.replace(base, n_timesteps=N_FULL)
+        seg["full"] = dataclasses.replace(
+            base, n_timesteps=N_FULL,
+            pinned_rows=((IDX_PICK, "q_pick"), (IDX_PLACE, "q_place")))
         return TowerProblem(base=base, seg=seg)
 
     def pick_ik(self, pick_pos, refs):
@@ -178,13 +182,18 @@ class TowerProblem:
             q = problem.unpack(x_flat, scene)
             v = q[1:] - q[:-1]
             a = q[2:] - 2.0 * q[1:-1] + q[:-2]
-            clearance = _multi_sphere_clearance(
-                self.base.robot_coll, self.base.robot, q,
-                scene.obs_center.reshape(-1, 3),
-                scene.obs_radius.reshape(-1))
+            clearance = jnp.concatenate([
+                _multi_sphere_clearance(
+                    self.base.robot_coll, self.base.robot, q,
+                    scene.obs_center.reshape(-1, 3),
+                    scene.obs_radius.reshape(-1)),
+                _self_collision_residual(
+                    self.base.robot_coll, self.base.robot, q)[..., None]], axis=-1)
             orient = _orient_residual(self.base.robot, self.ee_index, q)
             z_align = self._z_align_residual(q, scene.target_z)
-            return (v.reshape(-1), a.reshape(-1), clearance, orient, z_align)
+            torque = _torque_residual(self.base.robot, q)
+            return (v.reshape(-1), a.reshape(-1), clearance, orient, z_align,
+                    torque)
 
         return residual_fn
 
@@ -195,17 +204,21 @@ class TowerProblem:
             q = problem.unpack(x_flat, scene)
             v = q[1:] - q[:-1]
             a = q[2:] - 2.0 * q[1:-1] + q[:-2]
-            clearance = _multi_sphere_clearance(
-                self.base.robot_coll, self.base.robot, q,
-                scene.obs_center.reshape(-1, 3),
-                scene.obs_radius.reshape(-1))
+            clearance = jnp.concatenate([
+                _multi_sphere_clearance(
+                    self.base.robot_coll, self.base.robot, q,
+                    scene.obs_center.reshape(-1, 3),
+                    scene.obs_radius.reshape(-1)),
+                _self_collision_residual(
+                    self.base.robot_coll, self.base.robot, q)[..., None]], axis=-1)
             orient = _orient_residual(self.base.robot, self.ee_index, q)
             z_align = self._z_align_residual(q, scene.target_z)
+            torque = _torque_residual(self.base.robot, q)
             skel = jnp.concatenate([
                 q[IDX_PICK] - scene.q_pick,
                 q[IDX_PLACE] - scene.q_place])
             return (v.reshape(-1), a.reshape(-1), clearance, orient,
-                    z_align, skel)
+                    z_align, torque, skel)
 
         return residual_fn
 
@@ -241,8 +254,7 @@ class TowerProblem:
         vals = jax.vmap(jax.vmap(raw, in_axes=(None, 0)),
                         in_axes=(0, None))(scenes, keys)
         scales = jnp.mean(jnp.abs(vals.reshape(-1, vals.shape[-1])), axis=0)
-        assert bool(jnp.all(scales > 1e-8)), \
-            f"refine: degenerate feature scale {scales}"
+        scales = jnp.where(scales > 1e-8, scales, 1.0)  # pinned feature -> benign 0 scale
         return scales
 
     def ee_positions(self, q):
@@ -300,11 +312,17 @@ class TowerProblem:
         return xs, seg_scenes, full_sc, q_pick, q_place
 
 
-def make_tower_forward_solver(n_iters=60):
+def make_tower_forward_solver(n_iters=60, robot=None, method=None, gd_lr=0.1):
     from pyroffi.optimization_engines import DynamicsTrajOptConfig, dynamics_trajopt
-    cfg = DynamicsTrajOptConfig(n_iters=n_iters, early_stop=False, unroll_tail=0,
-                                soft_line_search=False,
-                                soft_curvature_gate=False)
+    method = method or os.environ.get("IOSP_TRAJOPT", "lbfgs")
+    if method == "projected_gd":
+        lo = tuple(float(v) for v in np.asarray(robot.joints.lower_limits))
+        hi = tuple(float(v) for v in np.asarray(robot.joints.upper_limits))
+        cfg = DynamicsTrajOptConfig(n_iters=n_iters, method="projected_gd",
+                                    gd_lr=gd_lr, q_lo=lo, q_hi=hi, dof=len(lo))
+    else:
+        cfg = DynamicsTrajOptConfig(n_iters=n_iters, early_stop=False, unroll_tail=0,
+                                    soft_line_search=False, soft_curvature_gate=False)
     return lambda x0, cost_fn: dynamics_trajopt(x0, cost_fn, cfg)
 
 

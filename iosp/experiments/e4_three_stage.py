@@ -34,11 +34,11 @@ THETA_IK = jnp.array([0.06, 0.04], dtype=jnp.float32)
 # Ground truth, pre-softmax.  `skeleton` highest: a demonstrator that mostly
 # honours the task skeleton but will trade some fidelity for global smoothness
 # -- that exchange rate is what this study recovers.
-Z_STAR = jnp.array([1.0, 1.5, 0.5, 2.5], dtype=jnp.float32)
+Z_STAR = jnp.array([1.0, 1.5, 0.5, 1.0, 2.5], dtype=jnp.float32)  # smooth,clearance,upright,torque,skeleton
 PARAM_NAMES = list(pp.THETA_SHARED_NAMES)
 
 
-def build(seed=0, n_iters=60, n_scenes=6):
+def build(seed=0, n_iters=60, n_scenes=6, constrained=False):
     """Assemble the tied three-stage model and the fit/test scene split.
 
     `soft_line_search`/`soft_curvature_gate` are OFF, unlike
@@ -50,7 +50,8 @@ def build(seed=0, n_iters=60, n_scenes=6):
     """
     prob = pp.PickPlaceProblem.load(str(URDF_PATH), str(SRDF_PATH), str(MESH_DIR))
     forward_solver = pp.make_composed_forward_solver(
-        n_iters=n_iters, soft_line_search=False, soft_curvature_gate=False)
+        n_iters=n_iters, soft_line_search=False, soft_curvature_gate=False,
+        robot=prob.base.robot)
 
     rng = np.random.default_rng(seed)
     scenes_all = sample_pickplace_scenes(rng, 2 * n_scenes)
@@ -63,15 +64,27 @@ def build(seed=0, n_iters=60, n_scenes=6):
     # though theta is shared -- sigma carries units, theta carries preference.
     x0_star, phase_scenes_star, q_pick, q_place = prob.seeds(fit, THETA_IK)
     key = jax.random.PRNGKey(seed)
+    # Collision as a theta-INDEPENDENT hard constraint (opt-in): each phase's
+    # smooth soft-min obstacle clearance (`RobotProblem.collision_constraints_fn`,
+    # well-conditioned -- FD-validated cos>0.998, unlike the torque hinge, see
+    # `torque-constraint-deferred`) is folded into the constrained implicit
+    # adjoint, so the recovered costs are inverted through a collision-feasible
+    # forward map rather than one where collision is only a soft cost term.
+    def _cfn(seg_problem):
+        return seg_problem.collision_constraints_fn() if constrained else None
+
     inner_by_phase = {}
     for p in pp.PHASES:
         rf = prob.shared_segment_residual_fn(p)
         scales = prob.calibrate_segment(p, rf, phase_scenes_star[p], key)
-        inner_by_phase[p] = make_inner_solver(rf, scales, forward_solver=forward_solver)
+        inner_by_phase[p] = make_inner_solver(
+            rf, scales, forward_solver=forward_solver,
+            constraints_fn=_cfn(prob.seg[p]))
 
     full_rf = prob.shared_full_residual_fn()
     full_scales = prob.calibrate_full(full_rf, prob.full_scenes(fit, q_pick, q_place), key)
-    refine = make_inner_solver(full_rf, full_scales, forward_solver=forward_solver)
+    refine = make_inner_solver(full_rf, full_scales, forward_solver=forward_solver,
+                               constraints_fn=_cfn(prob.seg["full"]))
 
     return dict(prob=prob, fit=fit, test=test, inner_by_phase=inner_by_phase,
                 refine=refine, seed=seed)
@@ -125,10 +138,11 @@ def fit_z(loss_and_grad, starts, *, lr=0.05, n_steps=40):
     return best
 
 
-def run(seed=0, n_iters=60, n_scenes=6, n_steps=40, n_starts=8, ablate_stage2=True):
+def run(seed=0, n_iters=60, n_scenes=6, n_steps=40, n_starts=8, ablate_stage2=True,
+        constrained=False):
     t_wall_start = time.perf_counter()
     t0 = time.perf_counter()
-    built = build(seed=seed, n_iters=n_iters, n_scenes=n_scenes)
+    built = build(seed=seed, n_iters=n_iters, n_scenes=n_scenes, constrained=constrained)
     fit, test = built["fit"], built["test"]
     print(f"[build] {time.perf_counter()-t0:.1f}s  K={pp.K_SHARED} {PARAM_NAMES}  "
           f"N_FULL={pp.N_FULL}  fit/test = {n_scenes}/{n_scenes}  "
@@ -249,11 +263,14 @@ if __name__ == "__main__":
     ap.add_argument("--n-steps", type=int, default=40)
     ap.add_argument("--n-starts", type=int, default=8)
     ap.add_argument("--no-ablate-stage2", action="store_true")
+    ap.add_argument("--constrained", action="store_true",
+                    help="Fold per-phase collision as a hard AL constraint into "
+                         "the forward solve + constrained implicit adjoint.")
     ap.add_argument("--out", default=None, help="Save results to JSON")
     a = ap.parse_args()
     out = run(seed=a.seed, n_iters=a.n_iters, n_scenes=a.n_scenes,
               n_steps=a.n_steps, n_starts=a.n_starts,
-              ablate_stage2=not a.no_ablate_stage2)
+              ablate_stage2=not a.no_ablate_stage2, constrained=a.constrained)
     report(out)
     if a.out:
         import os as _os

@@ -70,6 +70,13 @@ class RobotProblem:
     dof: int
     ee_index: int
     n_timesteps: int
+    # Interior rows to HARD-clamp in `unpack`, as ((row_idx, scene_attr), ...).
+    # Empty for every base/segment problem (endpoints-only clamp, unchanged).
+    # The composed FULL trajectory sets this to pin the grasp/place waypoints
+    # (q_pick/q_place) exactly, the way SPaSM and cutamp keep the grasp poses as
+    # HARD task waypoints -- a soft `skeleton` cost lets the refine drift off the
+    # grasp (~100 mm) and, for tetris, wander out of joint limits.
+    pinned_rows: tuple = ()
 
     @staticmethod
     def load(urdf_path, srdf_path, mesh_dir, n_timesteps, ee_link=EE_LINK):
@@ -100,9 +107,12 @@ class RobotProblem:
     def unpack(self, x_flat, scene):
         """Interior waypoints -> full trajectory with the endpoints clamped on."""
         interior = x_flat.reshape(self.n_timesteps - 2, self.dof)
-        return jnp.concatenate(
+        q = jnp.concatenate(
             [scene.q_start[None, :], interior, scene.q_goal[None, :]], axis=0
         )
+        for row, attr in self.pinned_rows:
+            q = q.at[row].set(getattr(scene, attr))
+        return q
 
     def seed(self, scene):
         """Straight line in joint space between the endpoints."""
@@ -116,6 +126,22 @@ class RobotProblem:
         return self.robot.forward_kinematics(q)[..., self.ee_index, 4:7]
 
     # -- shared feature pieces -------------------------------------------------
+
+    def signed_clearance(self, q, scene):
+        """Per-waypoint smooth signed clearance ``d_min`` (T,) to the obstacle:
+        the soft-min over all robot spheres of sphere-vs-obstacle distance.
+        Positive = clear, negative = penetrating.  Every reduction is a soft-min
+        (closed-form sphere distance), never a hard max, so ``d_min`` is smooth
+        and its gradient vanishes at a true optimum -- see ``clearance_residual``
+        for why that matters for the implicit adjoint / FD."""
+        coll = self.robot_coll.at_config(self.robot, q)  # (T, S, N) spheres
+        d = (
+            jnp.linalg.norm(coll.pose.translation() - scene.obs_center, axis=-1)
+            - coll.radius
+            - scene.obs_radius[0]
+        )
+        d = d.reshape(d.shape[0], -1)  # (T, S*N)
+        return -SOFTMIN_TAU * jax.scipy.special.logsumexp(-d / SOFTMIN_TAU, axis=-1)
 
     def clearance_residual(self, q, scene):
         """Smooth sphere-level clearance to the obstacle.
@@ -131,15 +157,29 @@ class RobotProblem:
         theorem and finite differences become invalid there.  Sphere-vs-sphere
         distance is smooth in closed form, so every reduction here is a soft-min.
         """
-        coll = self.robot_coll.at_config(self.robot, q)  # (T, S, N) spheres
-        d = (
-            jnp.linalg.norm(coll.pose.translation() - scene.obs_center, axis=-1)
-            - coll.radius
-            - scene.obs_radius[0]
-        )
-        d = d.reshape(d.shape[0], -1)  # (T, S*N)
-        d_min = -SOFTMIN_TAU * jax.scipy.special.logsumexp(-d / SOFTMIN_TAU, axis=-1)
+        d_min = self.signed_clearance(q, scene)
         return jax.nn.softplus(SOFTNESS * (CLEARANCE_MARGIN - d_min)) / SOFTNESS
+
+    def collision_constraints_fn(self, margin=CLEARANCE_MARGIN):
+        """A theta-INDEPENDENT collision inequality for `ioc.inner`'s constrained
+        path: `constraints_fn(scene) -> (AugmentedLagrangianTerm,)` enforcing
+        ``margin - d_min(q) <= 0`` (keep every waypoint at least ``margin`` clear
+        of the obstacle), using the smooth soft-min clearance so the augmented
+        stationarity is well-conditioned -- unlike the hard torque hinge, see
+        `torque-constraint-deferred`.  Well-suited to the IOSP domains, whose
+        forward solve routes through this same base problem."""
+        from pyroffi.optimization_engines._trajopt_core import AugmentedLagrangianTerm
+
+        def constraints_fn(scene):
+            def residual(x_flat):
+                q = self.unpack(x_flat, scene)
+                return (margin - self.signed_clearance(q, scene)).reshape(-1)
+
+            return (AugmentedLagrangianTerm(
+                residual_fn=residual, kind="ineq",
+                rho0=1.0, rho_max=1e3, penalty_scale=3.0, name="collision"),)
+
+        return constraints_fn
 
     # -- scenes ----------------------------------------------------------------
 

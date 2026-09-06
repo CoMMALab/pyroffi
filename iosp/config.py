@@ -13,7 +13,15 @@ values, which is what makes "did recovery work" a question with an exact
 answer rather than a judgement call.
 """
 
+import os
 import pathlib
+
+# Set BEFORE `import jax`: XLA reads the host-allocator flag when the backend
+# first initialises, and importing this module pulls in jax below.  Doing it
+# here means every experiment gets the shared-GPU-friendly default just by
+# importing `config`, instead of repeating the line by hand (and getting the
+# order wrong).  `setdefault`, so an explicit launch-time value still wins.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax.numpy as jnp
 
@@ -30,12 +38,39 @@ MESH_DIR = RESOURCE_ROOT / "panda" / "meshes"
 CACHE_DIR = pathlib.Path(__file__).resolve().parent / "data" / "jax_cache"
 
 
-def enable_compilation_cache(min_compile_secs=5.0):
-    """Point JAX at the shared on-disk compile cache.  Call before any jit."""
+def setup():
+    """One-call experiment startup -- iosp's analogue of `spasm.util.jax_cache_on`.
+
+    Call this ONCE, at the very top of an experiment module, BEFORE importing any
+    jax-heavy code: it sets the XLA host-allocator flag (which must be in the
+    environment before JAX initialises the backend) and turns on the shared
+    persistent compile cache.  Replaces the old scattered pair
+    `os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")` +
+    `enable_compilation_cache()` that every experiment repeated by hand.
+
+    GPU selection stays on the command line (`CUDA_VISIBLE_DEVICES=<idx>`), the
+    same convention SPaSM uses -- never hard-coded here."""
+    import os
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    enable_compilation_cache()
+
+
+def enable_compilation_cache():
+    """Point JAX at the shared on-disk compile cache.  Call before any jit.
+
+    Settings mirror `spasm.util.jax_cache_on`: cache EVERY module, no size or
+    compile-time floor.  The floors matter here because the composed-solver
+    graphs (pickplace/tetris/tower, E10's methods) compile as many small XLA
+    modules -- at JAX's defaults (5s min compile time) none cleared the bar and
+    NOTHING persisted, so every run recompiled from scratch.  `min_entry_size
+    = -1` disables the size check outright (SPaSM's setting); `min_compile_time
+    = 0` caches regardless of how fast a module compiled.  Autotuning is cached
+    separately under `xla_gpu_per_fusion_autotune_cache_dir`."""
     import jax
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     jax.config.update("jax_compilation_cache_dir", str(CACHE_DIR))
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", min_compile_secs)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 
 # -- the demonstrator's cost (ground truth) ---------------------------------

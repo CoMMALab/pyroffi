@@ -1,0 +1,21 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{IOSP domain evaluation. Held-out end-effector RMSE (m) against a uniform-weight baseline and an oracle rollout at the true~$\theta^*$. Normalised regret and context-projected parameter error ($\|\Delta\theta\|$) quantify recovery quality.}
+\label{tab:domains}
+\begin{tabular}{llcccccc}
+\toprule
+Domain & Scene & $n$ & Uniform & \textbf{IOSP} & Oracle & Regret & $\|\Delta\theta\|$ \\
+ &  &  & \multicolumn{3}{c}{held-out EE RMSE (m)} & (norm.) & (context) \\
+\midrule
+Pick-place & -- & 3 & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+Tetris packing & 3 blocks & 3 & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+ & 5 blocks & 3 & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+Block stacking & 3 blocks & 3 & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+ & 5 blocks & 3 & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} & \texttt{--} \\
+\midrule
+Teleop pick-place & FR3 & 3 & \texttt{--} & \texttt{--} & -- & \texttt{--} & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
