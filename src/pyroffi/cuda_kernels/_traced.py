@@ -1,14 +1,20 @@
-"""Robot-specialized SQP-IK: the stock kernel compiled against cricket-traced kinematics.
+"""Robot-specialized CUDA kernels: stock kernels compiled against cricket-traced kinematics.
 
-The stock ``sqp_ik_cuda`` kernel walks the kinematic tree from runtime buffers on every
-FK/Jacobian evaluation. For one fixed robot and end-effector, cricket's ``language="cuda"``
-backend emits the same pose and geometric Jacobian as straight-line code with every
-transform folded to constants. This module generates that header, compiles the SQP kernel
-against it with ``-DPYROFFI_TRACED_ROBOT``, and registers the result as its own FFI target.
-Solver behaviour is otherwise identical; only the EE residual/Jacobian source changes.
+The stock kernels walk the kinematic tree from runtime buffers on every FK/Jacobian
+evaluation and size every loop by runtime DOF. For one fixed robot and end-effector, this
+module builds a variant of a kernel with ``-DPYROFFI_TRACED_ROBOT`` against a generated
+header holding
+
+* cricket's ``language="cuda"`` output: straight-line EE pose/Jacobian and every joint's
+  world pose, with the robot's transforms folded to constants;
+* the maps between cricket's joint order and the kernel's solved/frozen variables;
+* the collision tables of the call (world spheres, SRDF self-collision pairs).
+
+and registers it as its own FFI target taking the stock operands. What a kernel does with
+the header is up to its ``#ifdef PYROFFI_TRACED_ROBOT`` blocks (see ``_traced_robot.cuh``).
 
 Builds are cached on disk (``$PYROFFI_TRACED_CACHE``, default ``~/.cache/pyroffi/traced``)
-keyed by the generated header, kernel sources and flags, so each robot compiles once.
+keyed by the header, kernel sources and flags, so each robot compiles once.
 
 Requires cricket built with its Python extension (``external/cricket``) and ``nvcc``.
 """
@@ -27,12 +33,16 @@ import jax
 import numpy as np
 from loguru import logger
 
-
-_IK_DIR = Path(__file__).parent
-_KERNELS_DIR = _IK_DIR.parent
+_KERNELS_DIR = Path(__file__).parent
 _REPO_ROOT = _KERNELS_DIR.parents[2]
 
-# Kinematics are all this path uses, so an empty SRDF keeps cricket from spending
+# Kernels with a traced variant: source (relative to cuda_kernels/) and FFI handler symbol.
+KERNELS = {
+    "sqp_ik": ("ik/_sqp_ik_cuda_kernel.cu", "SqpIkCudaFfi"),
+    "ls_ik": ("ik/_ls_ik_cuda_kernel.cu", "LsIkCudaFfi"),
+}
+
+# Kinematics are all cricket is used for here, so an empty SRDF keeps it from spending
 # seconds sampling self-collisions it would otherwise guess without one.
 _EMPTY_SRDF = '<?xml version="1.0"?>\n<robot name="robot"></robot>\n'
 
@@ -44,13 +54,13 @@ def _cache_root() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "pyroffi" / "traced"
 
 
-def _generate_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
-                     joint_names: tuple[str, ...], solved_names: tuple[str, ...]) -> str:
+def _robot_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
+                  joint_names: tuple[str, ...], solved_names: tuple[str, ...]) -> str:
     try:
         import cricket
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
-            "Traced SQP-IK needs cricket's Python extension. Build it with "
+            "Traced kernels need cricket's Python extension. Build it with "
             "`bash build_kernels/build_cricket_jit.sh`."
         ) from exc
 
@@ -68,7 +78,7 @@ def _generate_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...
     cricket_names = list(gen.data["joint_names"])
     if sorted(cricket_names) != sorted(actuated_names):
         raise ValueError(
-            "Traced SQP-IK: cricket's joints do not match pyroffi's actuated joints "
+            "Traced kernel: cricket's joints do not match pyroffi's actuated joints "
             f"(cricket {cricket_names}, pyroffi {list(actuated_names)}). Mimic joints and "
             "joints pinocchio models with extra coordinates are not supported."
         )
@@ -92,9 +102,9 @@ def _generate_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...
         f"constexpr int n_solved = {len(solved)};\n"
         f"constexpr int n_frozen = {len(frozen)};\n"
         # Actuated (pyroffi) index of solved variable i / frozen slot k.
-        f"static __host__ __device__ __forceinline__ int solved_idx(int i)\n"
+        "static __host__ __device__ __forceinline__ int solved_idx(int i)\n"
         f"{{\n    constexpr int t[{max(len(solved), 1)}] = {{{idx(solved)}}};\n    return t[i];\n}}\n"
-        f"static __host__ __device__ __forceinline__ int frozen_idx(int k)\n"
+        "static __host__ __device__ __forceinline__ int frozen_idx(int k)\n"
         f"{{\n    constexpr int t[{max(len(frozen), 1)}] = {{{idx(frozen)}}};\n    return t[k];\n}}\n"
         "// Cricket's q from the solved variables and the frozen joints.\n"
         "static __device__ __forceinline__ void gather_q(const float* __restrict__ cfg,\n"
@@ -109,7 +119,7 @@ def _generate_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...
 
 
 def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables) -> str:
-    """The robot's collision geometry as compile-time tables for the traced build.
+    """The call's collision geometry as compile-time tables.
 
     ``robot_spheres``/``robot_sphere_joint`` are the world-collision spheres (joint frame) and
     ``self_tables`` the SRDF-filtered self-collision tables, exactly as the kernel receives them.
@@ -137,23 +147,23 @@ def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables) -> s
     )
 
 
-def _compile(header: str, n_q: int, n_joints: int) -> Path:
+def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
     import jaxlib
 
+    source = _KERNELS_DIR / KERNELS[kernel][0]
     # Capacities sized exactly to this robot, and only its own solve size instantiated.
     flags = [
         "-O3", "-std=c++17", os.environ.get("PYROFFI_TRACED_GPU_ARCH", "-arch=native"),
-        f"-DMAX_JOINTS={n_joints}", f"-DMAX_ACT={n_q}", "-DMAX_EE=1",
-        f"-DPYROFFI_SOLVE_N_BUCKETS(X)=X({n_q})",
+        f"-DMAX_JOINTS={n_joints}", f"-DMAX_ACT={n_solved}", "-DMAX_EE=1",
+        f"-DPYROFFI_SOLVE_N_BUCKETS(X)=X({n_solved})",
         "-DPYROFFI_TRACED_ROBOT", "--shared", "--compiler-options", "-fPIC",
     ]
-    sources = [*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(_IK_DIR.glob("*.cuh")),
-               _IK_DIR / "_sqp_ik_cuda_kernel.cu"]
+    sources = [*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(source.parent.glob("*.cuh")), source]
     key = hashlib.sha1("\x00".join(
-        [header, " ".join(flags), *(p.read_text() for p in sources)]).encode()).hexdigest()
+        [kernel, header, " ".join(flags), *(p.read_text() for p in sources)]).encode()).hexdigest()
 
     build_dir = _cache_root() / key
-    so_path = build_dir / "sqp_ik_traced.so"
+    so_path = build_dir / f"{kernel}_traced.so"
     if so_path.is_file():
         return so_path
 
@@ -163,20 +173,20 @@ def _compile(header: str, n_q: int, n_joints: int) -> Path:
         "nvcc", *flags,
         f"-I{build_dir}", f"-I{_KERNELS_DIR}", f"-I{_REPO_ROOT / 'external' / 'GLASS'}",
         f"-I{Path(jaxlib.__file__).parent / 'include'}",
-        "-o", str(so_path), str(_IK_DIR / "_sqp_ik_cuda_kernel.cu"),
+        "-o", str(so_path), str(source),
     ]
-    logger.info(f"Compiling traced SQP-IK kernel (one-time, cached): {build_dir}")
+    logger.info(f"Compiling traced {kernel} kernel (one-time, cached): {build_dir}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"nvcc failed to compile the traced SQP-IK kernel:\n{result.stderr}")
+        raise RuntimeError(f"nvcc failed to compile the traced {kernel} kernel:\n{result.stderr}")
     return so_path
 
 
 @lru_cache(maxsize=None)
-def traced_sqp_ik_target(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
-                         joint_names: tuple[str, ...], chain_names: tuple[str, ...],
-                         collision_src: str) -> str:
-    """Build (or load from cache) and register the traced kernel; return its FFI target name.
+def traced_target(kernel: str, urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
+                  joint_names: tuple[str, ...], chain_names: tuple[str, ...],
+                  collision_src: str, has_collision: bool) -> str:
+    """Build (or load from cache) and register a traced kernel; return its FFI target name.
 
     ``collision_src`` comes from :func:`collision_tables_source`; the build is only valid for
     those tables, and the kernel rejects a launch whose table sizes differ.
@@ -186,19 +196,18 @@ def traced_sqp_ik_target(urdf_xml: str, ee_link: str, actuated_names: tuple[str,
     move; the build then solves over the chain alone and carries the rest from the seed.
     Collision gradients can move any joint, so collision builds solve over all of them.
     """
-    no_collision = "n_robot_spheres = 0;" in collision_src and "n_self_pairs = 0;" in collision_src
-    solved = chain_names if no_collision else actuated_names
-    header = (_generate_header(urdf_xml, ee_link, actuated_names, joint_names, solved)
+    solved = actuated_names if has_collision else chain_names
+    header = (_robot_header(urdf_xml, ee_link, actuated_names, joint_names, solved)
               + collision_src)
-    so_path = _compile(header, len(solved), len(joint_names))
-    lib = ctypes.CDLL(str(so_path))
+    lib = ctypes.CDLL(str(_compile(kernel, header, len(solved), len(joint_names))))
 
     capsule_new = ctypes.pythonapi.PyCapsule_New
     capsule_new.restype = ctypes.py_object
     capsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
     capsule = capsule_new(
-        ctypes.cast(lib.SqpIkCudaFfi, ctypes.c_void_p), b"xla._CUSTOM_CALL_TARGET", None)
+        ctypes.cast(getattr(lib, KERNELS[kernel][1]), ctypes.c_void_p),
+        b"xla._CUSTOM_CALL_TARGET", None)
 
-    name = f"sqp_ik_cuda_traced_{so_path.parent.name[:16]}"
+    name = f"{kernel}_cuda_traced_{hashlib.sha1(header.encode()).hexdigest()[:16]}"
     jax.ffi.register_ffi_target(name, capsule, platform="CUDA")
     return name

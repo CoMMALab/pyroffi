@@ -114,6 +114,7 @@ def ls_ik_cuda(
     self_link_joint=None,
     self_pair_i=None,
     self_pair_j=None,
+    ffi_target: str = "ls_ik_cuda",
 ) -> tuple[Float[Array, "n_problems n_seeds n_act"], Float[Array, "n_problems n_seeds"]]:
     """Run multi-seed Levenberg-Marquardt on the GPU with multi-EE support.
 
@@ -188,7 +189,7 @@ def ls_ik_cuda(
 
     def _run(*ops):
         return jax.ffi.ffi_call(
-            "ls_ik_cuda",
+            ffi_target,
             (
                 jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
                 jax.ShapeDtypeStruct((n_problems, n_seeds),        jnp.float32),

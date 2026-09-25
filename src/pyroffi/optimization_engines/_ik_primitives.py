@@ -169,6 +169,37 @@ _EMPTY_SELF_TABLES = (
 )
 
 
+def traced_ffi_target(kernel: str, stock_target: str, robot: Robot,
+                      target_link_indices: tuple[int, ...], traced: bool,
+                      robot_spheres, robot_sphere_joint, self_tables) -> str:
+    """FFI target for an IK kernel: ``stock_target``, or a build of ``kernel`` compiled
+    against cricket-traced kinematics and this call's collision tables (see
+    ``cuda_kernels/_traced.py``). Single end-effector only."""
+    if not traced:
+        return stock_target
+    import numpy as np
+
+    from ..cuda_kernels._traced import collision_tables_source
+
+    if len(target_link_indices) != 1:
+        raise NotImplementedError(
+            f"traced {kernel} supports a single end-effector; got {len(target_link_indices)}.")
+    if robot._backends is None:
+        raise RuntimeError(f"traced {kernel} needs a Robot built with Robot.from_urdf.")
+
+    # Empty buffers may be traced jnp.zeros (created inside a caller's jit); only their
+    # static shape matters. Populated ones are host-built constants.
+    def host(a):
+        return np.zeros(a.shape) if a.size == 0 else np.asarray(a)
+
+    has_collision = robot_sphere_joint.size > 0 or self_tables[3].size > 0
+    collision_src = collision_tables_source(
+        host(robot_spheres), host(robot_sphere_joint), [host(t) for t in self_tables])
+    return robot._backends.traced_target(
+        kernel, int(target_link_indices[0]), robot.links.names, robot.joints.actuated_names,
+        robot.joints.names, collision_src, has_collision)
+
+
 def self_collision_table_arrays(robot, collision_checker):
     """Self-collision buffers for the CUDA IK kernels, empties when unavailable.
 

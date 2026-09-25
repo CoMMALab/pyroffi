@@ -1,4 +1,4 @@
-"""Traced SQP-IK (kernel compiled against cricket kinematics) must solve what the stock kernel solves."""
+"""Traced IK kernels (compiled against cricket kinematics) must solve what the stock kernels solve."""
 
 import shutil
 
@@ -11,10 +11,13 @@ import yourdfpy
 
 pytest.importorskip("cricket")
 if shutil.which("nvcc") is None or jax.default_backend() != "gpu":
-    pytest.skip("traced SQP-IK needs nvcc and a GPU", allow_module_level=True)
+    pytest.skip("traced kernels need nvcc and a GPU", allow_module_level=True)
 
 from pyroffi import Robot
+from pyroffi.optimization_engines._ls_ik import ls_ik_solve_cuda_batch
 from pyroffi.optimization_engines._sqp_ik import sqp_ik_solve_cuda, sqp_ik_solve_cuda_batch
+
+BATCH_SOLVERS = [sqp_ik_solve_cuda_batch, ls_ik_solve_cuda_batch]
 
 
 @pytest.fixture(scope="module")
@@ -29,7 +32,8 @@ def _pose_errors(robot, link, q, targets):
             np.asarray(jnp.linalg.norm(delta.rotation().log(), axis=-1)))
 
 
-def test_batch_matches_stock(panda):
+@pytest.mark.parametrize("solve", BATCH_SOLVERS, ids=["sqp", "ls"])
+def test_batch_matches_stock(panda, solve):
     robot, link = panda
     key = jax.random.PRNGKey(0)
     q_true = jax.random.uniform(key, (64, robot.joints.num_actuated_joints),
@@ -38,7 +42,7 @@ def test_batch_matches_stock(panda):
     prev = jnp.broadcast_to(robot.default_cfg, q_true.shape)
 
     for traced in (False, True):
-        q = sqp_ik_solve_cuda_batch(robot, (link,), targets, key, prev, traced=traced)
+        q = solve(robot, (link,), targets, key, prev, traced=traced)
         pos, rot = _pose_errors(robot, link, q, targets)
         assert np.mean((pos < 1e-3) & (rot < 1e-2)) == 1.0, f"traced={traced}"
 
@@ -55,7 +59,8 @@ def test_single_and_multi_ee(panda):
                           robot.default_cfg, traced=True)
 
 
-def test_in_kernel_collision_matches_stock(panda):
+@pytest.mark.parametrize("solve", BATCH_SOLVERS, ids=["sqp", "ls"])
+def test_in_kernel_collision_matches_stock(panda, solve):
     """The traced build bakes the collision tables in; it must stay as collision-free as stock."""
     from pyroffi._robot_srdf_parser import read_disabled_collisions_from_srdf
     from pyroffi.collision import RobotCollisionSpherized, Sphere, collide
@@ -78,7 +83,7 @@ def test_in_kernel_collision_matches_stock(panda):
         return float(jnp.mean(d > 0))
 
     fractions = [
-        clear_fraction(sqp_ik_solve_cuda_batch(
+        clear_fraction(solve(
             robot, (link,), targets, key, prev, traced=traced, collision_free=True,
             collision_checker=coll, collision_world=[obstacle], constraint_refine_iters=0))
         for traced in (False, True)

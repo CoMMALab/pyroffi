@@ -129,13 +129,14 @@ class CudaBackends:
         self._ik_masks[key] = out
         return out
 
-    def traced_sqp_ik_target(
-        self, ee_link: int, link_names: tuple[str, ...], actuated_names: tuple[str, ...],
-        joint_names: tuple[str, ...], collision_src: str,
+    def traced_target(
+        self, kernel: str, ee_link: int, link_names: tuple[str, ...],
+        actuated_names: tuple[str, ...], joint_names: tuple[str, ...],
+        collision_src: str, has_collision: bool,
     ) -> str:
-        """FFI target of the SQP-IK kernel compiled against cricket-traced kinematics
-        for ``ee_link`` (built once per robot and link, cached on disk)."""
-        from .cuda_kernels.ik._sqp_ik_traced import traced_sqp_ik_target
+        """FFI target of ``kernel`` compiled against cricket-traced kinematics for
+        ``ee_link`` (built once per robot, link and collision tables; cached on disk)."""
+        from .cuda_kernels._traced import traced_target
 
         chain = []
         j = int(self._parent_joint_indices[ee_link])
@@ -143,9 +144,9 @@ class CudaBackends:
             chain.append(joint_names[j])
             j = int(self._parent_indices[j])
         chain_names = tuple(n for n in actuated_names if n in chain)
-        return traced_sqp_ik_target(
-            self._urdf.write_xml_string().decode(), link_names[ee_link], actuated_names,
-            joint_names, chain_names, collision_src)
+        return traced_target(
+            kernel, self._urdf.write_xml_string().decode(), link_names[ee_link],
+            actuated_names, joint_names, chain_names, collision_src, has_collision)
 
     # ── Collision backends ─────────────────────────────────────────────────
 

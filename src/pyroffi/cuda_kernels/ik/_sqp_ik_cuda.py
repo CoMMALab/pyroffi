@@ -154,7 +154,7 @@ def sqp_ik_cuda(
         eps_pos:        Position convergence threshold [m].
         eps_ori:        Orientation convergence threshold [rad].
         ffi_target:     FFI target to launch. A robot-specialized build from
-                        ``_sqp_ik_traced.traced_sqp_ik_target`` takes the same operands.
+                        ``cuda_kernels._traced.traced_target("sqp_ik", ...)`` takes the same operands.
 
     Returns:
         Tuple ``(cfgs, errors)`` where ``cfgs`` has shape

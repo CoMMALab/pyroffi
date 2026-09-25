@@ -45,7 +45,7 @@ from jaxtyping import Float
 
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
-from ._ik_primitives import self_collision_table_arrays
+from ._ik_primitives import self_collision_table_arrays, traced_ffi_target
 from ._batching import (
     dispatch_vmap_to_batched,
     make_sharded_pmap,
@@ -568,31 +568,6 @@ def _sqp_ik_solve_cuda_jit(
 
 
 
-def _sqp_ffi_target(robot: Robot, target_link_indices: tuple[int, ...], traced: bool,
-                    robot_spheres, robot_sphere_joint, self_tables) -> str:
-    """FFI target for the SQP kernel: the stock build, or one compiled against
-    cricket-traced kinematics and this call's collision tables (see ``_sqp_ik_traced``)."""
-    if not traced:
-        return "sqp_ik_cuda"
-    from ..cuda_kernels.ik._sqp_ik_traced import collision_tables_source
-
-    # Empty buffers may be traced jnp.zeros (created inside a caller's jit); only their
-    # static shape matters. Populated ones are host-built constants.
-    def host(a):
-        return np.zeros(a.shape) if a.size == 0 else np.asarray(a)
-
-    collision_src = collision_tables_source(
-        host(robot_spheres), host(robot_sphere_joint), [host(t) for t in self_tables])
-    if len(target_link_indices) != 1:
-        raise NotImplementedError(
-            f"traced SQP-IK supports a single end-effector; got {len(target_link_indices)}.")
-    if robot._backends is None:
-        raise RuntimeError("traced SQP-IK needs a Robot built with Robot.from_urdf.")
-    return robot._backends.traced_sqp_ik_target(
-        int(target_link_indices[0]), robot.links.names, robot.joints.actuated_names,
-        robot.joints.names, collision_src)
-
-
 def _feasible_first_argmin(errors, feasible, axis=-1):
     """Argmin over `errors` in which every feasible seed beats every infeasible one.
 
@@ -759,8 +734,8 @@ def sqp_ik_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
-    ffi_target = _sqp_ffi_target(
-        robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+    ffi_target = traced_ffi_target(
+        "sqp_ik", "sqp_ik_cuda", robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
@@ -1301,8 +1276,8 @@ def _sqp_ik_solve_cuda_batch_impl(
         self_sph_local, self_link_start, self_link_joint,
         self_pair_i, self_pair_j, enable_collision,
     ) = _prep
-    ffi_target = _sqp_ffi_target(
-        robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+    ffi_target = traced_ffi_target(
+        "sqp_ik", "sqp_ik_cuda", robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
     n_problems = previous_cfgs.shape[0]

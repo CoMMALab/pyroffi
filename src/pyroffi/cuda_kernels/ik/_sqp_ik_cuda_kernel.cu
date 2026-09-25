@@ -176,13 +176,8 @@ void sqp_ik_kernel(
     constexpr int n_robot_spheres = pyroffi::traced::n_robot_spheres;
     constexpr int n_self_pairs    = pyroffi::traced::n_self_pairs;
     (void)n_robot_spheres_arg; (void)n_self_pairs_arg;
-    robot_spheres_local    = pyroffi::traced::kRobotSpheres;
-    robot_sphere_joint_idx = pyroffi::traced::kRobotSphereJoint;
-    self_sph_local  = pyroffi::traced::kSelfSph;
-    self_link_start = pyroffi::traced::kSelfLinkStart;
-    self_link_joint = pyroffi::traced::kSelfLinkJoint;
-    self_pair_i     = pyroffi::traced::kSelfPairI;
-    self_pair_j     = pyroffi::traced::kSelfPairJ;
+    pyroffi::traced::bind_collision_tables(robot_spheres_local, robot_sphere_joint_idx,
+        self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j);
 #else
     const int n_joints = n_joints_arg, n_act = n_act_arg, n_ee = n_ee_arg;
     const int n_robot_spheres = n_robot_spheres_arg, n_self_pairs = n_self_pairs_arg;
@@ -264,10 +259,8 @@ void sqp_ik_kernel(
     float J[6 * MAX_EE * MAX_ACT];
 
 #ifdef PYROFFI_TRACED_ROBOT
-    float frz[pyroffi::traced::n_frozen > 0 ? pyroffi::traced::n_frozen : 1];
-    for (int a = 0; a < n_act; a++) cfg[a] = seeds[gs * n_full + pyroffi::traced::solved_idx(a)];
-    for (int k = 0; k < pyroffi::traced::n_frozen; k++)
-        frz[k] = seeds[gs * n_full + pyroffi::traced::frozen_idx(k)];
+    float frz[pyroffi::traced::frz_len];
+    pyroffi::traced::load_state(seeds + gs * n_full, cfg, frz);
 #else
     for (int a = 0; a < n_act; a++) cfg[a] = seeds[gs * n_act + a];
 #endif
@@ -975,10 +968,7 @@ void sqp_ik_kernel(
     // solved step), so the leader guard avoids a redundant same-value write race.
     if (leader) {
 #ifdef PYROFFI_TRACED_ROBOT
-        for (int a = 0; a < n_act; a++)
-            out[gs * n_full + pyroffi::traced::solved_idx(a)] = best_cfg[a];
-        for (int k = 0; k < pyroffi::traced::n_frozen; k++)
-            out[gs * n_full + pyroffi::traced::frozen_idx(k)] = frz[k];
+        pyroffi::traced::store_state(best_cfg, frz, out + gs * n_full);
 #else
         for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
 #endif
@@ -1062,9 +1052,7 @@ static ffi::Error SqpIkCudaImpl(
                           "sqp_ik_cuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ").");
     const pyroffi::Tier tier = pyroffi_tier_from_env();
 #ifdef PYROFFI_TRACED_ROBOT
-    if (n_ee != 1 || n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
-        n_robot_spheres != pyroffi::traced::n_robot_spheres ||
-        n_self_pairs != pyroffi::traced::n_self_pairs)
+    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs))
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "sqp_ik_cuda (traced): launch does not match the robot and collision "
                           "tables this build was traced for.");

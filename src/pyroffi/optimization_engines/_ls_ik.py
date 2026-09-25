@@ -41,6 +41,7 @@ from ._ik_primitives import (
     _LS_ALPHAS,
     self_collision_table_arrays,
     split_cuda_and_post_constraints,
+    traced_ffi_target,
 )
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._implicit_diff import (
@@ -573,6 +574,7 @@ def ls_ik_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _ls_ik_solve_cuda_jit(
@@ -615,6 +617,7 @@ def _ls_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target:           str = "ls_ik_cuda",
 ) -> Float[Array, "n_act"]:
     from ..cuda_kernels.ik._ls_ik_cuda import ls_ik_cuda
 
@@ -683,6 +686,7 @@ def _ls_ik_solve_cuda_jit(
         enable_collision = enable_collision,
         collision_weight = collision_weight,
         collision_margin = collision_margin,
+        ffi_target     = ffi_target,
     )
     cfgs   = cfgs[0]    # (n_seeds, n_act)
     errors = errors[0]  # (n_seeds,) — all EE weighted errors from CUDA
@@ -744,6 +748,7 @@ def ls_ik_solve_cuda(
     constraint_refine_iters: int = 12,
     ancestor_masks:      Array | None = None,
     target_jnts:         Array | None = None,
+    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`ls_ik_solve`.
 
@@ -870,6 +875,9 @@ def ls_ik_solve_cuda(
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
     _sc = self_collision_table_arrays(robot, collision_checker)
+    ffi_target = traced_ffi_target(
+        "ls_ik", "ls_ik_cuda", robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx, _sc)
 
     # vmap over this solver folds the mapped axis into the kernel's PROBLEM axis
     # and makes one launch, instead of serialising a kernel that already batches.
@@ -909,6 +917,7 @@ def ls_ik_solve_cuda(
         constraint_fns=cuda_constraint_fns,
         constraint_args=cuda_constraint_args,
         constraint_weights=cuda_constraint_weights,
+        ffi_target=ffi_target,
     )
 
     def _batched(target_wxyz_xyz, prev_cfgs):
@@ -955,6 +964,7 @@ def ls_ik_solve_cuda(
         constraint_fns=cuda_constraint_fns,
         constraint_args=cuda_constraint_args,
         constraint_weights=cuda_constraint_weights,
+        ffi_target=ffi_target,
     )
         return winners, jnp.zeros((winners.shape[0],))
 
@@ -1012,6 +1022,7 @@ def ls_ik_solve_cuda(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _ls_ik_solve_cuda_batch_jit(
@@ -1050,6 +1061,7 @@ def _ls_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target:           str = "ls_ik_cuda",
 ) -> Float[Array, "n_problems n_act"]:
     from ..cuda_kernels.ik._ls_ik_cuda import ls_ik_cuda
 
@@ -1119,6 +1131,7 @@ def _ls_ik_solve_cuda_batch_jit(
         enable_collision = enable_collision,
         collision_weight = collision_weight,
         collision_margin = collision_margin,
+        ffi_target     = ffi_target,
     )  # cfgs: (n_problems, n_seeds, n_act), errors: (n_problems, n_seeds)
 
     # ── Winner selection per problem: task (all EEs) + constraint penalties + continuity
@@ -1174,6 +1187,7 @@ def ls_ik_solve_cuda_batch(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA LS-IK: solve n_problems targets in a single kernel launch.
 
@@ -1266,6 +1280,9 @@ def ls_ik_solve_cuda_batch(
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
     _sc_b = self_collision_table_arrays(robot, collision_checker)
+    ffi_target = traced_ffi_target(
+        "ls_ik", "ls_ik_cuda", robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx, _sc_b)
 
     winners = sharded_batch_call(
         _ls_ik_solve_cuda_batch_jit,
@@ -1305,6 +1322,7 @@ def ls_ik_solve_cuda_batch(
             collision_margin=collision_margin,
             target_link_indices=target_link_indices,
             constraint_fns=cuda_constraint_fns,
+            ffi_target=ffi_target,
         ),
         env_var='PYROFFI_LS_IK_PMAP_MIN',
     )
