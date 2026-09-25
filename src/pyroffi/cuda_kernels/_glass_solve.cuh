@@ -134,7 +134,11 @@ __host__ __device__ constexpr bool tier_choice_allowed(int N) {
 //   64 -> padded; block tier only. The last bucket that fits static shared.
 //
 // NOTE 48/64 are block-tier-only, so they cost ONE instantiation each, not three.
+// A robot-specialized build may predefine this to its one exact size.
+#ifndef PYROFFI_SOLVE_N_BUCKETS
 #define PYROFFI_SOLVE_N_BUCKETS(X) X(7) X(8) X(16) X(32) X(48) X(64)
+#define PYROFFI_SOLVE_N_BUCKETS_DEFAULT_
+#endif
 
 /**
  * Smallest instantiated bucket that holds `n_act`, or 0 if none does.
@@ -158,10 +162,12 @@ __host__ __device__ constexpr int solve_bucket(int n_act) {
 #define PYROFFI_STRINGIFY(x) PYROFFI_STRINGIFY_(x)
 #define PYROFFI_SOLVE_MAX_N_STR PYROFFI_STRINGIFY(PYROFFI_SOLVE_MAX_N)
 constexpr int SOLVE_MAX_N = PYROFFI_SOLVE_MAX_N;
+#ifdef PYROFFI_SOLVE_N_BUCKETS_DEFAULT_
 static_assert(solve_bucket(SOLVE_MAX_N) == SOLVE_MAX_N,
               "SOLVE_MAX_N must be the largest PYROFFI_SOLVE_N_BUCKETS entry.");
 static_assert(solve_bucket(SOLVE_MAX_N + 1) == 0,
               "SOLVE_MAX_N must be the largest PYROFFI_SOLVE_N_BUCKETS entry.");
+#endif
 static_assert(MAX_ACT <= SOLVE_MAX_N,
               "MAX_ACT exceeds the largest solve bucket: a robot at MAX_ACT DOF would "
               "get solve_bucket()==0 and no kernel would launch. Add a bucket first.");

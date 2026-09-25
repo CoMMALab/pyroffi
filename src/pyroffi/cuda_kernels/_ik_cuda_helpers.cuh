@@ -245,6 +245,36 @@ static __device__ bool chol_solve(double* __restrict__ A,
 // IK residual and geometric Jacobian
 // ---------------------------------------------------------------------------
 
+// r = [p_ee - p_tgt, log(q_ee * q_tgt^-1)] for poses stored as [w, x, y, z, tx, ty, tz].
+static __device__ __forceinline__ void pose_residual(
+    const float* __restrict__ T_ee,
+    const float* __restrict__ target_T,
+    float*       __restrict__ r)
+{
+    r[0] = T_ee[4] - target_T[4];
+    r[1] = T_ee[5] - target_T[5];
+    r[2] = T_ee[6] - target_T[6];
+
+    const float q_tgt_inv[4] = { target_T[0], -target_T[1], -target_T[2], -target_T[3] };
+    float q_err[4];
+    quat_mul(T_ee, q_tgt_inv, q_err);
+    if (q_err[0] < 0.0f) {
+        q_err[0] = -q_err[0]; q_err[1] = -q_err[1];
+        q_err[2] = -q_err[2]; q_err[3] = -q_err[3];
+    }
+    const float sin_half = sqrtf(q_err[1]*q_err[1] + q_err[2]*q_err[2] + q_err[3]*q_err[3]);
+    if (sin_half > 1e-6f) {
+        const float inv_sin = 2.0f * atan2f(sin_half, q_err[0]) / sin_half;
+        r[3] = q_err[1] * inv_sin;
+        r[4] = q_err[2] * inv_sin;
+        r[5] = q_err[3] * inv_sin;
+    } else {
+        r[3] = 2.0f * q_err[1];
+        r[4] = 2.0f * q_err[2];
+        r[5] = 2.0f * q_err[3];
+    }
+}
+
 static __device__ void compute_residual_and_jacobian(
     const float* __restrict__ cfg,
     float*       __restrict__ T_world,

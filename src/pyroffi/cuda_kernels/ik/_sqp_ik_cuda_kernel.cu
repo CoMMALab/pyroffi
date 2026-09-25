@@ -35,6 +35,9 @@
 #include "_glass_solve.cuh"
 #include "_tier_kernel.cuh"
 #include "_collision_cuda_helpers.cuh"
+#ifdef PYROFFI_TRACED_ROBOT
+#include "_traced_robot.cuh"
+#endif
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -154,15 +157,37 @@ void sqp_ik_kernel(
     float*       __restrict__ out,
     float*       __restrict__ out_err,
     int*         __restrict__ out_feasible,   // (n_problems, n_seeds) 1 = satisfies
-    int   n_problems, int n_seeds, int n_joints, int n_act, int n_ee,
-    int   n_robot_spheres, int n_world_spheres, int n_world_capsules,
-    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs,
+    int   n_problems, int n_seeds, int n_joints_arg, int n_act_arg, int n_ee_arg,
+    int   n_robot_spheres_arg, int n_world_spheres, int n_world_capsules,
+    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs_arg,
     int   max_iter, int n_inner_iters,
     int   enable_collision,
     float collision_weight, float collision_margin,
     float pos_weight, float ori_weight, float lambda_init,
     float eps_pos, float eps_ori)
 {
+    // The traced build knows the robot's dimensions, so every loop bound is a constant.
+#ifdef PYROFFI_TRACED_ROBOT
+    // n_act counts the SOLVED variables; any frozen joints ride along from the seed.
+    constexpr int n_joints = pyroffi::traced::n_frames, n_act = pyroffi::traced::n_solved, n_ee = 1;
+    constexpr int n_full   = pyroffi::traced::n_q;
+    (void)n_joints_arg; (void)n_act_arg; (void)n_ee_arg;
+    // ...and so is its collision geometry, as constant-memory tables.
+    constexpr int n_robot_spheres = pyroffi::traced::n_robot_spheres;
+    constexpr int n_self_pairs    = pyroffi::traced::n_self_pairs;
+    (void)n_robot_spheres_arg; (void)n_self_pairs_arg;
+    robot_spheres_local    = pyroffi::traced::kRobotSpheres;
+    robot_sphere_joint_idx = pyroffi::traced::kRobotSphereJoint;
+    self_sph_local  = pyroffi::traced::kSelfSph;
+    self_link_start = pyroffi::traced::kSelfLinkStart;
+    self_link_joint = pyroffi::traced::kSelfLinkJoint;
+    self_pair_i     = pyroffi::traced::kSelfPairI;
+    self_pair_j     = pyroffi::traced::kSelfPairJ;
+#else
+    const int n_joints = n_joints_arg, n_act = n_act_arg, n_ee = n_ee_arg;
+    const int n_robot_spheres = n_robot_spheres_arg, n_self_pairs = n_self_pairs_arg;
+#endif
+
     // ── Shared memory: robot parameters loaded once per block ───────────────
     __shared__ float s_twists        [MAX_JOINTS * 6];
     __shared__ float s_parent_tf     [MAX_JOINTS * 7];
@@ -190,9 +215,14 @@ void sqp_ik_kernel(
         s_topo_inv[i]      = topo_inv[i];
     }
     for (int i = threadIdx.x; i < n_act; i += blockDim.x) {
-        s_lower[i]      = lower[i];
-        s_upper[i]      = upper[i];
-        s_fixed_mask[i] = fixed_mask[i];
+#ifdef PYROFFI_TRACED_ROBOT
+        const int src = pyroffi::traced::solved_idx(i);
+#else
+        const int src = i;
+#endif
+        s_lower[i]      = lower[src];
+        s_upper[i]      = upper[src];
+        s_fixed_mask[i] = fixed_mask[src];
     }
     const int p = blockIdx.y;
     for (int i = threadIdx.x; i < n_ee * 7; i += blockDim.x)
@@ -233,24 +263,76 @@ void sqp_ik_kernel(
     float r[6 * MAX_EE];
     float J[6 * MAX_EE * MAX_ACT];
 
+#ifdef PYROFFI_TRACED_ROBOT
+    float frz[pyroffi::traced::n_frozen > 0 ? pyroffi::traced::n_frozen : 1];
+    for (int a = 0; a < n_act; a++) cfg[a] = seeds[gs * n_full + pyroffi::traced::solved_idx(a)];
+    for (int k = 0; k < pyroffi::traced::n_frozen; k++)
+        frz[k] = seeds[gs * n_full + pyroffi::traced::frozen_idx(k)];
+#else
     for (int a = 0; a < n_act; a++) cfg[a] = seeds[gs * n_act + a];
+#endif
     for (int a = 0; a < n_act; a++) best_cfg[a] = cfg[a];
-
-    // Initial weighted error.
-    compute_multi_ee_residual_and_jacobian(
-        cfg, T_world,
-        s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-        s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-        s_target_jnts, s_ancestor_masks, s_target_Ts,
-        n_joints, n_act, n_ee, r, J);
-    float best_err = 0.0f;
-    for (int ee = 0; ee < n_ee; ee++)
-        for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
 
     // Hoisted out of the merit lambda: the QP assembly below needs them too, so
     // that collision enters the *step*, not only the accept/reject test.
     const bool want_self  = n_self_pairs > 0;
     const bool want_world = enable_collision && n_robot_spheres > 0;
+
+    // Every joint's world pose into T. The traced build writes it from cricket's
+    // straight-line FK instead of walking the tree.
+    auto fk_all = [&](const float* q, float* T) {
+#ifdef PYROFFI_TRACED_ROBOT
+        pyroffi::traced::frame_poses(q, frz, T);
+#else
+        fk_single(q, s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+                  s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+                  T, n_joints, n_act);
+#endif
+    };
+
+    // Residual (+ Jacobian) at q. Both also leave q's FK in T_world whenever the
+    // collision terms will read it.
+    auto eval_residual_jacobian = [&](const float* q) {
+#ifdef PYROFFI_TRACED_ROBOT
+        pyroffi::traced::residual_and_jacobian(q, frz, s_target_Ts, r, J);
+        if (want_world || want_self) fk_all(q, T_world);
+#else
+        compute_multi_ee_residual_and_jacobian(
+            q, T_world,
+            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+            s_target_jnts, s_ancestor_masks, s_target_Ts,
+            n_joints, n_act, n_ee, r, J);
+#endif
+    };
+    auto eval_residual = [&](const float* q, float* r_out) {
+#ifdef PYROFFI_TRACED_ROBOT
+        pyroffi::traced::residual(q, frz, s_target_Ts, r_out);
+        if (want_world || want_self) fk_all(q, T_world);
+#else
+        compute_multi_ee_residual_only(
+            q, T_world,
+            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
+            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
+            s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r_out);
+#endif
+    };
+
+    // Initial weighted error.
+    eval_residual_jacobian(cfg);
+    float best_err = 0.0f;
+    for (int ee = 0; ee < n_ee; ee++)
+        for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
+
+    // Shared descriptions of the collision geometry; the sweeps live in
+    // _collision_cuda_helpers.cuh so LS and SQP cannot drift apart.
+    const SelfCollisionRefs self_refs = {
+        self_sph_local, self_link_start, self_link_joint,
+        self_pair_i, self_pair_j, n_self_pairs };
+    const WorldCollisionRefs world_refs = {
+        robot_spheres_local, robot_sphere_joint_idx, n_robot_spheres,
+        world_spheres, n_world_spheres, world_capsules, n_world_capsules,
+        world_boxes, n_world_boxes, world_halfspaces, n_world_halfspaces };
 
     // Raw (unweighted) violation for a config whose FK is ALREADY in `T_eval`.
     // Every caller has just computed it; recomputing inside cost one redundant
@@ -358,10 +440,7 @@ void sqp_ik_kernel(
     // alpha tried, not necessarily the winner).
     auto constraint_violation = [&](const float* cfg_eval, float* T_eval) {
         if (!want_world && !want_self) return 0.0f;
-        fk_single(cfg_eval,
-                  s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-                  s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-                  T_eval, n_joints, n_act);
+        fk_all(cfg_eval, T_eval);
         return collision_raw_at(T_eval);
     };
 
@@ -373,12 +452,7 @@ void sqp_ik_kernel(
     for (int iter = 0; iter < max_iter; iter++) {
 
         // ── Residual + Jacobian ─────────────────────────────────────────
-        compute_multi_ee_residual_and_jacobian(
-            cfg, T_world,
-            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-            s_target_jnts, s_ancestor_masks, s_target_Ts,
-            n_joints, n_act, n_ee, r, J);
+        eval_residual_jacobian(cfg);
 
         // Early exit if ALL EEs converged.
         {
@@ -511,13 +585,6 @@ void sqp_ik_kernel(
             // in _collision_cuda_helpers.cuh so LS and SQP cannot drift apart.
             const RobotChainRefs chain_refs = {
                 s_twists, s_parent_idx, s_act_idx, s_mimic_mul, s_mimic_act_idx, n_joints };
-            const SelfCollisionRefs self_refs = {
-                self_sph_local, self_link_start, self_link_joint,
-                self_pair_i, self_pair_j, n_self_pairs };
-            const WorldCollisionRefs world_refs = {
-                robot_spheres_local, robot_sphere_joint_idx, n_robot_spheres,
-                world_spheres, n_world_spheres, world_capsules, n_world_capsules,
-                world_boxes, n_world_boxes, world_halfspaces, n_world_halfspaces };
 
             {
                 float g[MAX_ACT];
@@ -850,11 +917,7 @@ void sqp_ik_kernel(
                 cfg_trial[a] = clampf(cfg[a] + alphas[ai] * delta[a],
                                       s_lower[a], s_upper[a]);
 
-            compute_multi_ee_residual_only(
-                cfg_trial, T_world,
-                s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-                s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-                s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r_trial);
+            eval_residual(cfg_trial, r_trial);
 
             float err_trial = 0.0f;
             for (int ee = 0; ee < n_ee; ee++)
@@ -911,7 +974,14 @@ void sqp_ik_kernel(
     // Every lane of the group holds bit-identical state (same seed, same FK, same
     // solved step), so the leader guard avoids a redundant same-value write race.
     if (leader) {
+#ifdef PYROFFI_TRACED_ROBOT
+        for (int a = 0; a < n_act; a++)
+            out[gs * n_full + pyroffi::traced::solved_idx(a)] = best_cfg[a];
+        for (int k = 0; k < pyroffi::traced::n_frozen; k++)
+            out[gs * n_full + pyroffi::traced::frozen_idx(k)] = frz[k];
+#else
         for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
+#endif
         // Feasibility travels as its own value rather than folded into the error.
         // The host still has to order lexicographically -- an infeasible seed must
         // lose to every feasible one regardless of pose error -- but it now does
@@ -982,11 +1052,23 @@ static ffi::Error SqpIkCudaImpl(
 
     // N: the compile-time bucket holding n_act (identity-padded). 0 => past MAX_ACT's
     // ceiling, which _build_params.py should already have refused.
+#ifdef PYROFFI_TRACED_ROBOT
+    const int bucket = pyroffi::solve_bucket(pyroffi::traced::n_solved);
+#else
     const int bucket = pyroffi::solve_bucket(n_act);
+#endif
     if (bucket == 0)
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "sqp_ik_cuda: n_act exceeds the largest solve bucket (" PYROFFI_SOLVE_MAX_N_STR ").");
     const pyroffi::Tier tier = pyroffi_tier_from_env();
+#ifdef PYROFFI_TRACED_ROBOT
+    if (n_ee != 1 || n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
+        n_robot_spheres != pyroffi::traced::n_robot_spheres ||
+        n_self_pairs != pyroffi::traced::n_self_pairs)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "sqp_ik_cuda (traced): launch does not match the robot and collision "
+                          "tables this build was traced for.");
+#endif
 
 #define PYROFFI_SQP_ARGS                                                       \
         seeds.typed_data(), twists.typed_data(), parent_tf.typed_data(),       \

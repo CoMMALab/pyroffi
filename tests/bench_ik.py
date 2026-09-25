@@ -283,6 +283,8 @@ def _candidate_solvers(
             labels.append(f"{m}-JAX")
         if not cpu_only:
             labels.append(f"{m}-CUDA")
+    if not cpu_only:
+        labels.append("SQP-CUDA-Traced")
     _analytic_ok = robot_name is None or robot_name in _ANALYTIC_ROBOTS
     if not no_jax and _analytic_ok:
         labels.append("Analytic-JAX")
@@ -375,6 +377,8 @@ IK_KWARGS_SQP_CUDA = dict(
     eps_pos = 1e-8,
     eps_ori = 1e-8,
 )
+# Same solver, compiled against cricket-traced kinematics for the robot's EE.
+IK_KWARGS_SQP_CUDA_TRACED = dict(**IK_KWARGS_SQP_CUDA, traced=True)
 
 # MPPI-IK hyper-parameters.
 IK_KWARGS_MPPI_JAX = dict(
@@ -725,10 +729,10 @@ def _build_batch_ik_timer(fn, robot, tli, fixed_joint_mask, kwargs, is_jax_batch
     return _timer
 
 
-def _time_scan(timer_fn, *args, n: int = N_TIMED) -> float:
+def _time_scan(timer_fn, *args, n: int | None = None) -> float:
     """Run a scan-based timer *n* times and return median per-repeat wall-clock time (s)."""
     times = []
-    for _ in range(n):
+    for _ in range(N_TIMED if n is None else n):
         t0 = time.perf_counter()
         out = timer_fn(*args)
         jax.block_until_ready(out)
@@ -1928,6 +1932,7 @@ def _run_robot_benchmark(
             ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
             ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
             ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
+            ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED),
             ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
         ]
     if _learned_ik_available:
@@ -1945,6 +1950,7 @@ def _run_robot_benchmark(
                 ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
                 ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}),
                 ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
+                ("SQP-CUDA-Traced-COLL", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
                 ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
             ]
 
@@ -1970,6 +1976,7 @@ def _run_robot_benchmark(
             ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
             ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
             ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
+            ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED),
             ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
         ]
         if COLLISION_FREE:
@@ -1977,14 +1984,20 @@ def _run_robot_benchmark(
                 ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}),
                 ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
                 ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
+                ("SQP-CUDA-Traced-COLL-BATCH", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
                 ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
             ]
 
     # Per-solver isolation: keep only the selected solver's warmups so that only
     # its timers are built (and only its kernels are JIT/compiled in this process).
-    warmup_seq        = [e for e in warmup_seq        if _want(e[0])]
-    warmup_batch_jax  = [e for e in warmup_batch_jax  if _want(e[0])]
-    warmup_batch_cuda = [e for e in warmup_batch_cuda if _want(e[0])]
+    # Likewise drop warmups for evaluation blocks that --blocks excludes.
+    def _warm(label: str) -> bool:
+        block = ("batch" if label.endswith("-BATCH") else "seq") + ("_coll" if "-COLL" in label else "")
+        return _want(label) and _block_wanted(block)
+
+    warmup_seq        = [e for e in warmup_seq        if _warm(e[0])]
+    warmup_batch_jax  = [e for e in warmup_batch_jax  if _warm(e[0])]
+    warmup_batch_cuda = [e for e in warmup_batch_cuda if _warm(e[0])]
 
     tli = (target_link_index,)
 
@@ -2072,6 +2085,7 @@ def _run_robot_benchmark(
             ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
             ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
             ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
+            ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED, seq_timers.get("SQP-CUDA-Traced")),
             ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
         ]
     if _learned_ik_available:
@@ -2128,9 +2142,10 @@ def _run_robot_benchmark(
                 ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
                 ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
                 ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
+                ("SQP-CUDA-Traced", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("SQP-CUDA-Traced-COLL")),
                 ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
             ]
-        seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0])]
+        seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0]) and _block_wanted("seq_coll")]
 
         for name, fn, kwargs, timer in seq_coll_solvers:
             print(f"  Running {name}-COLL ...")
@@ -2176,6 +2191,7 @@ def _run_robot_benchmark(
             ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
             ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
             ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
+            ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED, rng0, batch_timers.get("SQP-CUDA-Traced-BATCH")),
             ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
         ]
     if _learned_ik_available:
@@ -2233,9 +2249,10 @@ def _run_robot_benchmark(
                 ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
                 ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
                 ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
+                ("SQP-CUDA-Traced", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-Traced-COLL-BATCH")),
                 ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
             ]
-        batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0])]
+        batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0]) and _block_wanted("batch_coll")]
 
         for name, fn, kwargs, rng, timer in batch_coll_solvers:
             print(f"  Running {name}-COLL-BATCH ...")
@@ -2292,6 +2309,8 @@ def _run_robot_benchmark(
                 order.append(jax_label + jax_batch_suffix)
             if not _CPU_ONLY:
                 order.append(cuda_label + jax_batch_suffix)
+        if not _CPU_ONLY:
+            order.append("SQP-CUDA-Traced" + jax_batch_suffix)
         return order
 
     seq_order = _method_order()
@@ -2418,6 +2437,16 @@ def _run_robot_benchmark(
 # lives in bench_ik_utils — see that module's docstring for the protocol.
 
 
+def _forwarded_flags(args: argparse.Namespace) -> list[str]:
+    """Dispatcher flags every child must see (run size and evaluation blocks)."""
+    out = []
+    for flag, value in (("--n-targets", args.n_targets), ("--n-targets-batch", args.n_targets_batch),
+                        ("--n-timed", args.n_timed), ("--blocks", args.blocks)):
+        if value is not None:
+            out += [flag, str(value)]
+    return out
+
+
 def _run_solver_subprocess(
     robot_name: str, solver: str, csv_file: pathlib.Path, args: argparse.Namespace,
 ) -> None:
@@ -2448,6 +2477,7 @@ def _run_solver_subprocess(
             __file__,
             "--robot", robot_name,
             "--solver", "cuRobo",
+            *_forwarded_flags(args),
         ]
         if args.outdir is not None:
             cmd += ["--outdir", str(args.outdir)]
@@ -2461,7 +2491,8 @@ def _run_solver_subprocess(
     tier_note = f", PYROFFI_IK_TIER={tier}" if tier is not None else ""
     print(f"\n=== Running {robot_name} / {solver} in subprocess{tier_note} ===")
 
-    cmd = [sys.executable, __file__, "--robot", robot_name, "--solver", solver]
+    cmd = [sys.executable, __file__, "--robot", robot_name, "--solver", solver,
+           *_forwarded_flags(args)]
     if args.outdir is not None:
         cmd += ["--outdir", str(args.outdir)]
     if args.no_jax:
@@ -2479,7 +2510,19 @@ def _run_solver_subprocess(
     subprocess.run(cmd, env=env, check=True)
 
 
+def _split_choice(value: str | None, choices, flag: str) -> list[str]:
+    """Parse a comma-separated selection, rejecting names that are not valid choices."""
+    if value is None:
+        return list(choices)
+    picked = [v.strip() for v in value.split(",") if v.strip()]
+    unknown = [v for v in picked if v not in choices]
+    if unknown:
+        raise SystemExit(f"{flag}: unknown {', '.join(unknown)}; choose from {', '.join(choices)}.")
+    return picked
+
+
 def main() -> None:
+    global N_TARGETS, N_TARGETS_BATCH, N_TIMED
     parser = argparse.ArgumentParser(description="IK benchmark with multi-robot support")
     parser.add_argument(
         "--disable-robot",
@@ -2522,6 +2565,29 @@ def main() -> None:
             "parsed before jax is imported (see top of file)."
         ),
     )
+    # Targeted runs. Set on the dispatcher; forwarded to every child.
+    parser.add_argument(
+        "--robots",
+        default=None,
+        metavar="LIST",
+        help=f"Comma-separated robots to run (default: all of {', '.join(ROBOT_NAMES)}).",
+    )
+    parser.add_argument(
+        "--solvers",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated base solver labels to run, e.g. SQP-CUDA,SQP-CUDA-Traced "
+            "(default: every candidate for the mode flags). Each still runs in its own "
+            "subprocess; -BATCH/-COLL variants follow their base label."
+        ),
+    )
+    parser.add_argument("--n-targets", type=int, default=None, metavar="N",
+                        help=f"Sequential target poses (default {N_TARGETS}).")
+    parser.add_argument("--n-targets-batch", type=int, default=None, metavar="N",
+                        help=f"Batch target poses (default {N_TARGETS_BATCH}).")
+    parser.add_argument("--n-timed", type=int, default=None, metavar="N",
+                        help=f"Timed repetitions (default {N_TIMED}).")
     # The next two flags mark a per-solver child process (see _run_solver_subprocess).
     # A run WITHOUT --solver is the dispatcher: it spawns one child per (robot, solver).
     parser.add_argument(
@@ -2553,6 +2619,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.outdir is not None:
+        args.outdir.mkdir(parents=True, exist_ok=True)
+    N_TARGETS = args.n_targets or N_TARGETS
+    N_TARGETS_BATCH = args.n_targets_batch or N_TARGETS_BATCH
+    N_TIMED = args.n_timed or N_TIMED
+    if N_TARGETS > N_TARGETS_BATCH:
+        # Sequential targets are the first N_TARGETS of the batch set.
+        raise SystemExit(f"--n-targets ({N_TARGETS}) must not exceed --n-targets-batch ({N_TARGETS_BATCH}).")
+
     csv_file = (args.outdir / CSV_FILE.name) if args.outdir is not None else CSV_FILE
 
     # Child path: one solver, one robot, in this process (no further dispatch).
@@ -2580,15 +2655,19 @@ def main() -> None:
 
     # Dispatcher path: fan out one isolated subprocess per (robot, solver).
     disabled = set(args.disable_robot)
-    selected = [name for name in ROBOT_NAMES if name not in disabled]
+    wanted_robots = _split_choice(args.robots, ROBOT_NAMES, "--robots")
+    selected = [name for name in ROBOT_NAMES if name not in disabled and name in wanted_robots]
     if not selected:
         raise SystemExit("No robots selected. Re-enable at least one robot.")
 
     # --cpu-only implies --no-jax (mirrors _NO_JAX at the top of the file).
-    solvers = _candidate_solvers(args.cpu_only, args.no_jax or args.cpu_only)
+    no_jax = args.no_jax or args.cpu_only
+    all_solvers = _candidate_solvers(args.cpu_only, no_jax) + ["cuRobo"]
+    wanted_solvers = _split_choice(args.solvers, all_solvers, "--solvers")
     print("Selected robots:", ", ".join(selected))
-    print("Solvers (one isolated subprocess each):", ", ".join(solvers))
     for robot_name in selected:
+        solvers = [s for s in _candidate_solvers(args.cpu_only, no_jax, robot_name) if s in wanted_solvers]
+        print(f"Solvers for {robot_name} (one isolated subprocess each):", ", ".join(solvers) or "none")
         for solver in solvers:
             _run_solver_subprocess(robot_name, solver, csv_file, args)
 

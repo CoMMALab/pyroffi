@@ -426,6 +426,7 @@ def sqp_ik_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _sqp_ik_solve_cuda_jit(
@@ -467,6 +468,7 @@ def _sqp_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target:           str = "sqp_ik_cuda",
 ) -> Float[Array, "n_act"]:
     from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
@@ -535,6 +537,7 @@ def _sqp_ik_solve_cuda_jit(
         enable_collision = enable_collision,
         collision_weight = collision_weight,
         collision_margin = collision_margin,
+        ffi_target     = ffi_target,
     )
     cfgs     = cfgs[0]      # (n_seeds, n_act)
     errors   = errors[0]    # (n_seeds,)
@@ -563,6 +566,31 @@ def _sqp_ik_solve_cuda_jit(
         return cfgs[best_idx], constraint_errors[best_idx]
     return cfgs[best_idx], jnp.zeros(())
 
+
+
+def _sqp_ffi_target(robot: Robot, target_link_indices: tuple[int, ...], traced: bool,
+                    robot_spheres, robot_sphere_joint, self_tables) -> str:
+    """FFI target for the SQP kernel: the stock build, or one compiled against
+    cricket-traced kinematics and this call's collision tables (see ``_sqp_ik_traced``)."""
+    if not traced:
+        return "sqp_ik_cuda"
+    from ..cuda_kernels.ik._sqp_ik_traced import collision_tables_source
+
+    # Empty buffers may be traced jnp.zeros (created inside a caller's jit); only their
+    # static shape matters. Populated ones are host-built constants.
+    def host(a):
+        return np.zeros(a.shape) if a.size == 0 else np.asarray(a)
+
+    collision_src = collision_tables_source(
+        host(robot_spheres), host(robot_sphere_joint), [host(t) for t in self_tables])
+    if len(target_link_indices) != 1:
+        raise NotImplementedError(
+            f"traced SQP-IK supports a single end-effector; got {len(target_link_indices)}.")
+    if robot._backends is None:
+        raise RuntimeError("traced SQP-IK needs a Robot built with Robot.from_urdf.")
+    return robot._backends.traced_sqp_ik_target(
+        int(target_link_indices[0]), robot.links.names, robot.joints.actuated_names,
+        robot.joints.names, collision_src)
 
 
 def _feasible_first_argmin(errors, feasible, axis=-1):
@@ -612,6 +640,7 @@ def sqp_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`sqp_ik_solve`.
 
@@ -654,6 +683,9 @@ def sqp_ik_solve_cuda(
         constraints:             List of constraint callables.
         constraint_weights:      Scalar weight per constraint.
         constraint_refine_iters: Post-CUDA JAX SQP iterations on winner.
+        traced:                  Use the kernel compiled against cricket-traced
+                                 kinematics for this robot (single EE; built once
+                                 and cached on disk).
 
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
@@ -727,6 +759,9 @@ def sqp_ik_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    ffi_target = _sqp_ffi_target(
+        robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
     # launch, rather than serialising a kernel that already batches.
@@ -767,6 +802,7 @@ def sqp_ik_solve_cuda(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
         )
 
     def _batched(tgt, prev):
@@ -814,6 +850,7 @@ def sqp_ik_solve_cuda(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
         )
         return winners, jnp.zeros((winners.shape[0],))
 
@@ -885,6 +922,7 @@ def _make_pmapped_batch(
     collision_margin:    float,
     target_link_indices: tuple,
     constraint_fns:      tuple,
+    ffi_target:          str = "sqp_ik_cuda",
 ) -> Callable:
     """Build (once per static signature) a pmapped per-device batched solver.
 
@@ -939,6 +977,7 @@ def _make_pmapped_batch(
             constraint_fns=constraint_fns,
             constraint_args=constraint_args,
             constraint_weights=constraint_weights,
+            ffi_target=ffi_target,
         )
 
     # Mapped: rng_key, previous_cfgs, target_wxyz.  Broadcast (None): everything else
@@ -967,6 +1006,7 @@ def _make_pmapped_batch(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _sqp_ik_solve_cuda_batch_jit(
@@ -1008,6 +1048,7 @@ def _sqp_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target:           str = "sqp_ik_cuda",
 ) -> Float[Array, "n_problems n_act"]:
     from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
@@ -1075,6 +1116,7 @@ def _sqp_ik_solve_cuda_batch_jit(
         enable_collision = enable_collision,
         collision_weight = collision_weight,
         collision_margin = collision_margin,
+        ffi_target     = ffi_target,
     )
 
     if len(constraint_fns) > 0:
@@ -1214,6 +1256,7 @@ def _sqp_ik_solve_cuda_batch_impl(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
     *,
     _prep=None,
 ) -> Float[Array, "n_problems n_act"]:
@@ -1238,6 +1281,7 @@ def _sqp_ik_solve_cuda_batch_impl(
         constraints:             List of constraint callables.
         constraint_weights:      Scalar weight per constraint.
         constraint_refine_iters: Post-CUDA JAX iterations on each winner.
+        traced:                  Use the cricket-traced kernel (see :func:`sqp_ik_solve_cuda`).
 
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
@@ -1257,6 +1301,9 @@ def _sqp_ik_solve_cuda_batch_impl(
         self_sph_local, self_link_start, self_link_joint,
         self_pair_i, self_pair_j, enable_collision,
     ) = _prep
+    ffi_target = _sqp_ffi_target(
+        robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
     n_problems = previous_cfgs.shape[0]
     n_devices = jax.local_device_count()
@@ -1270,6 +1317,7 @@ def _sqp_ik_solve_cuda_batch_impl(
             lambda_init, eps_pos, eps_ori, continuity_weight,
             enable_collision, collision_weight, collision_margin,
             tuple(target_link_indices), tuple(cuda_constraint_fns),
+            ffi_target,
         )
         winners = run_sharded(
             pmapped, target_poses, rng_key, previous_cfgs, n_devices,
@@ -1316,6 +1364,7 @@ def _sqp_ik_solve_cuda_batch_impl(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
         )
 
     if post_constraint_fns and constraint_refine_iters > 0:
