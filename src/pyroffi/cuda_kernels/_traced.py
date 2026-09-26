@@ -35,6 +35,7 @@ from loguru import logger
 
 _KERNELS_DIR = Path(__file__).parent
 _REPO_ROOT = _KERNELS_DIR.parents[2]
+_GLASS_DIR = _REPO_ROOT / "external" / "GLASS"
 
 # Kernels with a traced variant: source (relative to cuda_kernels/), FFI handler symbols, and
 # whether a collision-free build may solve over the end-effector chain alone (IK only: FK and
@@ -194,8 +195,9 @@ def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
     ]
     extra_flags, extra_files = _build_extras(kernel)
     flags += extra_flags
+    # GLASS is part of the key too: a submodule bump must not reuse builds made against the old one.
     sources = [*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(source.parent.glob("*.cuh")), source,
-               *extra_files]
+               *extra_files, *sorted(_GLASS_DIR.glob("*.cuh")), *sorted((_GLASS_DIR / "src").rglob("*.cuh"))]
     key = hashlib.sha1("\x00".join(
         [kernel, header, " ".join(flags), *(p.read_text() for p in sources)]).encode()).hexdigest()
 
@@ -210,7 +212,7 @@ def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
         (build_dir / f.name).write_bytes(f.read_bytes())
     cmd = [
         "nvcc", *flags,
-        f"-I{build_dir}", f"-I{_KERNELS_DIR}", f"-I{_REPO_ROOT / 'external' / 'GLASS'}",
+        f"-I{build_dir}", f"-I{_KERNELS_DIR}", f"-I{_GLASS_DIR}",
         f"-I{Path(jaxlib.__file__).parent / 'include'}",
         "-o", str(so_path), str(source),
     ]
