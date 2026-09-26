@@ -875,8 +875,8 @@ def ls_ik_solve_cuda(
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
     _sc = self_collision_table_arrays(robot, collision_checker)
-    ffi_target = traced_ffi_target(
-        "ls_ik", "ls_ik_cuda", robot, target_link_indices, traced,
+    (ffi_target,) = traced_ffi_target(
+        "ls_ik", ("ls_ik_cuda",), robot, target_link_indices, traced,
         robot_spheres_local, robot_sphere_joint_idx, _sc)
 
     # vmap over this solver folds the mapped axis into the kernel's PROBLEM axis
@@ -1280,8 +1280,8 @@ def ls_ik_solve_cuda_batch(
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
     _sc_b = self_collision_table_arrays(robot, collision_checker)
-    ffi_target = traced_ffi_target(
-        "ls_ik", "ls_ik_cuda", robot, target_link_indices, traced,
+    (ffi_target,) = traced_ffi_target(
+        "ls_ik", ("ls_ik_cuda",), robot, target_link_indices, traced,
         robot_spheres_local, robot_sphere_joint_idx, _sc_b)
 
     winners = sharded_batch_call(

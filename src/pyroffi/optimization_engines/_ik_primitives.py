@@ -169,14 +169,14 @@ _EMPTY_SELF_TABLES = (
 )
 
 
-def traced_ffi_target(kernel: str, stock_target: str, robot: Robot,
+def traced_ffi_target(kernel: str, stock_targets: tuple[str, ...], robot: Robot,
                       target_link_indices: tuple[int, ...], traced: bool,
-                      robot_spheres, robot_sphere_joint, self_tables) -> str:
-    """FFI target for an IK kernel: ``stock_target``, or a build of ``kernel`` compiled
-    against cricket-traced kinematics and this call's collision tables (see
-    ``cuda_kernels/_traced.py``). Single end-effector only."""
+                      robot_spheres, robot_sphere_joint, self_tables) -> tuple[str, ...]:
+    """FFI targets for an IK kernel's handlers: ``stock_targets``, or those of a build of
+    ``kernel`` compiled against cricket-traced kinematics and this call's collision tables
+    (see ``cuda_kernels/_traced.py``). Single end-effector only."""
     if not traced:
-        return stock_target
+        return stock_targets
     import numpy as np
 
     from ..cuda_kernels._traced import collision_tables_source

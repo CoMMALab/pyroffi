@@ -36,10 +36,12 @@ from loguru import logger
 _KERNELS_DIR = Path(__file__).parent
 _REPO_ROOT = _KERNELS_DIR.parents[2]
 
-# Kernels with a traced variant: source (relative to cuda_kernels/) and FFI handler symbol.
+# Kernels with a traced variant: source (relative to cuda_kernels/) and its FFI handler symbols.
 KERNELS = {
-    "sqp_ik": ("ik/_sqp_ik_cuda_kernel.cu", "SqpIkCudaFfi"),
-    "ls_ik": ("ik/_ls_ik_cuda_kernel.cu", "LsIkCudaFfi"),
+    "sqp_ik": ("ik/_sqp_ik_cuda_kernel.cu", ("SqpIkCudaFfi",)),
+    "ls_ik": ("ik/_ls_ik_cuda_kernel.cu", ("LsIkCudaFfi",)),
+    "hjcd_ik": ("ik/_hjcd_ik_cuda_kernel.cu", ("HjcdIkCoarseCudaFfi", "HjcdIkLmCudaFfi")),
+    "mppi_ik": ("ik/_mppi_ik_cuda_kernel.cu", ("MppiIkCudaFfi",)),
 }
 
 # Kinematics are all cricket is used for here, so an empty SRDF keeps it from spending
@@ -185,8 +187,9 @@ def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
 @lru_cache(maxsize=None)
 def traced_target(kernel: str, urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
                   joint_names: tuple[str, ...], chain_names: tuple[str, ...],
-                  collision_src: str, has_collision: bool) -> str:
-    """Build (or load from cache) and register a traced kernel; return its FFI target name.
+                  collision_src: str, has_collision: bool) -> tuple[str, ...]:
+    """Build (or load from cache) and register a traced kernel; return one FFI target name
+    per handler symbol in ``KERNELS[kernel]``, in that order.
 
     ``collision_src`` comes from :func:`collision_tables_source`; the build is only valid for
     those tables, and the kernel rejects a launch whose table sizes differ.
@@ -204,10 +207,11 @@ def traced_target(kernel: str, urdf_xml: str, ee_link: str, actuated_names: tupl
     capsule_new = ctypes.pythonapi.PyCapsule_New
     capsule_new.restype = ctypes.py_object
     capsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
-    capsule = capsule_new(
-        ctypes.cast(getattr(lib, KERNELS[kernel][1]), ctypes.c_void_p),
-        b"xla._CUSTOM_CALL_TARGET", None)
-
-    name = f"{kernel}_cuda_traced_{hashlib.sha1(header.encode()).hexdigest()[:16]}"
-    jax.ffi.register_ffi_target(name, capsule, platform="CUDA")
-    return name
+    tag = hashlib.sha1(header.encode()).hexdigest()[:16]
+    names = []
+    for symbol in KERNELS[kernel][1]:
+        capsule = capsule_new(
+            ctypes.cast(getattr(lib, symbol), ctypes.c_void_p), b"xla._CUSTOM_CALL_TARGET", None)
+        names.append(f"{symbol}_traced_{tag}")
+        jax.ffi.register_ffi_target(names[-1], capsule, platform="CUDA")
+    return tuple(names)

@@ -59,7 +59,7 @@ from ._implicit_diff import (
     differentiable_ik_solution_batch,
 )
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
-from ._ik_primitives import self_collision_table_arrays
+from ._ik_primitives import self_collision_table_arrays, traced_ffi_target
 from ._ls_ik import _ls_ik_single, _prepare_ls_collision_buffers
 
 
@@ -611,6 +611,7 @@ def mppi_ik_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _mppi_ik_solve_cuda_jit(
@@ -655,6 +656,7 @@ def _mppi_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target:           str = "mppi_ik_cuda",
 ) -> tuple[Float[Array, "n_act"], Array]:
     from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
@@ -729,6 +731,7 @@ def _mppi_ik_solve_cuda_jit(
         enable_collision = enable_collision,
         collision_weight = collision_weight,
         collision_margin = collision_margin,
+        ffi_target=ffi_target,
     )
     cfgs   = cfgs[0]    # (n_seeds, n_act)
     errors = errors[0]  # (n_seeds,)
@@ -789,6 +792,7 @@ def mppi_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA MPPI+L-BFGS IK: coarse particle search then gradient refinement.
 
@@ -906,6 +910,10 @@ def mppi_ik_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = traced_ffi_target(
+        "mppi_ik", ("mppi_ik_cuda",), robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
     # launch, rather than serialising a kernel that already batches.
@@ -949,6 +957,7 @@ def mppi_ik_solve_cuda(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
         )
 
     def _batched(tgt, prev):
@@ -999,6 +1008,7 @@ def mppi_ik_solve_cuda(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
         )
         return winners, jnp.zeros((winners.shape[0],))
 
@@ -1057,6 +1067,7 @@ def mppi_ik_solve_cuda(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _mppi_ik_solve_cuda_batch_jit(
@@ -1101,6 +1112,7 @@ def _mppi_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target:           str = "mppi_ik_cuda",
 ) -> Float[Array, "n_problems n_act"]:
     from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
@@ -1173,6 +1185,7 @@ def _mppi_ik_solve_cuda_batch_jit(
         enable_collision = enable_collision,
         collision_weight = collision_weight,
         collision_margin = collision_margin,
+        ffi_target=ffi_target,
     )
 
     if len(constraint_fns) > 0:
@@ -1230,6 +1243,7 @@ def mppi_ik_solve_cuda_batch(
     collision_world:     Any | None = None,
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
+    traced:              bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA MPPI+L-BFGS IK: solve n_problems targets in one kernel launch.
 
@@ -1312,6 +1326,10 @@ def mppi_ik_solve_cuda_batch(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = traced_ffi_target(
+        "mppi_ik", ("mppi_ik_cuda",), robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
     winners = sharded_batch_call(
         _mppi_ik_solve_cuda_batch_jit,
@@ -1355,6 +1373,7 @@ def mppi_ik_solve_cuda_batch(
             collision_margin=collision_margin,
             target_link_indices=target_link_indices,
             constraint_fns=cuda_constraint_fns,
+            ffi_target=ffi_target,
         ),
         env_var='PYROFFI_MPPI_IK_PMAP_MIN',
     )

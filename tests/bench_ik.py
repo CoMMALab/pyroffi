@@ -284,7 +284,7 @@ def _candidate_solvers(
         if not cpu_only:
             labels.append(f"{m}-CUDA")
     if not cpu_only:
-        labels += ["SQP-CUDA-Traced", "LS-CUDA-Traced"]
+        labels += [f"{m}-CUDA-Traced" for m in _CORE_METHODS]
     _analytic_ok = robot_name is None or robot_name in _ANALYTIC_ROBOTS
     if not no_jax and _analytic_ok:
         labels.append("Analytic-JAX")
@@ -380,6 +380,7 @@ IK_KWARGS_SQP_CUDA = dict(
 # Same solver, compiled against cricket-traced kinematics for the robot's EE.
 IK_KWARGS_SQP_CUDA_TRACED = dict(**IK_KWARGS_SQP_CUDA, traced=True)
 IK_KWARGS_LS_CUDA_TRACED = dict(**IK_KWARGS_LS_CUDA, traced=True)
+IK_KWARGS_HJCD_CUDA_TRACED = dict(**IK_KWARGS_HJCD_CUDA, traced=True)
 
 # MPPI-IK hyper-parameters.
 IK_KWARGS_MPPI_JAX = dict(
@@ -408,6 +409,7 @@ IK_KWARGS_MPPI_CUDA = dict(
     eps_ori           = 1e-8,
     continuity_weight = 0.0,
 )
+IK_KWARGS_MPPI_CUDA_TRACED = dict(**IK_KWARGS_MPPI_CUDA, traced=True)
 
 # Learned-IK hyper-parameters.
 # num_seeds:      half come from the MLP prediction ± noise; half are random.
@@ -1931,11 +1933,13 @@ def _run_robot_benchmark(
     if not _CPU_ONLY:
         warmup_seq += [
             ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
+            ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED),
             ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
             ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED),
             ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
             ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED),
             ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
+            ("MPPI-CUDA-Traced",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED),
         ]
     if _learned_ik_available:
         warmup_seq.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
@@ -1950,11 +1954,13 @@ def _run_robot_benchmark(
         if not _CPU_ONLY:
             warmup_seq += [
                 ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+                ("HJCD-CUDA-Traced-COLL", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
                 ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}),
                 ("LS-CUDA-Traced-COLL", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
                 ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
                 ("SQP-CUDA-Traced-COLL", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
                 ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+                ("MPPI-CUDA-Traced-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
             ]
 
     warmup_batch_jax = [] if _NO_JAX else [
@@ -1979,18 +1985,22 @@ def _run_robot_benchmark(
             ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
             ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED),
             ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
+            ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED),
             ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
             ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED),
             ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
+            ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED),
         ]
         if COLLISION_FREE:
             warmup_batch_cuda += [
                 ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}),
                 ("LS-CUDA-Traced-COLL-BATCH", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
                 ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+                ("HJCD-CUDA-Traced-COLL-BATCH", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
                 ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
                 ("SQP-CUDA-Traced-COLL-BATCH", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
                 ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+                ("MPPI-CUDA-Traced-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
             ]
 
     # Per-solver isolation: keep only the selected solver's warmups so that only
@@ -2088,11 +2098,13 @@ def _run_robot_benchmark(
     if not _CPU_ONLY:
         seq_solvers += [
             ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
+            ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED, seq_timers.get("HJCD-CUDA-Traced")),
             ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
             ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED, seq_timers.get("LS-CUDA-Traced")),
             ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
             ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED, seq_timers.get("SQP-CUDA-Traced")),
             ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
+            ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED, seq_timers.get("MPPI-CUDA-Traced")),
         ]
     if _learned_ik_available:
         seq_solvers.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX,
@@ -2146,11 +2158,13 @@ def _run_robot_benchmark(
         if not _CPU_ONLY:
             seq_coll_solvers += [
                 ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
+                ("HJCD-CUDA-Traced", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("HJCD-CUDA-Traced-COLL")),
                 ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
                 ("LS-CUDA-Traced", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-Traced-COLL")),
                 ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
                 ("SQP-CUDA-Traced", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("SQP-CUDA-Traced-COLL")),
                 ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
+                ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-Traced-COLL")),
             ]
         seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0]) and _block_wanted("seq_coll")]
 
@@ -2198,9 +2212,11 @@ def _run_robot_benchmark(
             ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
             ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED, rng0, batch_timers.get("LS-CUDA-Traced-BATCH")),
             ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
+            ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED, rng0, batch_timers.get("HJCD-CUDA-Traced-BATCH")),
             ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
             ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED, rng0, batch_timers.get("SQP-CUDA-Traced-BATCH")),
             ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
+            ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED, rng0,         batch_timers.get("MPPI-CUDA-Traced-BATCH")),
         ]
     if _learned_ik_available:
         batch_solvers.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}, rng_keys_batch,
@@ -2257,9 +2273,11 @@ def _run_robot_benchmark(
                 ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
                 ("LS-CUDA-Traced", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-Traced-COLL-BATCH")),
                 ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
+                ("HJCD-CUDA-Traced", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-Traced-COLL-BATCH")),
                 ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
                 ("SQP-CUDA-Traced", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-Traced-COLL-BATCH")),
                 ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
+                ("MPPI-CUDA-Traced", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-Traced-COLL-BATCH")),
             ]
         batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0]) and _block_wanted("batch_coll")]
 
@@ -2319,7 +2337,7 @@ def _run_robot_benchmark(
             if not _CPU_ONLY:
                 order.append(cuda_label + jax_batch_suffix)
         if not _CPU_ONLY:
-            order += [f"SQP-CUDA-Traced{jax_batch_suffix}", f"LS-CUDA-Traced{jax_batch_suffix}"]
+            order += [f"{m}-CUDA-Traced{jax_batch_suffix}" for m in _CORE_METHODS]
         return order
 
     seq_order = _method_order()

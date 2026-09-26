@@ -138,22 +138,7 @@ void ls_ik_lm_kernel(
     float eps_pos, float eps_ori,
     float collision_weight, float collision_margin)
 {
-    // The traced build knows the robot's dimensions (so every loop bound is a constant)
-    // and its collision geometry (as constant-memory tables).
-#ifdef PYROFFI_TRACED_ROBOT
-    // n_act counts the SOLVED variables; any frozen joints ride along from the seed.
-    constexpr int n_joints = pyroffi::traced::n_frames, n_act = pyroffi::traced::n_solved, n_ee = 1;
-    constexpr int n_full   = pyroffi::traced::n_q;
-    constexpr int n_robot_spheres = pyroffi::traced::n_robot_spheres;
-    constexpr int n_self_pairs    = pyroffi::traced::n_self_pairs;
-    (void)n_joints_arg; (void)n_act_arg; (void)n_ee_arg;
-    (void)n_robot_spheres_arg; (void)n_self_pairs_arg;
-    pyroffi::traced::bind_collision_tables(robot_spheres_local, robot_sphere_joint_idx,
-        self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j);
-#else
-    const int n_joints = n_joints_arg, n_act = n_act_arg, n_ee = n_ee_arg;
-    const int n_robot_spheres = n_robot_spheres_arg, n_self_pairs = n_self_pairs_arg;
-#endif
+    PYROFFI_IK_DIMS_PROLOGUE();
 
     // ── Shared memory: robot parameters loaded once per block ───────────────
     __shared__ float s_twists       [MAX_JOINTS * 6];
@@ -182,14 +167,9 @@ void ls_ik_lm_kernel(
         s_topo_inv[i]      = topo_inv[i];
     }
     for (int i = threadIdx.x; i < n_act; i += blockDim.x) {
-#ifdef PYROFFI_TRACED_ROBOT
-        const int src = pyroffi::traced::solved_idx(i);
-#else
-        const int src = i;
-#endif
-        s_lower[i]      = lower[src];
-        s_upper[i]      = upper[src];
-        s_fixed_mask[i] = fixed_mask[src];
+        s_lower[i]      = lower[PYROFFI_ACT_SRC(i)];
+        s_upper[i]      = upper[PYROFFI_ACT_SRC(i)];
+        s_fixed_mask[i] = fixed_mask[PYROFFI_ACT_SRC(i)];
     }
     const int p = blockIdx.y;
     for (int i = threadIdx.x; i < n_ee * 7; i += blockDim.x)

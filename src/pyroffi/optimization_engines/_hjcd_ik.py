@@ -43,7 +43,7 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._nullspace import project_single
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
-from ._ik_primitives import self_collision_table_arrays
+from ._ik_primitives import self_collision_table_arrays, traced_ffi_target
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._implicit_diff import (
     detached_robot,
@@ -667,6 +667,7 @@ def hjcd_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_targets",
     ),
 )
 def _hjcd_solve_cuda_jit(
@@ -710,6 +711,7 @@ def _hjcd_solve_cuda_jit(
     constraint_fns: tuple = (),
     constraint_args: tuple = (),
     constraint_weights: Float[Array, "n_constraints"] | None = None,
+    ffi_targets: tuple = ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"),
 ) -> Float[Array, "n_act"]:
     from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
@@ -771,6 +773,7 @@ def _hjcd_solve_cuda_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
+        ffi_target=ffi_targets[0],
     )
     coarse_cfgs   = coarse_cfgs[0]    # (num_seeds, n_act)
     coarse_errors = coarse_errors[0]  # (num_seeds,) — all EEs from CUDA kernel
@@ -836,6 +839,7 @@ def _hjcd_solve_cuda_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
+        ffi_target=ffi_targets[1],
     )
     refine_cfgs       = refine_cfgs[0]       # (n_lm_seeds, n_act)
     refine_errors_raw = refine_errors_raw[0]  # (n_lm_seeds,) — all EEs from CUDA
@@ -895,6 +899,7 @@ def hjcd_solve_cuda(
     constraint_refine_iters: int = 12,
     ancestor_masks: Array | None = None,
     target_jnts: Array | None = None,
+    traced: bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`hjcd_solve`.
 
@@ -1050,6 +1055,10 @@ def hjcd_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    ffi_targets = traced_ffi_target(
+        "hjcd_ik", ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"), robot, target_link_indices,
+        traced, robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
     # launch, rather than serialising a kernel that already batches.
@@ -1092,6 +1101,7 @@ def hjcd_solve_cuda(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_targets=ffi_targets,
         )
 
     def _batched(tgt, prev):
@@ -1141,6 +1151,7 @@ def hjcd_solve_cuda(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_targets=ffi_targets,
         )
         return winners
 
@@ -1199,6 +1210,7 @@ def hjcd_solve_cuda(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_targets",
     ),
 )
 def _hjcd_solve_cuda_batch_jit(
@@ -1242,6 +1254,7 @@ def _hjcd_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_targets:          tuple = ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"),
 ) -> Float[Array, "n_problems n_act"]:
     from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
@@ -1307,6 +1320,7 @@ def _hjcd_solve_cuda_batch_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
+        ffi_target=ffi_targets[0],
     )
 
     # ── Phase 2 setup: top-K selection + perturbation ─────────────────────
@@ -1368,6 +1382,7 @@ def _hjcd_solve_cuda_batch_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
+        ffi_target=ffi_targets[1],
     )
 
     # ── Winner selection: task (all EEs) + constraint penalties + continuity ─
@@ -1424,6 +1439,7 @@ def hjcd_solve_cuda_batch(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 30,
+    traced: bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA HJCD-IK: solve n_problems targets in a single kernel launch.
 
@@ -1522,6 +1538,10 @@ def hjcd_solve_cuda_batch(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    ffi_targets = traced_ffi_target(
+        "hjcd_ik", ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"), robot, target_link_indices,
+        traced, robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
     winners = sharded_batch_call(
         _hjcd_solve_cuda_batch_jit,
@@ -1564,6 +1584,7 @@ def hjcd_solve_cuda_batch(
             collision_margin=collision_margin,
             target_link_indices=target_link_indices,
             constraint_fns=cuda_constraint_fns,
+            ffi_targets=ffi_targets,
         ),
         env_var='PYROFFI_HJCD_IK_PMAP_MIN',
     )

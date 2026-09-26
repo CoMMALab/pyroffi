@@ -124,6 +124,7 @@ def hjcd_ik_coarse_cuda(
     self_link_joint=None,
     self_pair_i=None,
     self_pair_j=None,
+    ffi_target: str = "hjcd_ik_coarse_cuda",
 ) -> tuple[Float[Array, "n_problems n_seeds n_act"], Float[Array, "n_problems n_seeds"]]:
     """Run greedy coordinate-descent on all seeds in parallel (Phase 1).
 
@@ -187,7 +188,7 @@ def hjcd_ik_coarse_cuda(
 
     def _run(*ops):
         return jax.ffi.ffi_call(
-            "hjcd_ik_coarse_cuda",
+            ffi_target,
             (
                 jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
                 jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),
@@ -247,6 +248,7 @@ def hjcd_ik_lm_cuda(
     self_link_joint=None,
     self_pair_i=None,
     self_pair_j=None,
+    ffi_target: str = "hjcd_ik_lm_cuda",
 ) -> tuple[Float[Array, "n_problems n_seeds n_act"], Float[Array, "n_problems n_seeds"]]:
     """Run Levenberg-Marquardt refinement on all seeds in parallel (Phase 2).
 
@@ -314,7 +316,7 @@ def hjcd_ik_lm_cuda(
 
     def _run(*ops):
         return jax.ffi.ffi_call(
-            "hjcd_ik_lm_cuda",
+            ffi_target,
             (
                 jax.ShapeDtypeStruct((n_problems, n_seeds, n_act), jnp.float32),
                 jax.ShapeDtypeStruct((n_problems, n_seeds), jnp.float32),

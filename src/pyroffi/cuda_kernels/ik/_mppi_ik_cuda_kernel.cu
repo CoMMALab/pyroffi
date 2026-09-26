@@ -30,6 +30,9 @@
 
 #include "_ik_cuda_helpers.cuh"
 #include "_collision_cuda_helpers.cuh"
+#ifdef PYROFFI_TRACED_ROBOT
+#include "_traced_robot.cuh"
+#endif
 #include "xla/ffi/api/ffi.h"
 
 #include <cmath>
@@ -72,9 +75,9 @@ void mppi_ik_kernel(
     const int*      __restrict__ rng_seed_ptr,
     float*          __restrict__ out,
     float*          __restrict__ out_err,
-    int   n_problems, int n_seeds, int n_joints, int n_act, int n_ee,
-    int   n_robot_spheres, int n_world_spheres, int n_world_capsules,
-    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs,
+    int   n_problems, int n_seeds, int n_joints_arg, int n_act_arg, int n_ee_arg,
+    int   n_robot_spheres_arg, int n_world_spheres, int n_world_capsules,
+    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs_arg,
     int   n_particles, int n_mppi_iters, int n_lbfgs_iters, int m_lbfgs,
     int   enable_collision,
     float collision_weight, float collision_margin,
@@ -82,6 +85,8 @@ void mppi_ik_kernel(
     float pos_weight, float ori_weight,
     float eps_pos, float eps_ori)
 {
+    PYROFFI_IK_DIMS_PROLOGUE();
+
     // ── Shared memory: robot parameters loaded once per block ───────────
     __shared__ float s_twists        [MAX_JOINTS * 6];
     __shared__ float s_parent_tf     [MAX_JOINTS * 7];
@@ -109,9 +114,9 @@ void mppi_ik_kernel(
         s_topo_inv[i]      = topo_inv[i];
     }
     for (int i = threadIdx.x; i < n_act; i += blockDim.x) {
-        s_lower[i]      = lower[i];
-        s_upper[i]      = upper[i];
-        s_fixed_mask[i] = fixed_mask[i];
+        s_lower[i]      = lower[PYROFFI_ACT_SRC(i)];
+        s_upper[i]      = upper[PYROFFI_ACT_SRC(i)];
+        s_fixed_mask[i] = fixed_mask[PYROFFI_ACT_SRC(i)];
     }
     const int p_idx = blockIdx.y;
     for (int i = threadIdx.x; i < n_ee * 7; i += blockDim.x)
@@ -150,17 +155,11 @@ void mppi_ik_kernel(
     float cfg_prev [MAX_ACT];
     float dir      [MAX_ACT];
 
-    for (int a = 0; a < n_act; a++) {
-        cfg[a]      = seeds[gs * n_act + a];
-        best_cfg[a] = cfg[a];
-    }
+    PYROFFI_LOAD_SEED(cfg);
+    for (int a = 0; a < n_act; a++) best_cfg[a] = cfg[a];
 
     // Initial cost.
-    compute_multi_ee_residual_only(
-        cfg, T_world,
-        s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-        s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-        s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r);
+    PYROFFI_RES(cfg, r);
     float best_err = 0.0f;
     for (int ee = 0; ee < n_ee; ee++)
         for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; best_err += rw * rw; }
@@ -178,12 +177,7 @@ void mppi_ik_kernel(
         // be returned unnoticed.
         if (!want_world && !want_self) return 0.0f;
 
-        fk_single(
-            cfg_eval,
-            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-            T_eval,
-            n_joints, n_act);
+        PYROFFI_FK_ALL(cfg_eval, T_eval);
 
         float pen = 0.0f;
         // `want_self` can be true with world collision off, so the world loop
@@ -291,11 +285,7 @@ void mppi_ik_kernel(
             }
 
             float r_trial[6 * MAX_EE];
-            compute_multi_ee_residual_only(
-                q_trial, T_world,
-                s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-                s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-                s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r_trial);
+            PYROFFI_RES(q_trial, r_trial);
 
             float cost = 0.0f;
             for (int ee = 0; ee < n_ee; ee++)
@@ -333,11 +323,7 @@ void mppi_ik_kernel(
             cfg[a] = clampf(cfg[a] + delta[a], s_lower[a], s_upper[a]);
 
         // Track best.
-        compute_multi_ee_residual_only(
-            cfg, T_world,
-            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-            s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r);
+        PYROFFI_RES(cfg, r);
         float curr_err = 0.0f;
         for (int ee = 0; ee < n_ee; ee++)
             for (int k = 0; k < 6; k++) { float rw = r[ee*6+k] * W[k]; curr_err += rw * rw; }
@@ -350,11 +336,7 @@ void mppi_ik_kernel(
 
     // ── Convergence gate: skip L-BFGS if already converged ──────────────
     {
-        compute_multi_ee_residual_only(
-            best_cfg, T_world,
-            s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-            s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-            s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r);
+        PYROFFI_RES(best_cfg, r);
         bool all_conv = true;
         for (int ee = 0; ee < n_ee; ee++) {
             if (norm3(r + ee*6) >= eps_pos || norm3(r + ee*6 + 3) >= eps_ori) {
@@ -384,12 +366,7 @@ void mppi_ik_kernel(
         for (int iter = 0; iter < n_lbfgs_iters; iter++) {
 
             // ── Residual + Jacobian ─────────────────────────────────────
-            compute_multi_ee_residual_and_jacobian(
-                cfg, T_world,
-                s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-                s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-                s_target_jnts, s_ancestor_masks, s_target_Ts,
-                n_joints, n_act, n_ee, r, J);
+            PYROFFI_RES_JAC(cfg);
 
             // Early exit if ALL EEs converged.
             {
@@ -531,11 +508,7 @@ void mppi_ik_kernel(
                                           s_lower[a], s_upper[a]);
 
                 float r_trial[6 * MAX_EE];
-                compute_multi_ee_residual_only(
-                    cfg_trial, T_world,
-                    s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-                    s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-                    s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, r_trial);
+                PYROFFI_RES(cfg_trial, r_trial);
 
                 float err_trial = 0.0f;
                 for (int ee = 0; ee < n_ee; ee++)
@@ -564,7 +537,7 @@ void mppi_ik_kernel(
     }
 
 write_output:
-    for (int a = 0; a < n_act; a++) out[gs * n_act + a] = best_cfg[a];
+    PYROFFI_STORE(best_cfg);
     out_err[gs] = best_err;
 }
 
@@ -629,6 +602,12 @@ static ffi::Error MppiIkCudaImpl(
     const int n_world_halfspaces = static_cast<int>(world_halfspaces.dimensions()[0]);
     const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
+#ifdef PYROFFI_TRACED_ROBOT
+    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs))
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "mppi_ik_cuda (traced): launch does not match the robot and collision "
+                          "tables this build was traced for.");
+#endif
     constexpr int THREADS_MAX = 16;
     const int threads  = n_seeds < THREADS_MAX ? n_seeds : THREADS_MAX;
     const int blocks_x = (n_seeds + threads - 1) / threads;

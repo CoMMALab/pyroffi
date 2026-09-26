@@ -133,8 +133,8 @@ class CudaBackends:
         self, kernel: str, ee_link: int, link_names: tuple[str, ...],
         actuated_names: tuple[str, ...], joint_names: tuple[str, ...],
         collision_src: str, has_collision: bool,
-    ) -> str:
-        """FFI target of ``kernel`` compiled against cricket-traced kinematics for
+    ) -> tuple[str, ...]:
+        """FFI targets of ``kernel`` compiled against cricket-traced kinematics for
         ``ee_link`` (built once per robot, link and collision tables; cached on disk)."""
         from .cuda_kernels._traced import traced_target
 

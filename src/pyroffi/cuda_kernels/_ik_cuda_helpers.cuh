@@ -38,6 +38,69 @@
 #define MAX_PARTICLES 32
 #endif
 
+// ---------------------------------------------------------------------------
+// Robot-specialized (traced) builds
+// ---------------------------------------------------------------------------
+// Kernels take their sizes as `n_joints_arg`, `n_act_arg`, `n_ee_arg`,
+// `n_robot_spheres_arg`, `n_self_pairs_arg` and open with PYROFFI_IK_DIMS_PROLOGUE().
+// A stock build just names those. A build with -DPYROFFI_TRACED_ROBOT (see
+// _traced_robot.cuh) makes them the robot's compile-time values -- so every loop
+// bound is a constant -- and swaps the collision buffers for the tables baked into
+// the build. There, n_act counts the SOLVED variables; any frozen joints (off the
+// EE chain) ride along from the seed, and n_full is every actuated joint.
+// PYROFFI_ACT_SRC(i) maps solved variable i to its column in the full-DOF inputs.
+#ifdef PYROFFI_TRACED_ROBOT
+#define PYROFFI_IK_DIMS_PROLOGUE()                                                          \
+    constexpr int n_joints = pyroffi::traced::n_frames;                                     \
+    constexpr int n_act    = pyroffi::traced::n_solved;                                     \
+    constexpr int n_ee     = 1;                                                             \
+    constexpr int n_full   = pyroffi::traced::n_q;                                          \
+    constexpr int n_robot_spheres = pyroffi::traced::n_robot_spheres;                       \
+    constexpr int n_self_pairs    = pyroffi::traced::n_self_pairs;                          \
+    (void)n_joints_arg; (void)n_act_arg; (void)n_ee_arg; (void)n_full;                      \
+    (void)n_robot_spheres_arg; (void)n_self_pairs_arg;                                      \
+    pyroffi::traced::bind_collision_tables(robot_spheres_local, robot_sphere_joint_idx,     \
+        self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j)
+#define PYROFFI_ACT_SRC(i) pyroffi::traced::solved_idx(i)
+#else
+#define PYROFFI_IK_DIMS_PROLOGUE()                                                          \
+    const int n_joints = n_joints_arg, n_act = n_act_arg, n_ee = n_ee_arg;                  \
+    const int n_robot_spheres = n_robot_spheres_arg, n_self_pairs = n_self_pairs_arg
+#define PYROFFI_ACT_SRC(i) (i)
+#endif
+
+// FK / residual / seed I/O for kernels written against the names above plus the staged
+// model (s_twists, s_parent_tf, ...), `T_world`, `r`, `J`, `seeds`, `out` and `gs`. The
+// traced build takes the EE pose, Jacobian and joint frames from cricket's straight-line
+// code, with `frz` (declared by PYROFFI_LOAD_SEED) holding the frozen joints. Unlike the
+// stock residual, the traced PYROFFI_RES/PYROFFI_RES_JAC do NOT leave FK in T_world; call
+// PYROFFI_FK_ALL before reading it.
+#ifdef PYROFFI_TRACED_ROBOT
+#define PYROFFI_FK_ALL(q, T) pyroffi::traced::frame_poses((q), frz, (T))
+#define PYROFFI_RES_JAC(q)   pyroffi::traced::residual_and_jacobian((q), frz, s_target_Ts, r, J)
+#define PYROFFI_RES(q, rr)   pyroffi::traced::residual((q), frz, s_target_Ts, (rr))
+#define PYROFFI_LOAD_SEED(cfg)                                                              \
+    float frz[pyroffi::traced::frz_len];                                                    \
+    pyroffi::traced::load_state(seeds + gs * n_full, (cfg), frz)
+#define PYROFFI_STORE(cfg) pyroffi::traced::store_state((cfg), frz, out + gs * n_full)
+#else
+#define PYROFFI_FK_ALL(q, T)                                                                \
+    fk_single((q), s_twists, s_parent_tf, s_parent_idx, s_act_idx,                          \
+              s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv, (T), n_joints, n_act)
+#define PYROFFI_RES_JAC(q)                                                                  \
+    compute_multi_ee_residual_and_jacobian((q), T_world,                                    \
+        s_twists, s_parent_tf, s_parent_idx, s_act_idx,                                     \
+        s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,                              \
+        s_target_jnts, s_ancestor_masks, s_target_Ts, n_joints, n_act, n_ee, r, J)
+#define PYROFFI_RES(q, rr)                                                                  \
+    compute_multi_ee_residual_only((q), T_world,                                            \
+        s_twists, s_parent_tf, s_parent_idx, s_act_idx,                                     \
+        s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,                              \
+        s_target_jnts, s_target_Ts, n_joints, n_act, n_ee, (rr))
+#define PYROFFI_LOAD_SEED(cfg) for (int a = 0; a < n_act; a++) (cfg)[a] = seeds[gs * n_act + a]
+#define PYROFFI_STORE(cfg)     for (int a = 0; a < n_act; a++) out[gs * n_act + a] = (cfg)[a]
+#endif
+
 #ifndef MAX_LBFGS_M
 #define MAX_LBFGS_M 8
 #endif

@@ -734,8 +734,8 @@ def sqp_ik_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
-    ffi_target = traced_ffi_target(
-        "sqp_ik", "sqp_ik_cuda", robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+    (ffi_target,) = traced_ffi_target(
+        "sqp_ik", ("sqp_ik_cuda",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
@@ -1276,8 +1276,8 @@ def _sqp_ik_solve_cuda_batch_impl(
         self_sph_local, self_link_start, self_link_joint,
         self_pair_i, self_pair_j, enable_collision,
     ) = _prep
-    ffi_target = traced_ffi_target(
-        "sqp_ik", "sqp_ik_cuda", robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+    (ffi_target,) = traced_ffi_target(
+        "sqp_ik", ("sqp_ik_cuda",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
 
     n_problems = previous_cfgs.shape[0]
