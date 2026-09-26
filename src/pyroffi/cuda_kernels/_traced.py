@@ -14,7 +14,8 @@ and registers it as its own FFI target taking the stock operands. What a kernel 
 the header is up to its ``#ifdef PYROFFI_TRACED_ROBOT`` blocks (see ``_traced_robot.cuh``).
 
 Builds are cached on disk (``$PYROFFI_TRACED_CACHE``, default ``~/.cache/pyroffi/traced``)
-keyed by the header, kernel sources and flags, so each robot compiles once.
+keyed by the header, kernel sources and flags, so each robot compiles once. GRiD's dynamics
+libraries go through the same builder (:func:`build_shared_library`) and cache.
 
 Requires cricket built with its Python extension (``external/cricket``) and ``nvcc``.
 """
@@ -24,6 +25,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import shutil
 import subprocess
 import tempfile
 from functools import lru_cache
@@ -182,9 +184,53 @@ def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables,
     )
 
 
-def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
+def build_shared_library(name: str, source: Path, generated: dict[str, str], flags: list[str],
+                         include_dirs: tuple[Path, ...] = (), key_files: tuple[Path, ...] = (),
+                         copy_files: tuple[Path, ...] = (), so_name: str | None = None) -> Path:
+    """nvcc ``source`` against the ``generated`` headers into a disk-cached shared library.
+
+    The one builder for every robot-specialized kernel (traced kernels and GRiD dynamics).
+    The cache key covers the generated headers, the flags and every file in ``key_files``
+    (``source`` is added when absent), so any input that changes the binary changes the key.
+    The library is ``so_name`` (default ``<name>.so``) inside the key's directory.
+    Builds land in a temporary directory that is renamed into place, so concurrent builds of
+    the same library cannot leave a half-written one behind.
+    """
     import jaxlib
 
+    so_name = so_name or f"{name}.so"
+    if source not in key_files:
+        key_files = (source, *key_files)
+    key = hashlib.sha1("\x00".join(
+        [name, *generated.values(), " ".join(flags),
+         *(p.read_text() for p in key_files)]).encode()).hexdigest()
+    build_dir = _cache_root() / key
+    if (build_dir / so_name).is_file():
+        return build_dir / so_name
+
+    _cache_root().mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{key}.", dir=_cache_root()))
+    try:
+        for name, text in generated.items():
+            (tmp / name).write_text(text)
+        for f in copy_files:
+            (tmp / f.name).write_bytes(f.read_bytes())
+        cmd = ["nvcc", *flags, f"-I{tmp}", *(f"-I{d}" for d in include_dirs),
+               f"-I{Path(jaxlib.__file__).parent / 'include'}", "-o", str(tmp / so_name), str(source)]
+        logger.info(f"Compiling {so_name} (one-time, cached): {build_dir}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"nvcc failed to compile {so_name}:\n{result.stderr}")
+        try:
+            tmp.rename(build_dir)
+        except OSError:  # another process finished the same build first
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return build_dir / so_name
+
+
+def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
     source = _KERNELS_DIR / KERNELS[kernel][0]
     # Capacities sized exactly to this robot, and only its own solve size instantiated.
     flags = [
@@ -196,31 +242,12 @@ def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
     extra_flags, extra_files = _build_extras(kernel)
     flags += extra_flags
     # GLASS is part of the key too: a submodule bump must not reuse builds made against the old one.
-    sources = [*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(source.parent.glob("*.cuh")), source,
-               *extra_files, *sorted(_GLASS_DIR.glob("*.cuh")), *sorted((_GLASS_DIR / "src").rglob("*.cuh"))]
-    key = hashlib.sha1("\x00".join(
-        [kernel, header, " ".join(flags), *(p.read_text() for p in sources)]).encode()).hexdigest()
-
-    build_dir = _cache_root() / key
-    so_path = build_dir / f"{kernel}_traced.so"
-    if so_path.is_file():
-        return so_path
-
-    build_dir.mkdir(parents=True, exist_ok=True)
-    (build_dir / "_traced_robot_gen.cuh").write_text(header)
-    for f in extra_files:
-        (build_dir / f.name).write_bytes(f.read_bytes())
-    cmd = [
-        "nvcc", *flags,
-        f"-I{build_dir}", f"-I{_KERNELS_DIR}", f"-I{_GLASS_DIR}",
-        f"-I{Path(jaxlib.__file__).parent / 'include'}",
-        "-o", str(so_path), str(source),
-    ]
-    logger.info(f"Compiling traced {kernel} kernel (one-time, cached): {build_dir}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"nvcc failed to compile the traced {kernel} kernel:\n{result.stderr}")
-    return so_path
+    sources = (*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(source.parent.glob("*.cuh")), source,
+               *extra_files, *sorted(_GLASS_DIR.glob("*.cuh")), *sorted((_GLASS_DIR / "src").rglob("*.cuh")))
+    return build_shared_library(
+        kernel, source, {"_traced_robot_gen.cuh": header}, flags,
+        include_dirs=(_KERNELS_DIR, _GLASS_DIR), key_files=sources, copy_files=tuple(extra_files),
+        so_name=f"{kernel}_traced.so")
 
 
 @lru_cache(maxsize=None)
