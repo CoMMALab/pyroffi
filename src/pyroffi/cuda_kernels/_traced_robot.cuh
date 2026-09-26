@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include "_ik_cuda_helpers.cuh"
 #include "_traced_robot_gen.cuh"
 
 namespace pyroffi::traced {

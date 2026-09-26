@@ -60,6 +60,28 @@
 
 namespace ffi = xla::ffi;
 
+
+#ifdef PYROFFI_TRACED_ROBOT
+#include "../_traced_robot.cuh"
+// Traced build (self-collision kernel only -- the world kernel is bound by its [B, N, M] output
+// and runtime obstacle loops, and measured no faster traced): FK from cricket's straight-line
+// code, and the model's sphere and pair tables baked in so the pair/link loops are constant.
+#define FUSED_FK(b, T)                                                                      \
+    do {                                                                                    \
+        const float frz_[1] = {0.f};                                                        \
+        pyroffi::traced::frame_poses(cfg + (size_t)(b) * pyroffi::traced::n_q, frz_, (T));  \
+    } while (0)
+#define FUSED_BIND_TABLES()                                                                 \
+    sph_local  = pyroffi::traced::kSelfSph;                                                 \
+    link_start = pyroffi::traced::kSelfLinkStart;                                           \
+    link_joint = pyroffi::traced::kSelfLinkJoint
+#else
+#define FUSED_FK(b, T)                                                                      \
+    fk_single(cfg + (size_t)(b) * n_act, twists, parent_tf, parent_idx, act_idx,            \
+              mimic_mul, mimic_off, mimic_act_idx, topo_inv, (T), n_joints, n_act)
+#define FUSED_BIND_TABLES() ((void)0)
+#endif
+
 #ifndef FUSED_MAX_LINKS
 #define FUSED_MAX_LINKS 32
 #endif
@@ -99,8 +121,17 @@ void fused_self_collision_kernel(
     const int*   __restrict__ pair_j,
     float*       __restrict__ out,
     float*       __restrict__ min_z,
-    int B, int n_joints, int n_act, int N_links, int P)
+    int B, int n_joints, int n_act, int N_links_arg, int P_arg)
 {
+#ifdef PYROFFI_TRACED_ROBOT
+    constexpr int N_links = pyroffi::traced::n_self_links, P = pyroffi::traced::n_self_pairs;
+    (void)N_links_arg; (void)P_arg;
+    pair_i = pyroffi::traced::kSelfPairI;
+    pair_j = pyroffi::traced::kSelfPairJ;
+#else
+    const int N_links = N_links_arg, P = P_arg;
+#endif
+    FUSED_BIND_TABLES();
     // Link transforms for this thread's configuration, wxyz_xyz per link.
     // Shared rather than register: 7 floats x N links exceeds a sensible
     // register budget, but is small enough that occupancy stays reasonable.
@@ -119,8 +150,7 @@ void fused_self_collision_kernel(
 
     // --- FK once, in-thread. Reuses pyroffi's tested chain walk rather than
     // reimplementing it, so this kernel cannot drift from the other backends.
-    fk_single(cfg + (size_t)b * n_act, twists, parent_tf, parent_idx, act_idx,
-              mimic_mul, mimic_off, mimic_act_idx, topo_inv, T, n_joints, n_act);
+    FUSED_FK(b, T);
 
     // --- Self-collision via the shared helper, so this kernel and the IK
     // solvers evaluate byte-identical geometry.
@@ -275,6 +305,13 @@ static ffi::Error FusedSelfCollisionImpl(
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "fused_self_collision: link count exceeds "
                           "FUSED_MAX_LINKS; rebuild with a larger bound");
+#ifdef PYROFFI_TRACED_ROBOT
+    if (n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
+        N_links != pyroffi::traced::n_self_links || P != pyroffi::traced::n_self_pairs)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "fused_self_collision (traced): launch does not match the robot and "
+                          "collision model this build was traced for.");
+#endif
 
     const int threads = 64;
     const int blocks = (B + threads - 1) / threads;

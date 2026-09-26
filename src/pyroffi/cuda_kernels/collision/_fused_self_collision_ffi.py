@@ -82,7 +82,7 @@ def static_arrays(robot, model):
             np.asarray(model.active_idx_j, dtype=np.int32))
 
 
-def fused_self_collision(cfg, robot_buffers, static):
+def fused_self_collision(cfg, robot_buffers, static, ffi_target="fused_self_collision"):
     """Run the fused kernel.
 
     Args:
@@ -111,7 +111,7 @@ def fused_self_collision(cfg, robot_buffers, static):
     P = pair_i.shape[0]
 
     call = jax.ffi.ffi_call(
-        "fused_self_collision",
+        ffi_target,
         (jax.ShapeDtypeStruct((B, P), jnp.float32),
          jax.ShapeDtypeStruct((B,), jnp.float32)),
         vmap_method="sequential",

@@ -36,12 +36,16 @@ from loguru import logger
 _KERNELS_DIR = Path(__file__).parent
 _REPO_ROOT = _KERNELS_DIR.parents[2]
 
-# Kernels with a traced variant: source (relative to cuda_kernels/) and its FFI handler symbols.
+# Kernels with a traced variant: source (relative to cuda_kernels/), FFI handler symbols, and
+# whether a collision-free build may solve over the end-effector chain alone (IK only: FK and
+# collision kernels must see every joint).
 KERNELS = {
-    "sqp_ik": ("ik/_sqp_ik_cuda_kernel.cu", ("SqpIkCudaFfi",)),
-    "ls_ik": ("ik/_ls_ik_cuda_kernel.cu", ("LsIkCudaFfi",)),
-    "hjcd_ik": ("ik/_hjcd_ik_cuda_kernel.cu", ("HjcdIkCoarseCudaFfi", "HjcdIkLmCudaFfi")),
-    "mppi_ik": ("ik/_mppi_ik_cuda_kernel.cu", ("MppiIkCudaFfi",)),
+    "sqp_ik": ("ik/_sqp_ik_cuda_kernel.cu", ("SqpIkCudaFfi",), True),
+    "ls_ik": ("ik/_ls_ik_cuda_kernel.cu", ("LsIkCudaFfi",), True),
+    "hjcd_ik": ("ik/_hjcd_ik_cuda_kernel.cu", ("HjcdIkCoarseCudaFfi", "HjcdIkLmCudaFfi"), True),
+    "mppi_ik": ("ik/_mppi_ik_cuda_kernel.cu", ("MppiIkCudaFfi",), True),
+    "fused_self_collision": ("collision/_fused_self_collision_kernel.cu",
+                             ("FusedSelfCollisionFfi",), False),
 }
 
 # Kinematics are all cricket is used for here, so an empty SRDF keeps it from spending
@@ -140,6 +144,7 @@ def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables) -> s
         + table("float", "kRobotSpheres", robot_spheres)
         + table("int", "kRobotSphereJoint", robot_sphere_joint)
         + f"constexpr int n_self_pairs = {len(np.asarray(pair_i).reshape(-1))};\n"
+        + f"constexpr int n_self_links = {max(len(np.asarray(start).reshape(-1)) - 1, 0)};\n"
         + table("float", "kSelfSph", sph)
         + table("int", "kSelfLinkStart", start)
         + table("int", "kSelfLinkJoint", link_joint)
@@ -199,7 +204,7 @@ def traced_target(kernel: str, urdf_xml: str, ee_link: str, actuated_names: tupl
     move; the build then solves over the chain alone and carries the rest from the seed.
     Collision gradients can move any joint, so collision builds solve over all of them.
     """
-    solved = actuated_names if has_collision else chain_names
+    solved = chain_names if KERNELS[kernel][2] and not has_collision else actuated_names
     header = (_robot_header(urdf_xml, ee_link, actuated_names, joint_names, solved)
               + collision_src)
     lib = ctypes.CDLL(str(_compile(kernel, header, len(solved), len(joint_names))))

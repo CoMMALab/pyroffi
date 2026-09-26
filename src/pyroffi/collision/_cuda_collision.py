@@ -1360,12 +1360,26 @@ class FusedCUDACollisionChecker:
       path has been checked against it.
     """
 
-    def __init__(self, robot: "Robot", model: RobotCollisionSpherized):
+    def __init__(self, robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):
         from ..cuda_kernels.collision._fused_self_collision_ffi import static_arrays
 
         self._robot = robot
         self._model = model
         self._static = static_arrays(robot, model)
+        # traced=True: the self-collision kernel compiled against cricket-traced FK with this
+        # model's sphere and pair tables baked in (built once per robot and model, cached on
+        # disk). The world kernel stays stock: it is output-bound and measured no faster traced.
+        self._self_target = "fused_self_collision"
+        if traced:
+            import numpy as np
+
+            from ..cuda_kernels._traced import collision_tables_source
+
+            j = robot.joints
+            src = collision_tables_source(
+                np.zeros((0, 4)), np.zeros(0), [np.asarray(t) for t in self._static])
+            (self._self_target,) = robot._backends.traced_target(
+                "fused_self_collision", 0, robot.links.names, j.actuated_names, j.names, src, True)
         j = robot.joints
         self._robot_buffers = (
             j.twists, j.parent_transforms, j.parent_indices, j.actuated_indices,
@@ -1417,7 +1431,7 @@ class FusedCUDACollisionChecker:
 
         @jax.custom_jvp
         def f(cfg):
-            return fused_self_collision(cfg, rb, static)
+            return fused_self_collision(cfg, rb, static, self._self_target)
 
         @f.defjvp
         def f_jvp(primals, tangents):
@@ -1496,10 +1510,10 @@ class FusedCUDACollisionChecker:
         return out[0] if squeeze else out
 
 
-def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized):
+def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):
     """Build a :class:`FusedCUDACollisionChecker`.
 
     Raises ``RuntimeError`` if the compiled library is missing; build it with
     ``bash build_kernels/build_fused_self_collision_cuda.sh``.
     """
-    return FusedCUDACollisionChecker(robot, model)
+    return FusedCUDACollisionChecker(robot, model, traced=traced)
