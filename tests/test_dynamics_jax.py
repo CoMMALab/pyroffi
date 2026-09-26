@@ -129,7 +129,10 @@ def test_forward_dynamics_differentiable(robot):
     q, qd, tau = jax.random.normal(key, (3, n))
     g = jax.grad(lambda t: dynamics.forward_dynamics(robot, q, qd, t).sum())(tau)
     Minv_rowsum = jnp.linalg.inv(robot.mass_matrix(q)).sum(axis=0)
-    assert jnp.abs(g - Minv_rowsum).max() < 1e-4
+    # The reference inverts a float32 mass matrix, so it carries cond(M) * eps of error
+    # (baxter coarse: 3.3e-4 on values ~48 vs pinocchio float64, where the ABA gradient is
+    # within 9.5e-6); compare relative to magnitude.
+    assert jnp.abs(g - Minv_rowsum).max() < 2e-5 * max(1.0, float(jnp.abs(Minv_rowsum).max()))
 
 
 def test_jacobian_linear_vs_autodiff(robot):

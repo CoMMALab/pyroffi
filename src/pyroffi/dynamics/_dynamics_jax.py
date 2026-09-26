@@ -576,18 +576,24 @@ def forward_dynamics_jax(
     gravity: float = _DEFAULT_GRAVITY,
     f_ext: Float[Array, "*batch n_dof 6"] | None = None,
 ) -> Float[Array, "*batch n_dof"]:
-    """Joint accelerations from state and torques.
+    """Joint accelerations from state and torques, by the O(n) Articulated Body Algorithm.
 
-    Computes ``qdd = M(q)^-1 (tau - RNEA(q, qd, 0))`` via a Cholesky solve of the
-    composite-rigid-body mass matrix (:func:`_fd_dense`, following
-    ``frax``). This is numerically robust for degenerate/near-massless links,
-    where the O(n) Articulated Body Algorithm (:func:`_aba_single`, kept for
-    reference/benchmarking) can divide by a vanishing projected inertia and
-    return NaN/Inf. ``f_ext`` follows the same convention as
-    :func:`inverse_dynamics_jax`.
+    ABA (:func:`_aba_single`) never forms the mass matrix. The explicit route
+    (:func:`_fd_dense`, CRBA + Cholesky) amplifies float32 rounding of ``M`` by
+    ``cond(M)`` -- measured 1-2e-4 relative error on fetch and G1 against pinocchio in
+    float64, where ABA gives 3e-7 to 1e-6, matching GRiD and cricket. ABA is also faster from
+    a few thousand configurations (2.4x on G1 at 16k) and 1.2-1.35x slower at 1k. It stayed
+    finite on every bundled URDF, zero-mass virtual links included. ``f_ext`` follows the
+    same convention as :func:`inverse_dynamics_jax`.
     """
+
+    def aba(d, q_, qd_, tau_, f_):
+        # Full float32 matmuls: TF32 (the Ampere default) costs ~3 digits here.
+        with jax.default_matmul_precision("highest"):
+            return _aba_single(d, q_, qd_, tau_, gravity, f_)
+
     return _batched(
-        lambda d, q_, qd_, tau_, f_: _fd_dense(d, q_, qd_, tau_, gravity, f_),
+        aba,
         dyn,
         q,
         qd,

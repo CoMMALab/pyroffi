@@ -65,9 +65,9 @@ def _reference(op, model, to_pin, q, qd, u):
     return np.stack(out)
 
 
-# Worst relative error measured 2026-09-26 over panda/fetch/g1 is well under these bounds; the
-# JAX forward dynamics is ~100x looser than the traced providers on fetch and g1.
-BOUND = {"jax": 1e-3}
+# Every provider, the JAX forward dynamics included (ABA since 2026-09-26; the earlier
+# CRBA + Cholesky route was ~1e-4 on fetch and g1), stays within 1e-4 of pinocchio.
+BOUND: dict = {}
 
 
 @pytest.mark.parametrize("op", ["id", "crba", "fd", "id_du"])
