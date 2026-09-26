@@ -45,6 +45,27 @@ def _eager():
         return contextlib.nullcontext()
 
 
+def _urdf_xml(urdf: "yourdfpy.URDF") -> str:
+    """The URDF as XML text, mimic tags included.
+
+    yourdfpy's writer drops ``<mimic>`` (its ``_write_joint`` never calls ``_write_mimic``), and
+    cricket would then trace each mimic joint as an independent coordinate.
+    """
+    xml = urdf.write_xml_string()
+    mimics = {j.name: j.mimic for j in urdf.robot.joints if j.mimic is not None}
+    if not mimics:
+        return xml.decode()
+    from lxml import etree
+
+    root = etree.fromstring(xml)
+    for joint in root.findall("joint"):  # direct children: transmissions also have <joint>
+        m = mimics.get(joint.get("name"))
+        if m is not None:
+            etree.SubElement(joint, "mimic", joint=m.joint, multiplier=str(m.multiplier),
+                             offset=str(m.offset))
+    return etree.tostring(root, xml_declaration=True, encoding="utf-8").decode()
+
+
 class CudaBackends:
     """Per-robot holder that lazily builds URDF-dependent backends.
 
@@ -145,7 +166,7 @@ class CudaBackends:
             j = int(self._parent_indices[j])
         chain_names = tuple(n for n in actuated_names if n in chain)
         return traced_target(
-            kernel, self._urdf.write_xml_string().decode(), link_names[ee_link],
+            kernel, _urdf_xml(self._urdf), link_names[ee_link],
             actuated_names, joint_names, chain_names, collision_src, has_collision)
 
     # ── Collision backends ─────────────────────────────────────────────────

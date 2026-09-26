@@ -95,3 +95,24 @@ def test_in_kernel_collision_matches_stock(panda, solve):
     fractions = [clear_fraction(solve(robot, (link,), targets, key, prev, traced=traced, **kwargs))
                  for traced in (False, True)]
     assert fractions[1] >= fractions[0] - 0.05, fractions
+
+
+@pytest.mark.parametrize("link_name", ["fr3_hand_tcp", "fr3_rightfinger"])
+def test_mimic_robot_matches_stock(link_name):
+    """Mimic joints follow their driver in the traced kinematics (fr3: finger_joint2 mimics
+    finger_joint1). ``fr3_rightfinger`` hangs off the mimic joint, so its pose depends on an
+    actuated joint that is not its kinematic ancestor."""
+    robot = Robot.from_urdf(yourdfpy.URDF.load("resources/fr3/fr3_spherized.urdf"))
+    link = robot.links.names.index(link_name)
+    key = jax.random.PRNGKey(5)
+    q_true = jax.random.uniform(key, (64, robot.joints.num_actuated_joints),
+                                minval=robot.joints.lower_limits, maxval=robot.joints.upper_limits)
+    targets = jaxlie.SE3(robot.forward_kinematics(q_true)[:, link])
+    prev = jnp.broadcast_to(robot.default_cfg, q_true.shape)
+
+    success = []
+    for traced in (False, True):
+        q = sqp_ik_solve_cuda_batch(robot, (link,), targets, key, prev, traced=traced)
+        pos, rot = _pose_errors(robot, link, q, targets)
+        success.append(np.mean((pos < 1e-3) & (rot < 1e-2)))
+    assert success[1] >= success[0] - 0.05, success

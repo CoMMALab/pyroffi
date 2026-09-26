@@ -104,8 +104,8 @@ def _robot_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
     if sorted(cricket_names) != sorted(actuated_names):
         raise ValueError(
             "Traced kernel: cricket's joints do not match pyroffi's actuated joints "
-            f"(cricket {cricket_names}, pyroffi {list(actuated_names)}). Mimic joints and "
-            "joints pinocchio models with extra coordinates are not supported."
+            f"(cricket {cricket_names}, pyroffi {list(actuated_names)}). Joints pinocchio "
+            "models with extra coordinates (continuous, planar, floating) are not supported."
         )
     # The kernel solves over `solved_names` (in pyroffi order) and carries every other
     # actuated joint unchanged from its seed ("frozen"). Both maps are emitted as
