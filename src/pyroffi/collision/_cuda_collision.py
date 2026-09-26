@@ -1569,9 +1569,12 @@ class FusedCUDACollisionChecker:
     # for trajopt, where every forward has a matching backward. In-kernel
     # analytic gradients would fix that; the geometry helpers already ship
     # gradient variants for it.
-    def _traced_targets(self, world_counts):
-        """(self, world) FFI targets of the traced build for one scene structure (memoised)."""
-        cached = self._traced_cache.get(world_counts)
+    def _traced_targets(self, world_counts, esdf=None):
+        """(self, world, esdf) FFI targets of the traced build for one scene structure
+        (memoised). ``esdf = (nx, ny, nz, voxel_size)`` also bakes a voxel grid's shape and
+        resolution into the ESDF kernel; its values and origin stay runtime inputs."""
+        key = (world_counts, esdf)
+        cached = self._traced_cache.get(key)
         if cached is not None:
             return cached
         import numpy as np
@@ -1581,9 +1584,14 @@ class FusedCUDACollisionChecker:
         j = self._robot.joints
         src = collision_tables_source(
             np.zeros((0, 4)), np.zeros(0), [np.asarray(t) for t in self._static], world_counts)
+        if esdf is not None:
+            nx, ny, nz, voxel = esdf
+            src += ("#define PYROFFI_TRACED_ESDF\nnamespace pyroffi::traced {\n"
+                    f"constexpr int esdf_nx = {nx}, esdf_ny = {ny}, esdf_nz = {nz};\n"
+                    f"constexpr float esdf_voxel = {float(np.float32(voxel)):.9e}f;\n}}\n")
         targets = self._robot._backends.traced_target(
             "fused_collision", 0, self._robot.links.names, j.actuated_names, j.names, src, True)
-        self._traced_cache[world_counts] = targets
+        self._traced_cache[key] = targets
         return targets
 
     def _build_self_fn(self):
@@ -1680,6 +1688,9 @@ class FusedCUDACollisionChecker:
         from ..kinematics._analytic_collision import world_geometry
 
         cfg, squeeze = self._as_batched(cfg)
+        if isinstance(world_geom, ESDFWorldGeom):
+            out = self._esdf_world_distance(cfg, world_geom)[..., None]  # M = 1: one dense field
+            return out[0] if squeeze else out
         w = world_geometry(world_geom)
         if len(w.capsules) or len(w.boxes) or len(w.halfspaces):
             out = jax.vmap(
@@ -1693,6 +1704,36 @@ class FusedCUDACollisionChecker:
         out = fused_world_collision(cfg, self._robot_buffers, self._static, world, target)
         out = self._model._mask_inactive_world(out)
         return out[0] if squeeze else out
+
+
+    def _esdf_world_distance(self, cfg, esdf: ESDFWorldGeom):
+        """``[B, N]`` link distances to a voxel ESDF: the fused kernel forward, tangents from the
+        pure-JAX reference (live spheres only, as the kernel sees them)."""
+        from ..cuda_kernels.collision._fused_self_collision_ffi import fused_world_esdf
+
+        robot, model = self._robot, self._model
+        grid = jnp.asarray(esdf.grid, jnp.float32)
+        origin = jnp.asarray(esdf.origin, jnp.float32)
+        voxel = float(esdf.voxel_size)
+        target = (self._traced_targets((0, 0, 0, 0), (*grid.shape, voxel))[2] if self._traced
+                  else "fused_world_esdf")
+        def reference(c):
+            def one(q):
+                coll = model.at_config(robot, q)  # [S, N] spheres; padding slots carry r <= 0
+                d = esdf_query_jax(coll.pose.translation(), grid, origin, voxel) - coll.radius
+                return jnp.min(jnp.where(coll.radius > 0.0, d, jnp.inf), axis=0)  # [N]
+            return jax.vmap(one)(c)
+
+        @jax.custom_jvp
+        def f(c):
+            return fused_world_esdf(c, self._robot_buffers, self._static, grid, origin, voxel, target)
+
+        @f.defjvp
+        def f_jvp(primals, tangents):
+            (c,), (dc,) = primals, tangents
+            return f(c), jax.jvp(reference, (c,), (dc,))[1]
+
+        return model._mask_inactive_world(f(cfg)[..., None])[..., 0]
 
 
 def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):

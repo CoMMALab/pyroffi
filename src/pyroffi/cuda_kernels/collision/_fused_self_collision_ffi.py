@@ -47,6 +47,47 @@ def _load_and_register() -> None:
     jax.ffi.register_ffi_target("fused_self_collision", capsule, platform="CUDA")
 
 
+@lru_cache(maxsize=1)
+def _register_esdf() -> None:
+    _load_and_register()
+    lib = ctypes.CDLL(str(Path(__file__).parent / _LIB_NAME))
+    capsule_new = ctypes.pythonapi.PyCapsule_New
+    capsule_new.restype = ctypes.py_object
+    capsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    capsule = capsule_new(ctypes.cast(lib.FusedWorldEsdfFfi, ctypes.c_void_p),
+                          b"xla._CUSTOM_CALL_TARGET", None)
+    jax.ffi.register_ffi_target("fused_world_esdf", capsule, platform="CUDA")
+
+
+def fused_world_esdf(cfg, robot_buffers, static, grid, origin, voxel_size,
+                     ffi_target="fused_world_esdf"):
+    """Fused FK + robot-vs-ESDF collision: ``[B, N]`` per-link minimum over spheres of the
+    trilinearly sampled signed distance at the sphere centre minus its radius (the
+    :func:`~pyroffi.collision._esdf.esdf_query_jax` convention, edge-clamped).
+
+    ``grid`` is ``[nx, ny, nz]`` float32, ``origin`` the world position of voxel (0, 0, 0)'s centre.
+    """
+    if ffi_target == "fused_world_esdf":
+        _register_esdf()
+    cfg = jnp.asarray(cfg, dtype=jnp.float32)
+    if cfg.ndim == 1:
+        cfg = cfg[None, :]
+    sph_local, link_start, link_joint, _pi, _pj = static
+    N = link_start.shape[0] - 1
+    call = jax.ffi.ffi_call(ffi_target, jax.ShapeDtypeStruct((cfg.shape[0], N), jnp.float32),
+                            vmap_method="sequential")
+    return call(
+        cfg,
+        *as_robot_buffers(robot_buffers),
+        jnp.asarray(sph_local, jnp.float32),
+        jnp.asarray(link_start, jnp.int32),
+        jnp.asarray(link_joint, jnp.int32),
+        jnp.asarray(grid, jnp.float32),
+        jnp.asarray(origin, jnp.float32),
+        voxel=np.float32(voxel_size),
+    )
+
+
 def static_arrays(robot, model):
     """Flatten a spherized collision model into the kernel's static buffers.
 

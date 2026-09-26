@@ -310,6 +310,103 @@ void fused_world_collision_kernel(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Fused FK + ESDF world collision
+// ---------------------------------------------------------------------------
+// Same structure again, against a dense signed-distance grid instead of primitives: each
+// sphere samples the grid trilinearly at its centre (edge-clamped, exactly as
+// collision/_esdf.py::esdf_query_jax) and subtracts its radius; the per-link minimum over
+// spheres is written once. A voxel grid has a fixed shape and resolution, so a traced build
+// with PYROFFI_TRACED_ESDF takes them as compile-time constants (grid values and origin stay
+// runtime inputs).
+//
+// grid [nx, ny, nz] row-major (C order), origin [3] = world position of voxel (0, 0, 0)'s
+// centre, voxel = cubic voxel edge. out [B, N_links].
+
+static __device__ __forceinline__ float esdf_trilinear(
+    const float* __restrict__ grid, const float* __restrict__ origin, float voxel,
+    int nx, int ny, int nz, const float p[3])
+{
+    const int dims[3] = {nx, ny, nz};
+    int i0[3], i1[3];
+    float f[3];
+    for (int k = 0; k < 3; ++k) {
+        float idx = (p[k] - origin[k]) / voxel;
+        idx = fminf(fmaxf(idx, 0.f), (float)dims[k] - 1.f - 1e-6f);
+        i0[k] = (int)floorf(idx);
+        f[k] = idx - (float)i0[k];
+        i1[k] = min(i0[k] + 1, dims[k] - 1);
+    }
+    auto g = [&](int x, int y, int z) { return grid[((size_t)x * ny + y) * nz + z]; };
+    const float c00 = g(i0[0], i0[1], i0[2]) * (1.f - f[0]) + g(i1[0], i0[1], i0[2]) * f[0];
+    const float c01 = g(i0[0], i0[1], i1[2]) * (1.f - f[0]) + g(i1[0], i0[1], i1[2]) * f[0];
+    const float c10 = g(i0[0], i1[1], i0[2]) * (1.f - f[0]) + g(i1[0], i1[1], i0[2]) * f[0];
+    const float c11 = g(i0[0], i1[1], i1[2]) * (1.f - f[0]) + g(i1[0], i1[1], i1[2]) * f[0];
+    const float c0 = c00 * (1.f - f[1]) + c10 * f[1];
+    const float c1 = c01 * (1.f - f[1]) + c11 * f[1];
+    return c0 * (1.f - f[2]) + c1 * f[2];
+}
+
+static __global__ __launch_bounds__(64, 4)
+void fused_world_esdf_kernel(
+    const float* __restrict__ cfg,
+    const float* __restrict__ twists,
+    const float* __restrict__ parent_tf,
+    const int*   __restrict__ parent_idx,
+    const int*   __restrict__ act_idx,
+    const float* __restrict__ mimic_mul,
+    const float* __restrict__ mimic_off,
+    const int*   __restrict__ mimic_act_idx,
+    const int*   __restrict__ topo_inv,
+    const float* __restrict__ sph_local,
+    const int*   __restrict__ link_start,
+    const int*   __restrict__ link_joint,
+    const float* __restrict__ grid,
+    const float* __restrict__ origin,
+    float*       __restrict__ out,
+    int B, int n_joints, int n_act, int N_links_arg,
+    int nx_arg, int ny_arg, int nz_arg, float voxel_arg)
+{
+#ifdef PYROFFI_TRACED_ROBOT
+    constexpr int N_links = pyroffi::traced::n_self_links;
+    (void)N_links_arg;
+    FUSED_BIND_TABLES();
+#else
+    const int N_links = N_links_arg;
+#endif
+#ifdef PYROFFI_TRACED_ESDF
+    constexpr int nx = pyroffi::traced::esdf_nx, ny = pyroffi::traced::esdf_ny, nz = pyroffi::traced::esdf_nz;
+    constexpr float voxel = pyroffi::traced::esdf_voxel;
+    (void)nx_arg; (void)ny_arg; (void)nz_arg; (void)voxel_arg;
+#else
+    const int nx = nx_arg, ny = ny_arg, nz = nz_arg;
+    const float voxel = voxel_arg;
+#endif
+    extern __shared__ float s_Te[];
+    float* T = s_Te + (size_t)threadIdx.x * n_joints * 7;
+
+    const float IDENTITY_TF[7] = {1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= B) return;
+
+    fk_single(cfg + (size_t)b * n_act, twists, parent_tf, parent_idx, act_idx,
+              mimic_mul, mimic_off, mimic_act_idx, topo_inv, T, n_joints, n_act);
+
+    const float o[3] = {origin[0], origin[1], origin[2]};
+    for (int n = 0; n < N_links; ++n) {
+        const int jn = link_joint[n];
+        const float* Tn = (jn >= 0) ? T + (size_t)jn * 7 : IDENTITY_TF;
+        float d = INFINITY;  // links without spheres report +inf, as the JAX path does
+        for (int a = link_start[n]; a < link_start[n + 1]; ++a) {
+            float c[3];
+            apply_se3_point(Tn, sph_local + (size_t)a * 4, c);
+            d = fminf(d, esdf_trilinear(grid, o, voxel, nx, ny, nz, c) - sph_local[(size_t)a * 4 + 3]);
+        }
+        out[(size_t)b * N_links + n] = d;
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 static ffi::Error FusedSelfCollisionImpl(
@@ -484,4 +581,95 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world boxes
         .Arg<ffi::Buffer<ffi::DataType::F32>>()  // world halfspaces
         .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out [B, N, M]
+);
+
+// ---------------------------------------------------------------------------
+
+static ffi::Error FusedWorldEsdfImpl(
+    cudaStream_t stream,
+    float voxel,
+    ffi::Buffer<ffi::DataType::F32> cfg,
+    ffi::Buffer<ffi::DataType::F32> twists,
+    ffi::Buffer<ffi::DataType::F32> parent_tf,
+    ffi::Buffer<ffi::DataType::S32> parent_idx,
+    ffi::Buffer<ffi::DataType::S32> act_idx,
+    ffi::Buffer<ffi::DataType::F32> mimic_mul,
+    ffi::Buffer<ffi::DataType::F32> mimic_off,
+    ffi::Buffer<ffi::DataType::S32> mimic_act_idx,
+    ffi::Buffer<ffi::DataType::S32> topo_inv,
+    ffi::Buffer<ffi::DataType::F32> sph_local,
+    ffi::Buffer<ffi::DataType::S32> link_start,
+    ffi::Buffer<ffi::DataType::S32> link_joint,
+    ffi::Buffer<ffi::DataType::F32> grid,
+    ffi::Buffer<ffi::DataType::F32> origin,
+    ffi::Result<ffi::Buffer<ffi::DataType::F32>> out)
+{
+    const auto d = cfg.dimensions();
+    const auto g = grid.dimensions();
+    if (d.size() != 2 || g.size() != 3 || origin.element_count() != 3)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "fused_world_esdf: cfg must be [B, n_act], grid [nx, ny, nz], origin [3]");
+
+    const int B = static_cast<int>(d[0]);
+    const int n_act = static_cast<int>(d[1]);
+    const int n_joints = static_cast<int>(parent_idx.dimensions()[0]);
+    const int N_links = static_cast<int>(link_start.dimensions()[0]) - 1;
+    const int nx = static_cast<int>(g[0]), ny = static_cast<int>(g[1]), nz = static_cast<int>(g[2]);
+#ifdef PYROFFI_TRACED_ROBOT
+    if (n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
+        N_links != pyroffi::traced::n_self_links)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "fused_world_esdf (traced): launch does not match the robot and "
+                          "collision model this build was traced for.");
+#endif
+#ifdef PYROFFI_TRACED_ESDF
+    if (nx != pyroffi::traced::esdf_nx || ny != pyroffi::traced::esdf_ny ||
+        nz != pyroffi::traced::esdf_nz || voxel != pyroffi::traced::esdf_voxel)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "fused_world_esdf (traced): grid shape or voxel size differs from the "
+                          "one this build was traced for.");
+#endif
+
+    int threads = 0;
+    size_t shmem = 0;
+    if (ffi::Error cfg_err = fused_launch_config(fused_world_esdf_kernel, n_joints, &threads, &shmem);
+        cfg_err.failure())
+        return cfg_err;
+    const int blocks = (B + threads - 1) / threads;
+
+    fused_world_esdf_kernel<<<blocks, threads, shmem, stream>>>(
+        cfg.typed_data(), twists.typed_data(), parent_tf.typed_data(),
+        parent_idx.typed_data(), act_idx.typed_data(), mimic_mul.typed_data(),
+        mimic_off.typed_data(), mimic_act_idx.typed_data(),
+        topo_inv.typed_data(), sph_local.typed_data(),
+        link_start.typed_data(), link_joint.typed_data(),
+        grid.typed_data(), origin.typed_data(), out->typed_data(),
+        B, n_joints, n_act, N_links, nx, ny, nz, voxel);
+
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess)
+        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(e));
+    return ffi::Error::Success();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    FusedWorldEsdfFfi, FusedWorldEsdfImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Attr<float>("voxel")
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // cfg
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // twists
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // parent_tf
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // parent_idx
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // act_idx
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // mimic_mul
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // mimic_off
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // mimic_act_idx
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // topo_inv
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // sph_local
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // link_start
+        .Arg<ffi::Buffer<ffi::DataType::S32>>()  // link_joint
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // grid [nx, ny, nz]
+        .Arg<ffi::Buffer<ffi::DataType::F32>>()  // origin [3]
+        .Ret<ffi::Buffer<ffi::DataType::F32>>()  // out [B, N]
 );
