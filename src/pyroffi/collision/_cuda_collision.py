@@ -1546,7 +1546,9 @@ class FusedCUDACollisionChecker:
         # obstacle counts (built once per robot, model and scene structure; cached on disk).
         self._traced = traced
         self._traced_cache: dict = {}
-        self._self_target = self._traced_targets((0, 0, 0, 0))[0] if traced else "fused_self_collision"
+        base = self._traced_targets((0, 0, 0, 0)) if traced else None
+        self._self_target = base[0] if traced else "fused_self_collision"
+        self._self_jac_target = base[3] if traced else "fused_self_collision_jac"
         j = robot.joints
         self._robot_buffers = (
             j.twists, j.parent_transforms, j.parent_indices, j.actuated_indices,
@@ -1596,31 +1598,12 @@ class FusedCUDACollisionChecker:
 
     def _build_self_fn(self):
         from ..cuda_kernels.collision._fused_self_collision_ffi import (
-            fused_self_collision)
+            fused_self_collision, fused_self_collision_jac)
 
-        robot, model = self._robot, self._model
         rb, static = self._robot_buffers, self._static
 
-        def _min_sphere_z(q):
-            """Lowest point on any live sphere — the JAX mirror of ``min_z``.
-
-            Padding slots carry a non-positive radius and are dropped by
-            ``static_arrays`` before the kernel ever sees them, so they must be
-            masked out here too or a padded sphere at the origin would report a
-            floor violation the kernel never sees.
-            """
-            coll = model.at_config(robot, q)
-            radius = coll.radius
-            low = coll.pose.translation()[..., 2] - radius
-            return jnp.min(jnp.where(radius > 0.0, low, jnp.inf))
-
-        def reference(cfg):
-            return (
-                jax.vmap(
-                    lambda q: model.compute_self_collision_distance(robot, q))(cfg),
-                jax.vmap(_min_sphere_z)(cfg),
-            )
-
+        # Forward: the distance-only kernel. Tangents: the Jacobian kernel's d(out)/dq, so
+        # autodiff (forward, and reverse by transposing the linear map) stays on the GPU.
         @jax.custom_jvp
         def f(cfg):
             return fused_self_collision(cfg, rb, static, self._self_target)
@@ -1628,7 +1611,8 @@ class FusedCUDACollisionChecker:
         @f.defjvp
         def f_jvp(primals, tangents):
             (cfg,), (dcfg,) = primals, tangents
-            return f(cfg), jax.jvp(reference, (cfg,), (dcfg,))[1]
+            d, J, z, Jz = fused_self_collision_jac(cfg, rb, static, self._self_jac_target)
+            return (d, z), (jnp.einsum("bpn,bn->bp", J, dcfg), jnp.einsum("bn,bn->b", Jz, dcfg))
 
         return f
 
@@ -1691,49 +1675,66 @@ class FusedCUDACollisionChecker:
         if isinstance(world_geom, ESDFWorldGeom):
             out = self._esdf_world_distance(cfg, world_geom)[..., None]  # M = 1: one dense field
             return out[0] if squeeze else out
-        w = world_geometry(world_geom)
+        # world_geometry flattens with numpy; a world closed over by a jitted caller is still
+        # concrete, so evaluate it eagerly instead of staging its pose math into the trace.
+        with jax.ensure_compile_time_eval():
+            w = world_geometry(world_geom)
         if len(w.capsules) or len(w.boxes) or len(w.halfspaces):
             out = jax.vmap(
                 lambda q: self._model.compute_world_collision_distance(
                     robot, q, world_geom))(cfg)
             return out[0] if squeeze else out
 
+        from ..cuda_kernels.collision._fused_self_collision_ffi import fused_world_collision_jac
+
         world = (w.spheres, w.capsules, w.boxes, w.halfspaces)
-        target = (self._traced_targets(tuple(len(x) for x in world))[1] if self._traced
-                  else "fused_world_collision")
-        out = fused_world_collision(cfg, self._robot_buffers, self._static, world, target)
-        out = self._model._mask_inactive_world(out)
-        return out[0] if squeeze else out
-
-
-    def _esdf_world_distance(self, cfg, esdf: ESDFWorldGeom):
-        """``[B, N]`` link distances to a voxel ESDF: the fused kernel forward, tangents from the
-        pure-JAX reference (live spheres only, as the kernel sees them)."""
-        from ..cuda_kernels.collision._fused_self_collision_ffi import fused_world_esdf
-
-        robot, model = self._robot, self._model
-        grid = jnp.asarray(esdf.grid, jnp.float32)
-        origin = jnp.asarray(esdf.origin, jnp.float32)
-        voxel = float(esdf.voxel_size)
-        target = (self._traced_targets((0, 0, 0, 0), (*grid.shape, voxel))[2] if self._traced
-                  else "fused_world_esdf")
-        def reference(c):
-            def one(q):
-                coll = model.at_config(robot, q)  # [S, N] spheres; padding slots carry r <= 0
-                d = esdf_query_jax(coll.pose.translation(), grid, origin, voxel) - coll.radius
-                return jnp.min(jnp.where(coll.radius > 0.0, d, jnp.inf), axis=0)  # [N]
-            return jax.vmap(one)(c)
+        if self._traced:
+            targets = self._traced_targets(tuple(len(x) for x in world))
+            target, jac_target = targets[1], targets[4]
+        else:
+            target, jac_target = "fused_world_collision", "fused_world_collision_jac"
+        rb, static = self._robot_buffers, self._static
 
         @jax.custom_jvp
         def f(c):
-            return fused_world_esdf(c, self._robot_buffers, self._static, grid, origin, voxel, target)
+            return fused_world_collision(c, rb, static, world, target)
 
         @f.defjvp
         def f_jvp(primals, tangents):
             (c,), (dc,) = primals, tangents
-            return f(c), jax.jvp(reference, (c,), (dc,))[1]
+            d, J = fused_world_collision_jac(c, rb, static, world, jac_target)
+            return d, jnp.einsum("bnmk,bk->bnm", J, dc)
 
-        return model._mask_inactive_world(f(cfg)[..., None])[..., 0]
+        out = self._model._mask_inactive_world(f(cfg))
+        return out[0] if squeeze else out
+
+
+    def _esdf_world_distance(self, cfg, esdf: ESDFWorldGeom):
+        """``[B, N]`` link distances to a voxel ESDF, forward and Jacobian from the GPU."""
+        from ..cuda_kernels.collision._fused_self_collision_ffi import (
+            fused_world_esdf, fused_world_esdf_jac)
+
+        grid = jnp.asarray(esdf.grid, jnp.float32)
+        origin = jnp.asarray(esdf.origin, jnp.float32)
+        voxel = float(esdf.voxel_size)
+        if self._traced:
+            targets = self._traced_targets((0, 0, 0, 0), (*grid.shape, voxel))
+            target, jac_target = targets[2], targets[5]
+        else:
+            target, jac_target = "fused_world_esdf", "fused_world_esdf_jac"
+        rb, static = self._robot_buffers, self._static
+
+        @jax.custom_jvp
+        def f(c):
+            return fused_world_esdf(c, rb, static, grid, origin, voxel, target)
+
+        @f.defjvp
+        def f_jvp(primals, tangents):
+            (c,), (dc,) = primals, tangents
+            d, J = fused_world_esdf_jac(c, rb, static, grid, origin, voxel, jac_target)
+            return d, jnp.einsum("bnk,bk->bn", J, dc)
+
+        return self._model._mask_inactive_world(f(cfg)[..., None])[..., 0]
 
 
 def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):

@@ -202,7 +202,8 @@ def fused_world_collision(cfg, robot_buffers, static, world, ffi_target="fused_w
 
     sph_local, link_start, link_joint, _pi, _pj = static
     N = link_start.shape[0] - 1
-    w_sph, w_cap, w_box, w_hs = [np.asarray(x, dtype=np.float32) for x in world]
+    # jnp, not np: under jit the world arrays may be traced (only their shapes are static).
+    w_sph, w_cap, w_box, w_hs = [jnp.asarray(x, dtype=jnp.float32) for x in world]
     M = sum(x.shape[0] for x in (w_sph, w_cap, w_box, w_hs))
 
     call = jax.ffi.ffi_call(
@@ -219,3 +220,65 @@ def fused_world_collision(cfg, robot_buffers, static, world, ffi_target="fused_w
         jnp.asarray(w_sph), jnp.asarray(w_cap),
         jnp.asarray(w_box), jnp.asarray(w_hs),
     )
+
+
+# ---------------------------------------------------------------------------
+# Jacobian variants: the same outputs plus d(output)/dq from the GPU.
+
+_JAC_TARGETS = {"FusedSelfCollisionJacFfi": "fused_self_collision_jac",
+                "FusedWorldCollisionJacFfi": "fused_world_collision_jac",
+                "FusedWorldEsdfJacFfi": "fused_world_esdf_jac"}
+
+
+@lru_cache(maxsize=1)
+def _register_jac() -> None:
+    _load_and_register()
+    lib = ctypes.CDLL(str(Path(__file__).parent / _LIB_NAME))
+    capsule_new = ctypes.pythonapi.PyCapsule_New
+    capsule_new.restype = ctypes.py_object
+    capsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    for symbol, target in _JAC_TARGETS.items():
+        capsule = capsule_new(ctypes.cast(getattr(lib, symbol), ctypes.c_void_p),
+                              b"xla._CUSTOM_CALL_TARGET", None)
+        jax.ffi.register_ffi_target(target, capsule, platform="CUDA")
+
+
+def _jac_call(target, stock, outs, cfg, robot_buffers, static, extra, **attrs):
+    if target == stock:
+        _register_jac()
+    sph_local, link_start, link_joint, _pi, _pj = static
+    call = jax.ffi.ffi_call(target, outs, vmap_method="sequential")
+    return call(cfg, *as_robot_buffers(robot_buffers), jnp.asarray(sph_local, jnp.float32),
+                jnp.asarray(link_start, jnp.int32), jnp.asarray(link_joint, jnp.int32), *extra, **attrs)
+
+
+def fused_self_collision_jac(cfg, robot_buffers, static, ffi_target="fused_self_collision_jac"):
+    """``(dist[B, P], d dist/dq [B, P, n], min_z[B], d min_z/dq [B, n])``."""
+    B, n = cfg.shape
+    P = static[3].shape[0]
+    f32 = lambda *s: jax.ShapeDtypeStruct(s, jnp.float32)
+    return _jac_call(ffi_target, "fused_self_collision_jac", (f32(B, P), f32(B, P, n), f32(B), f32(B, n)),
+                     cfg, robot_buffers, static,
+                     (jnp.asarray(static[3], jnp.int32), jnp.asarray(static[4], jnp.int32)))
+
+
+def fused_world_collision_jac(cfg, robot_buffers, static, world, ffi_target="fused_world_collision_jac"):
+    """``(dist[B, N, M], d dist/dq [B, N, M, n])`` for the world layout of :func:`fused_world_collision`."""
+    B, n = cfg.shape
+    N = static[1].shape[0] - 1
+    w = [jnp.asarray(x, dtype=jnp.float32) for x in world]
+    M = sum(x.shape[0] for x in w)
+    f32 = lambda *s: jax.ShapeDtypeStruct(s, jnp.float32)
+    return _jac_call(ffi_target, "fused_world_collision_jac", (f32(B, N, M), f32(B, N, M, n)),
+                     cfg, robot_buffers, static, w)
+
+
+def fused_world_esdf_jac(cfg, robot_buffers, static, grid, origin, voxel_size,
+                         ffi_target="fused_world_esdf_jac"):
+    """``(dist[B, N], d dist/dq [B, N, n])`` for :func:`fused_world_esdf`."""
+    B, n = cfg.shape
+    N = static[1].shape[0] - 1
+    f32 = lambda *s: jax.ShapeDtypeStruct(s, jnp.float32)
+    return _jac_call(ffi_target, "fused_world_esdf_jac", (f32(B, N), f32(B, N, n)), cfg, robot_buffers,
+                     static, (jnp.asarray(grid, jnp.float32), jnp.asarray(origin, jnp.float32)),
+                     voxel=np.float32(voxel_size))
