@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Build _collision_cuda_lib.so from _collision_cuda_kernel.cu.
+# Build _pba_cuda_lib.so from _pba_cuda_kernel.cu (PBA+ 3D Euclidean
+# Distance Transform, faithful-V2 ESDF port Piece 2 -- the CUDA
+# edt_solver="pba" alternative to pyroffi.collision._esdf's pure-JAX
+# edt_solver="jfa" baseline).
 #
 # Usage (from repo root):
-#   bash build_kernels/build_collision_cuda.sh
-#   bash build_kernels/build_collision_cuda.sh --debug
+#   bash build_kernels/build_pba_cuda.sh
+#   bash build_kernels/build_pba_cuda.sh --debug
 #
 # Requirements:
 #   - nvcc (CUDA toolkit)
@@ -12,28 +15,25 @@
 #
 # Note: if your default `nvcc` rejects the system g++ as "unsupported" (CUDA
 # 12.8's nvcc caps out below gcc 15), put a newer CUDA toolkit's bin/ (e.g.
-# CUDA 13.3, which accepts gcc 13) earlier on PATH before running this script.
+# CUDA 13.3, which accepts gcc 13) earlier on PATH before running this script
+# -- same as build_collision_cuda.sh.
 #
 # Optional env vars:
 #   GPU_ARCH   override the target architecture, e.g. GPU_ARCH=-arch=sm_80
 
 set -euo pipefail
 
-# Build parameters (--max-joints / --max-act / --debug) + guardrails live in one
-# place so the kernel builds cannot drift apart. Defaults are applied there and
-# ALWAYS passed as -D, so a .so never depends on a header fallback for its capacity.
+# --max-joints / --max-act are accepted (so build_all.sh can forward one
+# resolved pair to every kernel) but unused here: PBA's distance-transform
+# kernels don't size anything from robot DOF. parse_build_params has
+# already validated them.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_build_params.sh"
 parse_build_params "$@"
 
-# --max-joints / --max-act are accepted (so build_all can forward one resolved pair to
-# every kernel) but unused here: the collision kernels do not size anything from them.
-# parse_build_params has already validated them.
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNELS_DIR="$(cd "${SCRIPT_DIR}/../src/pyroffi/cuda_kernels" && pwd)"
-SRC="${KERNELS_DIR}/collision/_collision_cuda_kernel.cu"
-OUT="${KERNELS_DIR}/collision/_collision_cuda_lib.so"
+SRC="${KERNELS_DIR}/esdf/_pba_cuda_kernel.cu"
+OUT="${KERNELS_DIR}/esdf/_pba_cuda_lib.so"
 
 # Locate the jaxlib include directory that ships xla/ffi/api/ffi.h.
 JAXLIB_INC="$(python -c \
@@ -62,7 +62,7 @@ nvcc \
   --shared \
   --compiler-options "-fPIC" \
   -I"${JAXLIB_INC}" \
-  -I"${KERNELS_DIR}" \
+  -I"${KERNELS_DIR}/esdf" \
   -o "${OUT}" \
   "${SRC}"
 
