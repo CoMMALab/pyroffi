@@ -114,6 +114,18 @@ SPHERIZED_URDF       = _REPO_ROOT / "resources" / "panda" / "panda_spherized.urd
 COARSE_SPHERIZED_URDF = _REPO_ROOT / "resources" / "panda" / "panda_spherized_coarse.urdf"
 PANDA_SRDF           = _REPO_ROOT / "resources" / "panda" / "panda.srdf"
 
+# Per-robot model files, so `--robot NAME` is all it takes. `mesh_urdf` feeds the capsule
+# model (None: fetch `<robot>_description` from robot_descriptions); `coarse` may be None,
+# which skips CUDA-Sphere-Coarse. Explicit --spherized-urdf/--coarse-urdf/--srdf override.
+_G1 = _REPO_ROOT / "resources" / "g1_description"
+ROBOT_PRESETS = {
+    "panda": dict(mesh_urdf=None, spherized=SPHERIZED_URDF, coarse=COARSE_SPHERIZED_URDF,
+                  srdf=PANDA_SRDF),
+    "g1": dict(mesh_urdf=_G1 / "g1_29dof_with_hand_rev_1_0.urdf",
+               spherized=_G1 / "g1_29dof_with_hand_rev_1_0_spherized.urdf", coarse=None,
+               srdf=_G1 / "g1_29dof_with_hand.srdf"),
+}
+
 # Number of random configs to use as the test set
 N_WARMUP = 3          # JIT / kernel warm-up calls (results discarded)
 N_TIMED  = 7          # timed repetitions; median is reported
@@ -516,7 +528,7 @@ def main(args) -> None:
     rng = np.random.default_rng(42)
 
     print("=" * 80)
-    print(f"Collision benchmark  (robot={ROBOT_NAME}, "
+    print(f"Collision benchmark  (robot={args.robot}, "
           f"n_warmup={N_WARMUP}, n_timed={N_TIMED})")
     gpu_status = "enabled" if _NVML_OK else "disabled (pip install nvidia-ml-py)"
     print(f"GPU monitoring: {gpu_status}")
@@ -530,7 +542,8 @@ def main(args) -> None:
     urdf = robot_cap = None
     lo_cap = hi_cap = None
     if not args.binary_only:
-        urdf      = load_robot_description(f"{args.robot}_description")
+        urdf      = (yourdfpy.URDF.load(str(args.mesh_urdf)) if args.mesh_urdf is not None
+                     else load_robot_description(f"{args.robot}_description"))
         robot_cap = pk.Robot.from_urdf(urdf)
         n_act_cap = robot_cap.joints.num_actuated_joints
         lo_cap    = np.asarray(robot_cap.joints.lower_limits)
@@ -539,7 +552,7 @@ def main(args) -> None:
 
     # ── Robot (sphere model) — separate URDF with sphere primitives ────────
     sph_urdf_path = args.spherized_urdf
-    if sph_urdf_path.exists():
+    if sph_urdf_path is not None and sph_urdf_path.exists():
         urdf_sph  = yourdfpy.URDF.load(str(sph_urdf_path))
         robot_sph = pk.Robot.from_urdf(urdf_sph)
         n_act_sph = robot_sph.joints.num_actuated_joints
@@ -554,7 +567,7 @@ def main(args) -> None:
 
     # ── Robot (coarse sphere model) — 1 sphere per link ───────────────────
     coarse_urdf_path = args.coarse_urdf
-    if coarse_urdf_path.exists():
+    if coarse_urdf_path is not None and coarse_urdf_path.exists():
         urdf_coarse = yourdfpy.URDF.load(str(coarse_urdf_path))
         print(f"  {coarse_urdf_path.name} : coarse spherized URDF loaded")
     else:
@@ -568,12 +581,18 @@ def main(args) -> None:
         coll_cap = RobotCollision.from_urdf(urdf)
         print(f"  RobotCollision          : {coll_cap.num_links} links")
 
-    coll_sph = RobotCollisionSpherized.from_urdf(urdf_sph)
+    # The same SRDF the VAMP checker gets, so every backend checks the same pair set.
+    # Without it the sphere models count adjacent/rest-overlapping links as colliding.
+    ignore = ()
+    if args.srdf is not None and args.srdf.exists():
+        from pyroffi._robot_srdf_parser import read_disabled_collisions_from_srdf
+        ignore = tuple((p["link1"], p["link2"]) for p in read_disabled_collisions_from_srdf(str(args.srdf)))
+    coll_sph = RobotCollisionSpherized.from_urdf(urdf_sph, user_ignore_pairs=ignore)
     print(f"  RobotCollisionSpherized : {coll_sph.num_links} links")
 
     coll_sph_coarse = None
     if urdf_coarse is not None:
-        coll_sph_coarse = RobotCollisionSpherized.from_urdf(urdf_coarse)
+        coll_sph_coarse = RobotCollisionSpherized.from_urdf(urdf_coarse, user_ignore_pairs=ignore)
         print(f"  RobotCollisionSpherized (coarse) : {coll_sph_coarse.num_links} links")
 
     cuda_available = False
@@ -1045,16 +1064,17 @@ def main(args) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--robot",           default=ROBOT_NAME,
-                        help="Robot name for robot_descriptions (default: panda)")
-    parser.add_argument("--spherized-urdf",  default=str(SPHERIZED_URDF),
+                        help=f"Robot preset ({', '.join(ROBOT_PRESETS)}) or a robot_descriptions "
+                             "name (default: panda)")
+    parser.add_argument("--spherized-urdf",  default=None,
                         type=pathlib.Path,
                         help="Path to the spherized URDF for RobotCollisionSpherized "
                              f"(default: {SPHERIZED_URDF})")
-    parser.add_argument("--coarse-urdf",     default=str(COARSE_SPHERIZED_URDF),
+    parser.add_argument("--coarse-urdf",     default=None,
                         type=pathlib.Path,
                         help="Path to the coarse spherized URDF for CUDA-Sphere-Coarse "
                              f"(default: {COARSE_SPHERIZED_URDF})")
-    parser.add_argument("--srdf",            default=str(PANDA_SRDF),
+    parser.add_argument("--srdf",            default=None,
                         type=pathlib.Path,
                         help=f"SRDF for the VAMP CPU checker (default: {PANDA_SRDF})")
     parser.add_argument("--skip-neural",     action="store_true",
@@ -1078,4 +1098,10 @@ if __name__ == "__main__":
     parser.add_argument("--neural-samples",  type=int, default=NEURAL_SAMPLES,
                         help=f"Training set size for neural SDF (default: {NEURAL_SAMPLES})")
     args = parser.parse_args()
+    preset = ROBOT_PRESETS.get(args.robot, {})
+    args.mesh_urdf = preset.get("mesh_urdf")
+    for flag in ("spherized_urdf", "coarse_urdf", "srdf"):
+        if getattr(args, flag) is None:
+            default = preset.get(flag.replace("_urdf", ""))
+            setattr(args, flag, pathlib.Path(default) if default is not None else None)
     main(args)

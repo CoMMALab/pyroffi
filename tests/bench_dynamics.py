@@ -90,6 +90,7 @@ Usage:
 """
 
 import argparse
+import json
 import csv
 import datetime
 import os
@@ -874,13 +875,26 @@ def _env_python_cmd(env_var, env_name):
         cand = pathlib.Path(prefix).parent / env_name / "bin" / "python"
         if cand.is_file():
             return [str(cand)]
-    return ["conda", "run", "--no-capture-output", "-n", env_name]
+    # Last resort: an env conda knows about under some other prefix. None when it does not
+    # exist at all, so the caller can skip that solver instead of failing the whole run.
+    try:
+        listed = json.loads(subprocess.run(["conda", "env", "list", "--json"], capture_output=True,
+                                           text=True, check=True).stdout)["envs"]
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
+        return None
+    if any(pathlib.Path(e).name == env_name for e in listed):
+        return ["conda", "run", "--no-capture-output", "-n", env_name]
+    return None
 
 
 def _run_solver_subprocess(robot, solver, csv_file, args):
     env_var = SOLVER_ENV_VAR[solver]
     prefix = [sys.executable] if env_var is None else _env_python_cmd(
         env_var, SOLVER_ENV_NAME[solver])
+    if prefix is None:
+        print(f"=== Skipping {robot} / {solver}: conda env '{SOLVER_ENV_NAME[solver]}' not found "
+              f"(set {env_var} to its python) ===")
+        return
     cmd = prefix + [str(__file__), "--robot", robot, "--solver", solver]
     if args.outdir is not None:
         cmd += ["--outdir", str(args.outdir)]
@@ -905,6 +919,8 @@ def main():
     p.add_argument("--robot", choices=list(ROBOTS), help="child: which robot")
     p.add_argument("--solver", choices=SOLVERS, help="child: which solver")
     args = p.parse_args()
+    if args.outdir is not None:
+        args.outdir.mkdir(parents=True, exist_ok=True)
 
     if args.solver is not None:
         if args.robot is None:

@@ -141,7 +141,9 @@ def forward_kinematics_joints_jax(
     # loop below is pure matmul.
     delta_mats = _joint_delta_matrices(robot.joints.twists, q_full)
     parent_mats = jaxlie.SE3(robot.joints.parent_transforms).as_matrix()  # (n_joints,4,4)
-    Ts_parent_child = parent_mats @ delta_mats  # (*batch, n_joints, 4, 4)
+    # HIGHEST: on Ampere+ GPUs float32 matmuls default to TF32 (~10 mantissa bits), which
+    # put FK off by ~1e-3 (measured: 9e-4 on G1 vs float64; 3e-7 with HIGHEST).
+    Ts_parent_child = jnp.matmul(parent_mats, delta_mats, precision=jax.lax.Precision.HIGHEST)
     assert Ts_parent_child.shape == (*batch_axes, robot.joints.num_joints, 4, 4)
 
     # Topological sort helpers
@@ -168,7 +170,8 @@ def forward_kinematics_joints_jax(
             Ts_world_link_sorted[..., parent_sorted_idx, :, :],
         )
         return Ts_world_link_sorted.at[..., i, :, :].set(
-            T_world_parent_link @ Ts_parent_child_sorted[..., i, :, :]
+            jnp.matmul(T_world_parent_link, Ts_parent_child_sorted[..., i, :, :],
+                       precision=jax.lax.Precision.HIGHEST)
         )
 
     Ts_world_link_init_sorted = jnp.zeros(

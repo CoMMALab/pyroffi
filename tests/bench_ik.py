@@ -310,7 +310,7 @@ ROBOT_SRDFS = {
     "panda": RESOURCE_ROOT / "panda" / "panda.srdf",
     "fetch": RESOURCE_ROOT / "fetch" / "fetch.srdf",
     "baxter": RESOURCE_ROOT / "baxter" / "baxter.srdf",
-    "g1": RESOURCE_ROOT / "g1_description" / "g1_29dof.srdf",
+    "g1": RESOURCE_ROOT / "g1_description" / "g1_29dof_with_hand.srdf",
 }
 
 # Candidate EE links per robot. The first existing link in the loaded URDF is used.

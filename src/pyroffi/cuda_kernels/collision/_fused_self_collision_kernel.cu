@@ -82,9 +82,31 @@ namespace ffi = xla::ffi;
 #define FUSED_BIND_TABLES() ((void)0)
 #endif
 
-#ifndef FUSED_MAX_LINKS
-#define FUSED_MAX_LINKS 32
-#endif
+// Launch sizing. Each thread keeps its configuration's joint transforms in dynamic shared
+// memory (n_joints * 7 floats), so the block is sized to the robot: 64 threads while that
+// fits the device's opt-in shared-memory limit (99 KB on sm_86 -- enough for ~55 joints),
+// halving beyond it. There is no fixed joint cap; a 43-DOF humanoid is just another robot.
+template <typename Kernel>
+static ffi::Error fused_launch_config(Kernel kernel, int n_joints, int* threads, size_t* shmem)
+{
+    int dev = 0, optin = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+    const size_t row = (size_t)n_joints * 7 * sizeof(float);
+    int t = 64;
+    while (t > 1 && (size_t)t * row > (size_t)optin) t /= 2;
+    if (row > (size_t)optin)
+        return ffi::Error(ffi::ErrorCode::kResourceExhausted,
+                          "fused collision: one configuration's joint transforms exceed the "
+                          "device's shared memory");
+    *threads = t;
+    *shmem = (size_t)t * row;
+    if (*shmem > 48 * 1024 &&
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)*shmem)
+            != cudaSuccess)
+        return ffi::Error(ffi::ErrorCode::kInternal, cudaGetErrorString(cudaGetLastError()));
+    return ffi::Error::Success();
+}
 
 /**
  * One thread per configuration.
@@ -138,10 +160,8 @@ void fused_self_collision_kernel(
     // fk_single writes per-JOINT transforms, so the buffer is sized by joint
     // count; collision spheres are attached to LINKS, and `link_joint` maps
     // between them (a link is posed by its parent joint's transform).
-    // Stride by the ACTUAL joint count, not FUSED_MAX_LINKS. Sizing by the
-    // compile-time bound requested 64 x 32 x 7 x 4 = 56 KB, past the 48 KB
-    // shared-memory limit, and the launch failed with a bare "invalid
-    // argument" rather than anything naming shared memory.
+    // Stride by the ACTUAL joint count; the host sizes the block to fit it
+    // (fused_launch_config).
     extern __shared__ float s_T[];
     float* T = s_T + (size_t)threadIdx.x * n_joints * 7;
 
@@ -322,10 +342,6 @@ static ffi::Error FusedSelfCollisionImpl(
     const int N_links = static_cast<int>(link_start.dimensions()[0]) - 1;
     const int P = static_cast<int>(pair_i.dimensions()[0]);
 
-    if (n_joints > FUSED_MAX_LINKS)
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "fused_self_collision: link count exceeds "
-                          "FUSED_MAX_LINKS; rebuild with a larger bound");
 #ifdef PYROFFI_TRACED_ROBOT
     if (n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
         N_links != pyroffi::traced::n_self_links || P != pyroffi::traced::n_self_pairs)
@@ -334,13 +350,12 @@ static ffi::Error FusedSelfCollisionImpl(
                           "collision model this build was traced for.");
 #endif
 
-    const int threads = 64;
+    int threads = 0;
+    size_t shmem = 0;
+    if (ffi::Error cfg_err = fused_launch_config(fused_self_collision_kernel, n_joints, &threads, &shmem);
+        cfg_err.failure())
+        return cfg_err;
     const int blocks = (B + threads - 1) / threads;
-    const size_t shmem = (size_t)threads * n_joints * 7 * sizeof(float);
-    if (shmem > 48 * 1024)
-        return ffi::Error(ffi::ErrorCode::kResourceExhausted,
-                          "fused_self_collision: shared memory exceeds 48KB; "
-                          "reduce the block size or joint count");
 
     fused_self_collision_kernel<<<blocks, threads, shmem, stream>>>(
         cfg.typed_data(), twists.typed_data(), parent_tf.typed_data(),
@@ -425,12 +440,12 @@ static ffi::Error FusedWorldCollisionImpl(
                           "scene structure this build was traced for.");
 #endif
 
-    const int threads = 64;
+    int threads = 0;
+    size_t shmem = 0;
+    if (ffi::Error cfg_err = fused_launch_config(fused_world_collision_kernel, n_joints, &threads, &shmem);
+        cfg_err.failure())
+        return cfg_err;
     const int blocks = (B + threads - 1) / threads;
-    const size_t shmem = (size_t)threads * n_joints * 7 * sizeof(float);
-    if (shmem > 48 * 1024)
-        return ffi::Error(ffi::ErrorCode::kResourceExhausted,
-                          "fused_world_collision: shared memory exceeds 48KB");
 
     fused_world_collision_kernel<<<blocks, threads, shmem, stream>>>(
         cfg.typed_data(), twists.typed_data(), parent_tf.typed_data(),

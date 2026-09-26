@@ -73,3 +73,22 @@ def test_robogpu_verdicts_match_stock(panda):
         verdicts.append(np.asarray(checker.check_collision_free(robot, cfg)))
     assert 0.0 < verdicts[0].mean() < 1.0  # both outcomes exercised
     np.testing.assert_array_equal(verdicts[0], verdicts[1])
+
+
+def test_fused_checker_handles_high_dof_robot():
+    """G1 (52 joints) used to be refused by a 32-link cap; the block is now sized to the robot."""
+    import sys
+    sys.path.insert(0, "tests")
+    import bench_ik as B
+
+    urdf = yourdfpy.URDF.load(str(B.ROBOT_URDFS["g1"]))
+    robot = Robot.from_urdf(urdf)
+    model = RobotCollisionSpherized.from_urdf(
+        urdf, user_ignore_pairs=B._disabled_pairs_from_srdf(B._default_srdf_for_robot("g1")))
+    cfg = jax.random.uniform(jax.random.PRNGKey(0), (128, robot.joints.num_actuated_joints),
+                             minval=robot.joints.lower_limits, maxval=robot.joints.upper_limits)
+    ref = np.asarray(jax.vmap(lambda q: model.compute_self_collision_distance(robot, q))(cfg))
+    got = np.asarray(FusedCUDACollisionChecker(robot, model).compute_self_collision_distance(robot, cfg))
+    np.testing.assert_array_equal(got.min(-1) > 0, ref.min(-1) > 0)
+    live = np.isfinite(ref)  # inactive pairs: inf in JAX, 1e9 sentinel in CUDA (documented)
+    np.testing.assert_allclose(got[live], ref[live], atol=2e-3)  # documented ~5e-4 vs JAX
