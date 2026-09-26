@@ -38,6 +38,20 @@ def test_fused_self_collision_matches_stock(panda):
 
 
 
+def test_fused_world_collision_matches_stock(panda):
+    import jax.numpy as jnp
+
+    from pyroffi.collision import Sphere
+
+    robot, model, cfg = panda
+    world = Sphere.from_center_and_radius(
+        jnp.array([[0.45, 0.1 * k, 0.35] for k in range(-4, 5)]), jnp.full((9,), 0.08))
+    stock, traced = (np.asarray(FusedCUDACollisionChecker(robot, model, traced=t)
+                                .compute_world_collision_distance(robot, cfg, world))
+                     for t in (False, True))
+    np.testing.assert_allclose(stock, traced, atol=1e-5)
+
+
 def test_robogpu_verdicts_match_stock(panda):
     import jax.numpy as jnp
 

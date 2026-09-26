@@ -139,7 +139,7 @@ def _register_world() -> None:
     jax.ffi.register_ffi_target("fused_world_collision", capsule, platform="CUDA")
 
 
-def fused_world_collision(cfg, robot_buffers, static, world):
+def fused_world_collision(cfg, robot_buffers, static, world, ffi_target="fused_world_collision"):
     """Fused FK + robot-vs-world collision.
 
     Args:
@@ -165,7 +165,7 @@ def fused_world_collision(cfg, robot_buffers, static, world):
     M = sum(x.shape[0] for x in (w_sph, w_cap, w_box, w_hs))
 
     call = jax.ffi.ffi_call(
-        "fused_world_collision",
+        ffi_target,
         jax.ShapeDtypeStruct((B, N, M), jnp.float32),
         vmap_method="sequential",
     )

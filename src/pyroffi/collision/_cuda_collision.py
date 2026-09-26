@@ -1366,20 +1366,12 @@ class FusedCUDACollisionChecker:
         self._robot = robot
         self._model = model
         self._static = static_arrays(robot, model)
-        # traced=True: the self-collision kernel compiled against cricket-traced FK with this
-        # model's sphere and pair tables baked in (built once per robot and model, cached on
-        # disk). The world kernel stays stock: it is output-bound and measured no faster traced.
-        self._self_target = "fused_self_collision"
-        if traced:
-            import numpy as np
-
-            from ..cuda_kernels._traced import collision_tables_source
-
-            j = robot.joints
-            src = collision_tables_source(
-                np.zeros((0, 4)), np.zeros(0), [np.asarray(t) for t in self._static])
-            (self._self_target,) = robot._backends.traced_target(
-                "fused_self_collision", 0, robot.links.names, j.actuated_names, j.names, src, True)
+        # traced=True: kernels compiled with this model's sphere and pair tables baked in, the
+        # self kernel against cricket-traced FK and the world kernel against the scene's
+        # obstacle counts (built once per robot, model and scene structure; cached on disk).
+        self._traced = traced
+        self._traced_cache: dict = {}
+        self._self_target = self._traced_targets((0, 0, 0, 0))[0] if traced else "fused_self_collision"
         j = robot.joints
         self._robot_buffers = (
             j.twists, j.parent_transforms, j.parent_indices, j.actuated_indices,
@@ -1402,6 +1394,23 @@ class FusedCUDACollisionChecker:
     # for trajopt, where every forward has a matching backward. In-kernel
     # analytic gradients would fix that; the geometry helpers already ship
     # gradient variants for it.
+    def _traced_targets(self, world_counts):
+        """(self, world) FFI targets of the traced build for one scene structure (memoised)."""
+        cached = self._traced_cache.get(world_counts)
+        if cached is not None:
+            return cached
+        import numpy as np
+
+        from ..cuda_kernels._traced import collision_tables_source
+
+        j = self._robot.joints
+        src = collision_tables_source(
+            np.zeros((0, 4)), np.zeros(0), [np.asarray(t) for t in self._static], world_counts)
+        targets = self._robot._backends.traced_target(
+            "fused_collision", 0, self._robot.links.names, j.actuated_names, j.names, src, True)
+        self._traced_cache[world_counts] = targets
+        return targets
+
     def _build_self_fn(self):
         from ..cuda_kernels.collision._fused_self_collision_ffi import (
             fused_self_collision)
@@ -1503,9 +1512,10 @@ class FusedCUDACollisionChecker:
                     robot, q, world_geom))(cfg)
             return out[0] if squeeze else out
 
-        out = fused_world_collision(
-            cfg, self._robot_buffers, self._static,
-            (w.spheres, w.capsules, w.boxes, w.halfspaces))
+        world = (w.spheres, w.capsules, w.boxes, w.halfspaces)
+        target = (self._traced_targets(tuple(len(x) for x in world))[1] if self._traced
+                  else "fused_world_collision")
+        out = fused_world_collision(cfg, self._robot_buffers, self._static, world, target)
         out = self._model._mask_inactive_world(out)
         return out[0] if squeeze else out
 

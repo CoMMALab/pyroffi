@@ -63,9 +63,9 @@ namespace ffi = xla::ffi;
 
 #ifdef PYROFFI_TRACED_ROBOT
 #include "../_traced_robot.cuh"
-// Traced build (self-collision kernel only -- the world kernel is bound by its [B, N, M] output
-// and runtime obstacle loops, and measured no faster traced): FK from cricket's straight-line
-// code, and the model's sphere and pair tables baked in so the pair/link loops are constant.
+// Traced build: FK from cricket's straight-line code (self kernel), the model's sphere and
+// pair tables baked in so the pair/link loops are constant, and (world kernel) the scene's
+// obstacle counts as constants so per-link minima accumulate in registers.
 #define FUSED_FK(b, T)                                                                      \
     do {                                                                                    \
         const float frz_[1] = {0.f};                                                        \
@@ -216,9 +216,22 @@ void fused_world_collision_kernel(
     const float* __restrict__ w_box,
     const float* __restrict__ w_hs,
     float*       __restrict__ out,
-    int B, int n_joints, int n_act, int N_links,
-    int n_ws, int n_wc, int n_wb, int n_wh)
+    int B, int n_joints, int n_act, int N_links_arg,
+    int n_ws_arg, int n_wc_arg, int n_wb_arg, int n_wh_arg)
 {
+#ifdef PYROFFI_TRACED_ROBOT
+    // The scene's obstacle set is fixed, so M is a compile-time constant and each link's
+    // per-obstacle minima live in registers, written to global memory once per link instead
+    // of read-modify-written once per (sphere, obstacle).
+    constexpr int N_links = pyroffi::traced::n_self_links;
+    constexpr int n_ws = pyroffi::traced::n_world_spheres, n_wc = pyroffi::traced::n_world_capsules;
+    constexpr int n_wb = pyroffi::traced::n_world_boxes, n_wh = pyroffi::traced::n_world_halfspaces;
+    (void)N_links_arg; (void)n_ws_arg; (void)n_wc_arg; (void)n_wb_arg; (void)n_wh_arg;
+    FUSED_BIND_TABLES();
+#else
+    const int N_links = N_links_arg;
+    const int n_ws = n_ws_arg, n_wc = n_wc_arg, n_wb = n_wb_arg, n_wh = n_wh_arg;
+#endif
     extern __shared__ float s_Tw[];
     float* T = s_Tw + (size_t)threadIdx.x * n_joints * 7;
 
@@ -234,7 +247,12 @@ void fused_world_collision_kernel(
     for (int n = 0; n < N_links; ++n) {
         const int jn = link_joint[n];
         const float* Tn = (jn >= 0) ? T + (size_t)jn * 7 : IDENTITY_TF;
-        float* orow = out + ((size_t)b * N_links + n) * M;
+        float* orow_out = out + ((size_t)b * N_links + n) * M;
+#ifdef PYROFFI_TRACED_ROBOT
+        float orow[M > 0 ? M : 1];
+#else
+        float* orow = orow_out;
+#endif
 
         for (int m = 0; m < M; ++m) orow[m] = 1e9f;
 
@@ -266,6 +284,9 @@ void fused_world_collision_kernel(
                     c[0], c[1], c[2], r, o[0], o[1], o[2], o[3], o[4], o[5]));
             }
         }
+#ifdef PYROFFI_TRACED_ROBOT
+        for (int m = 0; m < M; ++m) orow_out[m] = orow[m];
+#endif
     }
 }
 
@@ -394,6 +415,15 @@ static ffi::Error FusedWorldCollisionImpl(
     const int n_wc = static_cast<int>(w_cap.dimensions()[0]);
     const int n_wb = static_cast<int>(w_box.dimensions()[0]);
     const int n_wh = static_cast<int>(w_hs.dimensions()[0]);
+#ifdef PYROFFI_TRACED_ROBOT
+    if (n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
+        N_links != pyroffi::traced::n_self_links || n_ws != pyroffi::traced::n_world_spheres ||
+        n_wc != pyroffi::traced::n_world_capsules || n_wb != pyroffi::traced::n_world_boxes ||
+        n_wh != pyroffi::traced::n_world_halfspaces)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "fused_world_collision (traced): launch does not match the robot and "
+                          "scene structure this build was traced for.");
+#endif
 
     const int threads = 64;
     const int blocks = (B + threads - 1) / threads;

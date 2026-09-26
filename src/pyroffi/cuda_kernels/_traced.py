@@ -44,8 +44,8 @@ KERNELS = {
     "ls_ik": ("ik/_ls_ik_cuda_kernel.cu", ("LsIkCudaFfi",), True),
     "hjcd_ik": ("ik/_hjcd_ik_cuda_kernel.cu", ("HjcdIkCoarseCudaFfi", "HjcdIkLmCudaFfi"), True),
     "mppi_ik": ("ik/_mppi_ik_cuda_kernel.cu", ("MppiIkCudaFfi",), True),
-    "fused_self_collision": ("collision/_fused_self_collision_kernel.cu",
-                             ("FusedSelfCollisionFfi",), False),
+    "fused_collision": ("collision/_fused_self_collision_kernel.cu",
+                        ("FusedSelfCollisionFfi", "FusedWorldCollisionFfi"), False),
     "robogpu": ("collision/_robogpu_collision_host.cu", ("RoboGPUCollisionFfi",), False),
 }
 
