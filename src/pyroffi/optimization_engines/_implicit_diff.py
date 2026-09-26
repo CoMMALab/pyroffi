@@ -178,7 +178,16 @@ def differentiable_ik_solution(
         # 19%. Under x64 with a well-conditioned batch the two agree to ~1e-3
         # relative. Anyone differentiating THROUGH a near-singular solution
         # should distrust the magnitude from either source, not just this one.
-        if task_jacobian is not None:
+        floating = getattr(robot_, "floating_base", False)
+        if floating:
+            # A floating base's quaternion is not a coordinate: differentiate the optimality
+            # condition in the tangent space at q*, then map the tangent back through the
+            # retraction. (The CUDA task Jacobian covers joints only, so it is not used.)
+            from .._floating_base import integrate
+
+            z = jnp.zeros(robot_.nv, q_s.dtype)
+            J_q = jax.jacobian(lambda d: _residual(integrate(robot_, q_s, d), robot_, t))(z)
+        elif task_jacobian is not None:
             J_q = jac
         else:
             J_q = jax.jacobian(_residual, argnums=0)(q_s, robot_, t)  # (6*n_ee, n_act)
@@ -211,6 +220,8 @@ def differentiable_ik_solution(
                                (robot_,), (drobot,))
             rhs = rhs + Jr_dr
         dq = -(J_q_pinv @ rhs)
+        if floating:
+            _, dq = jax.jvp(lambda d: integrate(robot_, q_s, d), (z,), (dq,))
 
         # A solution held OFF-TARGET by an active collision constraint does not
         # satisfy r(q*, t) = 0, so the rule above -- which differentiates exactly
@@ -225,7 +236,7 @@ def differentiable_ik_solution(
         # solve the bordered system for the multipliers too), but it is right to
         # first order in the constrained directions and is strictly better than
         # ignoring the constraint, which is what happened before.
-        if constraint_grads is not None:
+        if constraint_grads is not None and not floating:
             G = constraint_grads                              # (n_active, n_act)
             GGt = G @ G.T + 1e-9 * jnp.eye(G.shape[0])
             dq = dq - G.T @ jnp.linalg.solve(GGt, G @ dq)

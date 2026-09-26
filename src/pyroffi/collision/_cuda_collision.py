@@ -1640,8 +1640,26 @@ class FusedCUDACollisionChecker:
         return (cfg[None, :], True) if cfg.ndim == 1 else (cfg, False)
 
     def compute_self_collision_distance(self, robot: "Robot", cfg):
-        """``[*batch, P]`` signed distances over active self-collision pairs."""
-        return self.compute_self_collision_and_floor(robot, cfg)[0]
+        """``[*batch, P]`` signed distances over active self-collision pairs.
+
+        Self-collision does not depend on a floating base's pose, so only the joints go to
+        the kernel.
+        """
+        if self._robot.floating_base:
+            cfg = jnp.asarray(cfg)[..., 7:]
+        cfg, squeeze = self._as_batched(cfg)
+        out = self._model._mask_inactive_pairs(
+            self._self_fn(cfg)[0], self._model.active_idx_i, self._model.active_idx_j)
+        return out[0] if squeeze else out
+
+    def _require_fixed_base(self, what: str):
+        # ponytail: the fused kernels compute FK from the joints alone; world and floor
+        # queries of a floating robot need the base pose in-kernel. Until then, callers
+        # take the JAX path (RobotCollisionSpherized), which composes the base.
+        if self._robot.floating_base:
+            raise NotImplementedError(
+                f"FusedCUDACollisionChecker: {what} for a floating-base robot is not "
+                "supported yet; use RobotCollisionSpherized's JAX path.")
 
     def compute_self_collision_and_floor(self, robot: "Robot", cfg):
         """``([*batch, P], [*batch])`` — pair distances and lowest sphere point.
@@ -1653,6 +1671,7 @@ class FusedCUDACollisionChecker:
         spheres: that second FK measured 3.47 ms against this kernel's 1.93 ms
         at B=61440, i.e. it more than doubled the cost of the check.
         """
+        self._require_fixed_base("floor clearance")
         cfg, squeeze = self._as_batched(cfg)
         out, min_z = self._self_fn(cfg)
         out = self._model._mask_inactive_pairs(
@@ -1671,6 +1690,7 @@ class FusedCUDACollisionChecker:
             fused_world_collision)
         from ..kinematics._analytic_collision import world_geometry
 
+        self._require_fixed_base("world collision")
         cfg, squeeze = self._as_batched(cfg)
         if isinstance(world_geom, ESDFWorldGeom):
             out = self._esdf_world_distance(cfg, world_geom)[..., None]  # M = 1: one dense field

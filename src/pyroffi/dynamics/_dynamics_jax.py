@@ -477,6 +477,126 @@ def _aba_single(
     return qdd
 
 
+def _base_frame(base: Array, gravity: Array | float) -> tuple[Array, Array]:
+    """For a floating base pose ``wxyz_xyz``: the world->base rotation ``E`` and the gravity-
+    trick acceleration (the negated gravity field) expressed in the base frame."""
+    import jaxlie
+
+    E = jaxlie.SE3(base).rotation().as_matrix().T
+    a_up = jnp.array([0.0, 0.0, 1.0]) * (-jnp.asarray(gravity))
+    return E, jnp.concatenate([jnp.zeros(3), E @ a_up])
+
+
+def _fext_floating(dyn: DynamicsInfo, Xup: list[Array], E_base: Array, f_ext: Array | None):
+    if f_ext is None:
+        return None
+    X0 = _compute_X0(dyn, Xup)  # base -> body; world -> body composes the base rotation
+    return [jnp.concatenate([X0[i][:3, :3] @ E_base @ f_ext[i, :3],
+                             X0[i][:3, :3] @ E_base @ f_ext[i, 3:]]) for i in range(dyn.num_dof)]
+
+
+def _rnea_floating(
+    dyn: DynamicsInfo, base: Array, q: Array, v_base: Array, qd: Array, a_base: Array,
+    qdd: Array, gravity: Array | float, f_ext: Array | None = None,
+) -> Array:
+    """Floating-base RNEA: ``[base wrench (6) | joint torques (n)]``.
+
+    ``v_base``/``a_base`` are the base body's spatial velocity/acceleration in its own frame,
+    angular first; the returned base wrench is ``[torque; force]`` in the base frame -- the
+    wrench the environment must apply to the base to produce this motion.
+    """
+    order = _topological_dof_order(dyn)
+    Xup = _compute_Xup(dyn, q)
+    E_base, a_g = _base_frame(base, gravity)
+    f_body = _fext_floating(dyn, Xup, E_base, f_ext)
+    a0 = a_base + a_g
+    f0 = dyn.I_base @ a0 + _crf(v_base) @ (dyn.I_base @ v_base)
+    v, a, f = [None] * dyn.num_dof, [None] * dyn.num_dof, [None] * dyn.num_dof
+    for i in order:
+        p = dyn.parent_dof_indices[i]
+        vp, ap = (v_base, a0) if p == -1 else (v[p], a[p])
+        vJ = dyn.S[i] * qd[i]
+        v[i] = Xup[i] @ vp + vJ
+        a[i] = Xup[i] @ ap + dyn.S[i] * qdd[i] + _crm(v[i]) @ vJ
+        f[i] = dyn.I_body[i] @ a[i] + _crf(v[i]) @ (dyn.I_body[i] @ v[i])
+        if f_body is not None:
+            f[i] = f[i] - f_body[i]
+    tau = jnp.zeros(dyn.num_dof)
+    for i in reversed(order):
+        tau = tau.at[i].set(dyn.S[i] @ f[i] + dyn.damping[i] * qd[i])
+        p = dyn.parent_dof_indices[i]
+        if p == -1:
+            f0 = f0 + Xup[i].T @ f[i]
+        else:
+            f[p] = f[p] + Xup[i].T @ f[i]
+    return jnp.concatenate([f0, tau])
+
+
+def _aba_floating(
+    dyn: DynamicsInfo, base: Array, q: Array, v_base: Array, qd: Array, f_base: Array,
+    tau: Array, gravity: Array | float, f_ext: Array | None = None,
+) -> Array:
+    """Floating-base ABA: ``[base acceleration (6) | qdd (n)]`` (Featherstone Table 9.6).
+
+    ``f_base`` is a wrench applied to the base (``[torque; force]``, base frame; usually zero).
+    """
+    n = dyn.num_dof
+    order = _topological_dof_order(dyn)
+    Xup = _compute_Xup(dyn, q)
+    E_base, a_g = _base_frame(base, gravity)
+    f_body = _fext_floating(dyn, Xup, E_base, f_ext)
+
+    v, c, pA = [None] * n, [None] * n, [None] * n
+    IA = [dyn.I_body[i] for i in range(n)]
+    IA0 = dyn.I_base
+    pA0 = _crf(v_base) @ (dyn.I_base @ v_base)
+    for i in order:
+        p = dyn.parent_dof_indices[i]
+        vJ = dyn.S[i] * qd[i]
+        v[i] = Xup[i] @ (v_base if p == -1 else v[p]) + vJ
+        c[i] = _crm(v[i]) @ vJ
+        pA[i] = _crf(v[i]) @ (dyn.I_body[i] @ v[i])
+        if f_body is not None:
+            pA[i] = pA[i] - f_body[i]
+
+    U, D, u = [None] * n, [None] * n, [None] * n
+    for i in reversed(order):
+        p = dyn.parent_dof_indices[i]
+        U[i] = IA[i] @ dyn.S[i]
+        D[i] = dyn.S[i] @ U[i]
+        u[i] = tau[i] - dyn.damping[i] * qd[i] - dyn.S[i] @ pA[i]
+        Ia = IA[i] - jnp.outer(U[i], U[i]) / D[i]
+        pa = pA[i] + Ia @ c[i] + U[i] * (u[i] / D[i])
+        if p == -1:
+            IA0 = IA0 + Xup[i].T @ Ia @ Xup[i]
+            pA0 = pA0 + Xup[i].T @ pa
+        else:
+            IA[p] = IA[p] + Xup[i].T @ Ia @ Xup[i]
+            pA[p] = pA[p] + Xup[i].T @ pa
+
+    a0 = jnp.linalg.solve(IA0, f_base - pA0)  # includes the gravity trick
+    a = [None] * n
+    qdd = jnp.zeros(n)
+    for i in order:
+        p = dyn.parent_dof_indices[i]
+        a_prime = Xup[i] @ (a0 if p == -1 else a[p]) + c[i]
+        qdd_i = (u[i] - U[i] @ a_prime) / D[i]
+        qdd = qdd.at[i].set(qdd_i)
+        a[i] = a_prime + dyn.S[i] * qdd_i
+    return jnp.concatenate([a0 - a_g, qdd])
+
+
+def _mass_matrix_floating(dyn: DynamicsInfo, base: Array, q: Array) -> Array:
+    """``(6 + n)^2`` joint-space inertia: RNEA columns at zero velocity and gravity."""
+    n = dyn.num_dof
+    z6, zn = jnp.zeros(6), jnp.zeros(n)
+
+    def column(e):
+        return _rnea_floating(dyn, base, q, z6, zn, e[:6], e[6:], 0.0)
+
+    return jax.vmap(column)(jnp.eye(6 + n)).T
+
+
 def _ancestor_mask(dyn: DynamicsInfo) -> Array:
     """(n_body, n_dof) 0/1 mask: mask[i, j] = 1 iff DOF j is on the path from
     the world to body i (inclusive). Computed on static topology."""
@@ -549,7 +669,17 @@ def inverse_dynamics_jax(
 
     ``f_ext`` are optional per-body external wrenches ``[torque; force]``
     applied at each body's frame origin, expressed in world axes.
+
+    Floating base: ``q`` is ``[base wxyz_xyz | joints]``, ``qd``/``qdd`` are
+    ``[base twist | joints]`` and the result is ``[base wrench | torques]`` (see
+    :mod:`pyroffi._floating_base`); ``f_ext`` covers the joint bodies.
     """
+    if dyn.floating_base:
+        def rnea(d, q_, qd_, qdd_, f_):
+            with jax.default_matmul_precision("highest"):
+                return _rnea_floating(d, q_[:7], q_[7:], qd_[:6], qd_[6:], qdd_[:6], qdd_[6:],
+                                      gravity, f_)
+        return _batched(rnea, dyn, q, qd, qdd, f_ext)
     return _batched(
         lambda d, q_, qd_, qdd_, f_: _rnea_dense(d, q_, qd_, qdd_, gravity, f_),
         dyn,
@@ -564,7 +694,13 @@ def mass_matrix_jax(
     dyn: DynamicsInfo,
     q: Float[Array, "*batch n_dof"],
 ) -> Float[Array, "*batch n_dof n_dof"]:
-    """Joint-space mass matrix M(q) via the composite rigid body algorithm."""
+    """Joint-space mass matrix M(q) via the composite rigid body algorithm
+    (``(6 + n)^2`` for a floating base, from RNEA columns)."""
+    if dyn.floating_base:
+        def crba(d, q_):
+            with jax.default_matmul_precision("highest"):
+                return _mass_matrix_floating(d, q_[:7], q_[7:])
+        return _batched(crba, dyn, q)
     return _batched(_crba_dense, dyn, q)
 
 
@@ -590,6 +726,9 @@ def forward_dynamics_jax(
     def aba(d, q_, qd_, tau_, f_):
         # Full float32 matmuls: TF32 (the Ampere default) costs ~3 digits here.
         with jax.default_matmul_precision("highest"):
+            if d.floating_base:  # [base wxyz_xyz | q], [base twist | qd], [base wrench | tau]
+                return _aba_floating(d, q_[:7], q_[7:], qd_[:6], qd_[6:], tau_[:6], tau_[6:],
+                                     gravity, f_)
             return _aba_single(d, q_, qd_, tau_, gravity, f_)
 
     return _batched(

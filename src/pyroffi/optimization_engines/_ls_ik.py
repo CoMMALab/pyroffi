@@ -217,6 +217,24 @@ def _prepare_ls_collision_buffers_uncached(
 # Single-seed LM solve
 # ---------------------------------------------------------------------------
 
+def _clip_joints(robot: Robot, cfg: Array, lower: Array, upper: Array) -> Array:
+    """Clip the joint part of ``cfg`` to its limits (a floating base is unbounded)."""
+    if not robot.floating_base:
+        return jnp.clip(cfg, lower, upper)
+    return jnp.concatenate([cfg[..., :7], jnp.clip(cfg[..., 7:], lower, upper)], axis=-1)
+
+
+def _floating_seeds(robot: Robot, previous_cfg, joint_seeds, key, sigma):
+    """Prepend a base to joint-only seeds: the previous base, perturbed by body-frame twists
+    of scale ``sigma`` (a uniformly random base pose would not be a meaningful seed)."""
+    from .._floating_base import integrate
+
+    twists = jax.random.normal(key, (joint_seeds.shape[0], 6)) * sigma
+    base = jax.vmap(lambda t: integrate(robot, previous_cfg, jnp.concatenate(
+        [t, jnp.zeros(robot.joints.num_actuated_joints)]))[:7])(twists)
+    return jnp.concatenate([base, joint_seeds], axis=-1)
+
+
 @functools.partial(
     jax.jit,
     static_argnames=("target_link_indices", "max_iter", "constraint_fns"),
@@ -268,8 +286,13 @@ def _ls_ik_single(
         in parallel via vmap; the one producing the lowest weighted residual
         is accepted.
     """
-    n     = cfg.shape[0]
+    from .._floating_base import integrate
+
+    # Steps live in the tangent space (nv): for a floating base the base moves by an SE(3)
+    # twist and only the joints are clipped; for a fixed base this is exactly q + delta.
+    n     = robot.nv
     n_c   = len(constraint_fns)
+    clip  = lambda x: _clip_joints(robot, x, lower, upper)
     n_ee  = len(target_link_indices)
     W     = jnp.concatenate([
         jnp.full(3, pos_weight, dtype=cfg.dtype),
@@ -302,7 +325,10 @@ def _ls_ik_single(
         c, lam, best_c, best_err = carry
 
         # ── Jacobian + weighted residual (single FK forward pass) ────────
-        f_all, vjp_fn = jax.vjp(fused_scaled, c)
+        # d/d(delta) of the residual at c (+) delta, delta = 0: the plain Jacobian for a
+        # fixed base, the tangent-space one for a floating base.
+        f_all, vjp_fn = jax.vjp(
+            lambda d: fused_scaled(integrate(robot, c, d)), jnp.zeros(n, c.dtype))
         J_all = jax.vmap(lambda g: vjp_fn(g)[0])(
             jnp.eye(n_out, dtype=f_all.dtype)
         )  # (n_out, n)
@@ -344,14 +370,14 @@ def _ls_ik_single(
 
         # ── Vectorised line search (single FK call per alpha) ────────────
         def eval_alpha(alpha):
-            nc  = jnp.clip(c + alpha * delta, lower, upper)
+            nc  = clip(integrate(robot, c, alpha * delta))
             nf  = fused_scaled(nc)
             return jnp.dot(nf, nf)
 
         alpha_errs  = jax.vmap(eval_alpha)(_LS_ALPHAS)   # (5,)
         best_ls_idx = jnp.argmin(alpha_errs)
         new_err     = alpha_errs[best_ls_idx]
-        new_c       = jnp.clip(c + _LS_ALPHAS[best_ls_idx] * delta, lower, upper).astype(c.dtype)
+        new_c       = clip(integrate(robot, c, _LS_ALPHAS[best_ls_idx] * delta)).astype(c.dtype)
 
         # ── Accept / reject ──────────────────────────────────────────────
         improved = new_err < curr_err * (1.0 - 1e-4)
@@ -483,6 +509,12 @@ def ls_ik_solve(
 
     if fixed_joint_mask is None:
         fixed_joint_mask = jnp.zeros(n_act, dtype=jnp.bool_)
+    # Seeds are built on the joints (previous_cfg's joint part); a floating base is prepended
+    # after, and the solver's tangent-space mask gains six free base entries.
+    prev_full = previous_cfg
+    if robot.floating_base:
+        previous_cfg = previous_cfg[7:]
+        key_base, rng_key = jax.random.split(rng_key)
 
     # ── Seed generation ────────────────────────────────────────────────────
     n_warm   = max(1, num_seeds // 2)
@@ -522,13 +554,18 @@ def ls_ik_solve(
     )
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
+    solver_mask = fixed_joint_mask
+    if robot.floating_base:
+        seeds = _floating_seeds(robot, prev_full, seeds, key_base, 0.05)
+        solver_mask = jnp.concatenate([jnp.zeros(6, dtype=jnp.bool_), fixed_joint_mask])
+        previous_cfg = prev_full
 
     # ── Multi-seed LM (parallel over seeds) ───────────────────────────────
     all_cfgs = jax.vmap(
         lambda cfg: _ls_ik_single(
             cfg, robot, target_link_indices, target_poses,
             max_iter, lambda_init, pos_weight, ori_weight,
-            lower, upper, fixed_joint_mask,
+            lower, upper, solver_mask,
             constraint_fns=constraint_fns,
             constraint_args=constraint_args,
             constraint_weights=constraint_weights,

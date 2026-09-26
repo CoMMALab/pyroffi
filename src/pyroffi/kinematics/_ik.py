@@ -120,6 +120,15 @@ def inverse_kinematics(
     """
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
+    if robot.floating_base:
+        # ponytail: only the JAX LS solver works in the floating base's tangent space so far;
+        # the others assume a joint-only configuration.
+        if solver != "ls" or use_cuda:
+            raise NotImplementedError(
+                "Floating-base IK is supported by solver='ls' with use_cuda=False; "
+                f"got solver={solver!r}, use_cuda={use_cuda}.")
+        if previous_cfg is None:
+            previous_cfg = robot.default_cfg
     if previous_cfg is None:
         previous_cfg = (robot.joints.lower_limits + robot.joints.upper_limits) / 2
 

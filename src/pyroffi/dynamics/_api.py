@@ -123,7 +123,10 @@ def step(
     ``substeps``. See ``_linearly_implicit_step`` for the precise stability
     caveats.
     """
+    from .._floating_base import integrate
+
     dyn = _require_dynamics(robot)
+    retract = (lambda q_, v_, h: integrate(robot, q_, v_, h)) if robot.floating_base else None
 
     def _single_step(q_, qd_, tau_, f_):
         return step_with_fd(
@@ -133,6 +136,7 @@ def step(
             dt,
             method,
             substeps,
+            **({"retract": retract} if retract else {}),
         )
 
     # Flatten arbitrary leading batch dims and vmap the per-sample step, so the

@@ -145,6 +145,11 @@ class GRiDDynamics:
         ``GRiDDynamics(robot.urdf, ...)``; the robot must have been created via
         :meth:`Robot.from_urdf` so its source URDF is available.
         """
+        if getattr(robot, "floating_base", False):
+            # robot.urdf is the tree below the floating base; GRiD would model it as fixed.
+            raise NotImplementedError(
+                "GRiDDynamics does not model a floating base yet; use pyroffi.dynamics "
+                "(JAX), which does.")
         return cls(
             robot.urdf,
             gravity=gravity,

@@ -44,15 +44,22 @@ def forward_kinematics(
         The SE(3) transforms of the links, ordered by `robot.links.names`,
         in the format `(*batch, link_count, wxyz_xyz)`.
     """
+    from .._floating_base import split_cfg
+
     batch_axes = cfg.shape[:-1]
-    assert cfg.shape == (*batch_axes, robot.joints.num_actuated_joints)
+    assert cfg.shape == (*batch_axes, robot.nq)
+    base, cfg = split_cfg(robot, cfg)
 
     if use_cuda:
         Ts_world_joint = _fk_cuda_differentiable(cfg, robot, unroll_fk)
     else:
         Ts_world_joint = forward_kinematics_joints_jax(robot, cfg, unroll_fk)
 
-    return link_poses_from_joint_poses(robot, Ts_world_joint)
+    Ts = link_poses_from_joint_poses(robot, Ts_world_joint)
+    if base is None:
+        return Ts
+    # Floating base: every pose above is relative to the root link, which sits at `base`.
+    return (jaxlie.SE3(base[..., None, :]) @ jaxlie.SE3(Ts)).wxyz_xyz
 
 
 def link_poses_from_joint_poses(
