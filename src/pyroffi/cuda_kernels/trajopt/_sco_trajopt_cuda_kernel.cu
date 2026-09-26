@@ -23,7 +23,28 @@
 #include "_collision_cuda_helpers.cuh"
 #include "xla/ffi/api/ffi.h"
 
+#ifdef PYROFFI_TRACED_ROBOT
+// Traced build: FK comes from cricket's straight-line code, and the sphere/pair tables and
+// the scene's obstacle counts are compile-time constants (see sco_tables_source): a scene's
+// obstacle set is fixed while its obstacles move. Every timestep thread walks the tables in
+// the same order, so the constant-cache reads broadcast.
+#include "_traced_robot.cuh"
+#define SCO_INLINE __forceinline__
+#define SCO_FK(q, T)                                                        \
+    do {                                                                    \
+        const float sco_frz_[1] = {0.f};                                    \
+        pyroffi::traced::frame_poses((q), sco_frz_, (T));                   \
+    } while (0)
+#else
+#define SCO_INLINE
+#define SCO_FK(q, T)                                                        \
+    fk_single((q), s_twists, s_parent_tf, s_parent_idx, s_act_idx,          \
+              s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv, (T),   \
+              n_joints, n_act)
+#endif
+
 #include <cmath>
+#include <string>
 #include <cuda_runtime.h>
 
 // ---------------------------------------------------------------------------
@@ -197,7 +218,7 @@ struct SmoothMinAcc {
 // Per-configuration collision distances (G=5 smooth-min groups)
 // ---------------------------------------------------------------------------
 
-__device__ void sco_compute_coll_dists(
+__device__ SCO_INLINE void sco_compute_coll_dists(
     const float* __restrict__ cfg,
     const float* __restrict__ s_twists,
     const float* __restrict__ s_parent_tf,
@@ -221,9 +242,7 @@ __device__ void sco_compute_coll_dists(
     float* __restrict__ dists,
     float* __restrict__ T_world)
 {
-    fk_single(cfg, s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-              s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-              T_world, n_joints, n_act);
+    SCO_FK(cfg, T_world);
 
     SmoothMinAcc acc[SCO_MAX_G];
     for (int g = 0; g < SCO_MAX_G; g++) acc[g].init();
@@ -620,15 +639,31 @@ void sco_trajopt_kernel(
     // [B, n_act]. The latter lets a whole graph of DISTINCT transits be optimized
     // in ONE launch instead of one launch per (start, goal).
     int start_stride, int goal_stride,
-    int B, int T, int n_joints, int n_act,
-    int N, int S, int P,
-    int Ms, int Mc, int Mb, int Mh,
+    int B, int T, int n_joints_arg, int n_act_arg,
+    int N_arg, int S_arg, int P_arg,
+    int Ms_arg, int Mc_arg, int Mb_arg, int Mh_arg,
     int n_outer_iters, int n_inner_iters, int m_lbfgs,
     float w_smooth, float w_acc, float w_jerk,
     float w_limits, float w_trust,
     float w_collision, float w_collision_max, float penalty_scale,
     float collision_margin, float smooth_min_temperature, float fd_eps)
 {
+#ifdef PYROFFI_TRACED_ROBOT
+    constexpr int n_joints = pyroffi::traced::n_frames, n_act = pyroffi::traced::n_q;
+    constexpr int N = pyroffi::traced::sco_N, S = pyroffi::traced::sco_S, P = pyroffi::traced::sco_P;
+    constexpr int Ms = pyroffi::traced::n_world_spheres, Mc = pyroffi::traced::n_world_capsules;
+    constexpr int Mb = pyroffi::traced::n_world_boxes, Mh = pyroffi::traced::n_world_halfspaces;
+    (void)n_joints_arg; (void)n_act_arg; (void)N_arg; (void)S_arg; (void)P_arg;
+    (void)Ms_arg; (void)Mc_arg; (void)Mb_arg; (void)Mh_arg;
+    (void)sphere_offsets; (void)sphere_radii; (void)pair_i; (void)pair_j;
+    const float* s_sphere_off = pyroffi::traced::kScoSphereOff;
+    const float* s_sphere_rad = pyroffi::traced::kScoSphereRad;
+    const int*   s_pair_i     = pyroffi::traced::kScoPairI;
+    const int*   s_pair_j     = pyroffi::traced::kScoPairJ;
+#else
+    const int n_joints = n_joints_arg, n_act = n_act_arg, N = N_arg, S = S_arg, P = P_arg;
+    const int Ms = Ms_arg, Mc = Mc_arg, Mb = Mb_arg, Mh = Mh_arg;
+#endif
     // ---- Static shared memory: robot params ----
     __shared__ float s_twists       [MAX_JOINTS * 6];
     __shared__ float s_parent_tf    [MAX_JOINTS * 7];
@@ -638,10 +673,12 @@ void sco_trajopt_kernel(
     __shared__ float s_mimic_off    [MAX_JOINTS];
     __shared__ int   s_mimic_act_idx[MAX_JOINTS];
     __shared__ int   s_topo_inv     [MAX_JOINTS];
+#ifndef PYROFFI_TRACED_ROBOT
     __shared__ float s_sphere_off   [SCO_MAX_N * SCO_MAX_S * 3];
     __shared__ float s_sphere_rad   [SCO_MAX_N * SCO_MAX_S];
     __shared__ int   s_pair_i       [SCO_MAX_PAIRS];
     __shared__ int   s_pair_j       [SCO_MAX_PAIRS];
+#endif
     __shared__ float s_lower        [SCO_MAX_DOF];
     __shared__ float s_upper        [SCO_MAX_DOF];
     __shared__ float s_start        [SCO_MAX_DOF];
@@ -658,6 +695,7 @@ void sco_trajopt_kernel(
         s_mimic_act_idx[i] = mimic_act_idx[i];
         s_topo_inv[i]      = topo_inv[i];
     }
+#ifndef PYROFFI_TRACED_ROBOT
     int ns3 = N*S*3, ns = N*S;
     for (int i = threadIdx.x; i < ns3; i += blockDim.x) s_sphere_off[i] = sphere_offsets[i];
     for (int i = threadIdx.x; i < ns;  i += blockDim.x) s_sphere_rad[i] = sphere_radii[i];
@@ -665,6 +703,7 @@ void sco_trajopt_kernel(
         s_pair_i[i] = pair_i[i];
         s_pair_j[i] = pair_j[i];
     }
+#endif
     // Endpoints: strides of 0 broadcast one pair to every block; strides of n_act
     // give this block its own pair (blockIdx.x indexes the batch).
     const float* my_start = start + (size_t)blockIdx.x * start_stride;
@@ -920,9 +959,7 @@ void sco_trajopt_kernel(
         float* my_Tw = T_world_pool + tid * n_joints * 7;
         const float* q_t = s_traj + tid * n_act;
 
-        fk_single(q_t, s_twists, s_parent_tf, s_parent_idx, s_act_idx,
-                  s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,
-                  my_Tw, n_joints, n_act);
+        SCO_FK(q_t, my_Tw);
 
         // Self-collision pairs (actual distances, not smooth-min)
         for (int p = 0; p < P; p++) {
@@ -1141,6 +1178,28 @@ static ffi::Error ScoTrajoptCudaImpl(
     const int Mh = (world_halfspaces.dimensions().size() > 0)
                    ? static_cast<int>(world_halfspaces.dimensions()[0]) : 0;
 
+#ifndef PYROFFI_TRACED_ROBOT
+    // The stock build stages these tables in fixed-size shared arrays; past them the kernel
+    // writes out of bounds (an illegal address that also poisons the CUDA context).
+    if (N * S > SCO_MAX_N * SCO_MAX_S || P > SCO_MAX_PAIRS || n_act > SCO_MAX_DOF ||
+        n_joints > MAX_JOINTS)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "SCO trajopt: the robot exceeds this build's capacity (spheres " +
+                          std::to_string(N * S) + "/" + std::to_string(SCO_MAX_N * SCO_MAX_S) +
+                          ", self pairs " + std::to_string(P) + "/" + std::to_string(SCO_MAX_PAIRS) +
+                          ", DOF " + std::to_string(n_act) + "/" + std::to_string(SCO_MAX_DOF) +
+                          ", joints " + std::to_string(n_joints) + "/" + std::to_string(MAX_JOINTS) +
+                          "). prepare_sco_trajopt_cuda(..., traced=True) builds one sized to the robot.");
+#endif
+#ifdef PYROFFI_TRACED_ROBOT
+    if (n_act != pyroffi::traced::n_q || n_joints != pyroffi::traced::n_frames ||
+        N != pyroffi::traced::sco_N || S != pyroffi::traced::sco_S || P != pyroffi::traced::sco_P ||
+        Ms != pyroffi::traced::n_world_spheres || Mc != pyroffi::traced::n_world_capsules ||
+        Mb != pyroffi::traced::n_world_boxes || Mh != pyroffi::traced::n_world_halfspaces)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "SCO trajopt (traced): launch does not match the robot and scene "
+                          "structure this build was traced for.");
+#endif
     // Block dimension: next power-of-2 >= T, at least 32, at most 256
     int block_dim = 32;
     while (block_dim < T) block_dim *= 2;

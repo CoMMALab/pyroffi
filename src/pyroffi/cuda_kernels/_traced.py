@@ -50,6 +50,7 @@ KERNELS = {
     "fused_collision": ("collision/_fused_self_collision_kernel.cu",
                         ("FusedSelfCollisionFfi", "FusedWorldCollisionFfi"), False),
     "robogpu": ("collision/_robogpu_collision_host.cu", ("RoboGPUCollisionFfi",), False),
+    "sco_trajopt": ("trajopt/_sco_trajopt_cuda_kernel.cu", ("ScoTrajoptCudaFfi",), False),
 }
 
 

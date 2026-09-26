@@ -186,17 +186,48 @@ class ScoTrajoptPrepared(NamedTuple):
     n_joints: int
     n_act: int
     S: int
+    ffi_target: str = "sco_trajopt_cuda"
+
+
+def sco_tables_source(sphere_off, sphere_rad, pair_i, pair_j, world_counts) -> str:
+    """The kernel's collision structure as compile-time tables, for a traced build.
+
+    ``sphere_off``/``sphere_rad`` are the (N, S, 3)/(N, S) per-link spheres (radius < 0 pads),
+    ``pair_i``/``pair_j`` the self-collision link pairs, and ``world_counts`` the number of world
+    spheres, capsules, boxes and halfspaces; obstacle poses stay runtime inputs.
+    """
+    from .._traced import collision_tables_source, constant_table
+
+    N, S = sphere_rad.shape
+    # The shared traced header also expects the IK collision tables; this kernel uses none.
+    src = collision_tables_source(
+        np.zeros((0, 4)), np.zeros(0),
+        [np.zeros((0, 4)), np.zeros(1), np.zeros(1), np.zeros(0), np.zeros(0)], world_counts)
+    return src + (
+        "namespace pyroffi::traced {\n"
+        f"constexpr int sco_N = {N};\nconstexpr int sco_S = {S};\nconstexpr int sco_P = {len(pair_i)};\n"
+        + constant_table("float", "kScoSphereOff", sphere_off)
+        + constant_table("float", "kScoSphereRad", sphere_rad)
+        + constant_table("int", "kScoPairI", pair_i)
+        + constant_table("int", "kScoPairJ", pair_j)
+        + "}  // namespace pyroffi::traced\n")
 
 
 def prepare_sco_trajopt_cuda(
     robot: "Robot",
     robot_coll: "RobotCollisionSpherized",
     world_geoms: tuple,
+    traced: bool = False,
 ) -> ScoTrajoptPrepared:
     """Flatten robot / collision / world data into kernel arguments, eagerly.
 
     Call this OUTSIDE ``jax.jit`` (once per scene) and pass the result to
     :func:`sco_trajopt_cuda_prepared`.
+
+    ``traced=True`` uses a build of the kernel specialized to this robot and scene structure:
+    FK from cricket's straight-line code, and the sphere/pair tables and obstacle counts baked
+    in as constants (one nvcc build per robot and scene structure, cached on disk). It also lifts
+    the stock build's caps on spheres and self-collision pairs.
     """
     from pyroffi.collision._robot_collision import RobotCollisionSpherized
 
@@ -213,6 +244,16 @@ def prepare_sco_trajopt_cuda(
     sphere_rad_np = np.asarray(robot_coll.coll.radius,             dtype=np.float32)
     N, S = sphere_off_np.shape[:2]
     ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geoms)
+    pair_i_np = np.asarray(robot_coll.active_idx_i, dtype=np.int32)
+    pair_j_np = np.asarray(robot_coll.active_idx_j, dtype=np.int32)
+    target = "sco_trajopt_cuda"
+    if traced:
+        src = sco_tables_source(sphere_off_np, sphere_rad_np, pair_i_np, pair_j_np,
+                                tuple(w.shape[0] for w in (ws_np, wc_np, wb_np, wh_np)))
+        j = robot.joints
+        (target,) = robot._backends.traced_target(
+            "sco_trajopt", len(robot.links.names) - 1, robot.links.names, j.actuated_names,
+            j.names, src, True)
 
     return ScoTrajoptPrepared(
         twists=jnp.asarray(robot.joints.twists, dtype=jnp.float32),
@@ -236,6 +277,7 @@ def prepare_sco_trajopt_cuda(
         n_joints=int(robot.joints.num_joints),
         n_act=int(robot.joints.lower_limits.shape[0]),
         S=int(S),
+        ffi_target=target,
     )
 
 
@@ -254,8 +296,9 @@ def sco_trajopt_cuda_prepared(
     surrounding seeding / scoring code) inside ``jax.jit``.
     """
     B, T, n_act = init_trajs.shape
-    check_capacity(__file__, _LIB_NAME, n_joints=prep.twists.shape[0],
-                   n_act=n_act, kernel="sco_trajopt_cuda")
+    if prep.ffi_target == "sco_trajopt_cuda":  # traced builds are sized to their robot
+        check_capacity(__file__, _LIB_NAME, n_joints=prep.twists.shape[0],
+                       n_act=n_act, kernel="sco_trajopt_cuda")
 
     start_f = jnp.asarray(start, dtype=jnp.float32)
     goal_f  = jnp.asarray(goal,  dtype=jnp.float32)
@@ -284,7 +327,7 @@ def sco_trajopt_cuda_prepared(
                         + 2 * _SCO_MAX_M + T * prep.n_joints * 7)
 
     out_trajs, out_costs, _ = jax.ffi.ffi_call(
-        "sco_trajopt_cuda",
+        prep.ffi_target,
         (
             jax.ShapeDtypeStruct((B, T, n_act), jnp.float32),
             jax.ShapeDtypeStruct((B,), jnp.float32),
@@ -329,6 +372,7 @@ def sco_trajopt_cuda(
     opt_cfg:     "ScoTrajOptConfig",
     *,
     fd_eps: float = 1e-4,
+    traced: bool = False,
 ) -> tuple[Float[Array, "T n_act"], Float[Array, "B"], Float[Array, "B T n_act"]]:
     """CUDA-accelerated SCO trajectory optimisation.
 
@@ -348,6 +392,8 @@ def sco_trajopt_cuda(
         world_geoms: Tuple of world collision geometry objects.
         opt_cfg:     SCO hyperparameters (``ScoTrajOptConfig``).
         fd_eps:      Finite-difference step size for Jacobian (radians).
+        traced:      Use the robot- and scene-specialized build (see
+                     :func:`prepare_sco_trajopt_cuda`).
 
     Returns:
         best_traj:   Trajectory with lowest final nonlinear cost, ``[T, n_act]``.
@@ -360,7 +406,7 @@ def sco_trajopt_cuda(
         RuntimeError: If the compiled library is not found.
         TypeError:    If ``robot_coll`` is not a ``RobotCollisionSpherized``.
     """
-    prep = prepare_sco_trajopt_cuda(robot, robot_coll, world_geoms)
+    prep = prepare_sco_trajopt_cuda(robot, robot_coll, world_geoms, traced=traced)
     return sco_trajopt_cuda_prepared(init_trajs, start, goal, prep, opt_cfg,
                                      fd_eps=fd_eps)
 
