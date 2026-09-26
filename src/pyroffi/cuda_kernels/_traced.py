@@ -46,7 +46,25 @@ KERNELS = {
     "mppi_ik": ("ik/_mppi_ik_cuda_kernel.cu", ("MppiIkCudaFfi",), True),
     "fused_self_collision": ("collision/_fused_self_collision_kernel.cu",
                              ("FusedSelfCollisionFfi",), False),
+    "robogpu": ("collision/_robogpu_collision_host.cu", ("RoboGPUCollisionFfi",), False),
 }
+
+
+def _optix_sdk() -> Path:
+    env = os.environ.get("OPTIX_SDK")
+    for root in ([Path(env)] if env else []) + sorted(_REPO_ROOT.glob("NVIDIA-OptiX-SDK*")):
+        if (root / "include" / "optix.h").is_file():
+            return root
+    raise RuntimeError("OptiX SDK not found; set OPTIX_SDK (see build_robogpu_collision.sh).")
+
+
+def _build_extras(kernel: str) -> tuple[list[str], list[Path]]:
+    """Extra nvcc flags, and files that must sit next to the built .so, per kernel."""
+    if kernel == "robogpu":
+        # The host library locates its OptiX programs next to itself (dladdr).
+        ptx = _KERNELS_DIR / "collision" / "_robogpu_optix_programs.ptx"
+        return [f"-I{_optix_sdk() / 'include'}", "-ldl"], [ptx]
+    return [], []
 
 # Kinematics are all cricket is used for here, so an empty SRDF keeps it from spending
 # seconds sampling self-collisions it would otherwise guess without one.
@@ -124,6 +142,14 @@ def _robot_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
     )
 
 
+def constant_table(ctype: str, name: str, values) -> str:
+    """A ``__constant__`` array definition holding ``values`` (at least one element)."""
+    values = np.asarray(values).reshape(-1)
+    fmt = (lambda v: f"{float(v):.9e}f") if ctype == "float" else (lambda v: str(int(v)))
+    body = ", ".join(fmt(v) for v in values) or "0"
+    return f"__device__ __constant__ {ctype} {name}[{max(values.size, 1)}] = {{{body}}};\n"
+
+
 def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables,
                             world_counts=(0, 0, 0, 0)) -> str:
     """The call's collision structure as compile-time tables.
@@ -135,12 +161,7 @@ def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables,
     stay runtime inputs. Empty inputs give empty tables, and the traced kernel then compiles
     that part of collision out entirely.
     """
-    def table(ctype: str, name: str, values) -> str:
-        values = np.asarray(values).reshape(-1)
-        fmt = (lambda v: f"{float(v):.9e}f") if ctype == "float" else (lambda v: str(int(v)))
-        body = ", ".join(fmt(v) for v in values) or "0"
-        return f"__device__ __constant__ {ctype} {name}[{max(values.size, 1)}] = {{{body}}};\n"
-
+    table = constant_table
     sph, start, link_joint, pair_i, pair_j = self_tables
     return (
         "namespace pyroffi::traced {\n"
@@ -171,7 +192,10 @@ def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
         f"-DPYROFFI_SOLVE_N_BUCKETS(X)=X({n_solved})",
         "-DPYROFFI_TRACED_ROBOT", "--shared", "--compiler-options", "-fPIC",
     ]
-    sources = [*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(source.parent.glob("*.cuh")), source]
+    extra_flags, extra_files = _build_extras(kernel)
+    flags += extra_flags
+    sources = [*sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(source.parent.glob("*.cuh")), source,
+               *extra_files]
     key = hashlib.sha1("\x00".join(
         [kernel, header, " ".join(flags), *(p.read_text() for p in sources)]).encode()).hexdigest()
 
@@ -182,6 +206,8 @@ def _compile(kernel: str, header: str, n_solved: int, n_joints: int) -> Path:
 
     build_dir.mkdir(parents=True, exist_ok=True)
     (build_dir / "_traced_robot_gen.cuh").write_text(header)
+    for f in extra_files:
+        (build_dir / f.name).write_bytes(f.read_bytes())
     cmd = [
         "nvcc", *flags,
         f"-I{build_dir}", f"-I{_KERNELS_DIR}", f"-I{_REPO_ROOT / 'external' / 'GLASS'}",

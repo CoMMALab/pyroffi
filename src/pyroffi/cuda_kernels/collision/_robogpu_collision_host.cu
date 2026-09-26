@@ -34,6 +34,13 @@
 
 #include "xla/ffi/api/ffi.h"
 #include "_collision_cuda_helpers.cuh"  // includes _fk_cuda_helpers.cuh; all dist prims + fk_single
+#ifdef PYROFFI_TRACED_ROBOT
+// Traced build: the robot's sphere/pair tables and the scene's obstacle counts (a scene's
+// obstacle set is fixed; poses and the point cloud stay runtime) are compile-time constants.
+// FK stays the stock tree walk: only thread 0 runs it, and cricket's straight-line FK raises
+// the whole kernel's register count, which measured slower than the walk it replaces.
+#include "_traced_robot.cuh"
+#endif
 
 #include <cuda_runtime.h>
 #include <cuda.h>
@@ -240,14 +247,26 @@ __global__ void robogpu_prepare_kernel(
     const float* __restrict__ f_local,           // [K, 4]  k = s*NL + n
     const int*   __restrict__ f_pair_i,          // [Pf]
     const int*   __restrict__ f_pair_j,          // [Pf]
-    const float* __restrict__ ws, int Ms,
-    const float* __restrict__ wc, int Mc,
-    const float* __restrict__ wb, int Mb,
-    const float* __restrict__ wh, int Mh,
+    const float* __restrict__ ws, int Ms_arg,
+    const float* __restrict__ wc, int Mc_arg,
+    const float* __restrict__ wb, int Mb_arg,
+    const float* __restrict__ wh, int Mh_arg,
     float4*      __restrict__ robot_spheres_world, // [B*K, 4]  output
     int*         __restrict__ out_free,             // [B]        output
-    int B, int n_act, int J, int NL, int K, int Pf)
+    int B, int n_act, int J, int NL_arg, int K_arg, int Pf_arg)
 {
+#ifdef PYROFFI_TRACED_ROBOT
+    constexpr int NL = pyroffi::traced::rg_NL, K = pyroffi::traced::rg_K, Pf = pyroffi::traced::rg_Pf;
+    constexpr int Ms = pyroffi::traced::n_world_spheres, Mc = pyroffi::traced::n_world_capsules;
+    constexpr int Mb = pyroffi::traced::n_world_boxes, Mh = pyroffi::traced::n_world_halfspaces;
+    (void)NL_arg; (void)K_arg; (void)Pf_arg; (void)Ms_arg; (void)Mc_arg; (void)Mb_arg; (void)Mh_arg;
+    link_parent_joint = pyroffi::traced::kRgLinkParentJoint;
+    f_local  = pyroffi::traced::kRgFLocal;
+    f_pair_i = pyroffi::traced::kRgPairI;
+    f_pair_j = pyroffi::traced::kRgPairJ;
+#else
+    const int NL = NL_arg, K = K_arg, Pf = Pf_arg, Ms = Ms_arg, Mc = Mc_arg, Mb = Mb_arg, Mh = Mh_arg;
+#endif
     const int b  = blockIdx.x;
     if (b >= B) return;
     const int tid = threadIdx.x;
@@ -850,6 +869,15 @@ static ffi::Error RoboGPUCheckImpl(
     const int Mp    = static_cast<int>(point_cloud.dimensions()[0]);
 
     if (B <= 0) return ffi::Error::Success();
+#ifdef PYROFFI_TRACED_ROBOT
+    if (n_act != pyroffi::traced::n_q || J != pyroffi::traced::n_frames ||
+        NL != pyroffi::traced::rg_NL || K != pyroffi::traced::rg_K || Pf != pyroffi::traced::rg_Pf ||
+        Ms != pyroffi::traced::n_world_spheres || Mc != pyroffi::traced::n_world_capsules ||
+        Mb != pyroffi::traced::n_world_boxes || Mh != pyroffi::traced::n_world_halfspaces)
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "RoboGPU (traced): launch does not match the robot and scene structure "
+                          "this build was traced for.");
+#endif
 
     const int dev = robogpu_current_device();
     if (dev < 0)

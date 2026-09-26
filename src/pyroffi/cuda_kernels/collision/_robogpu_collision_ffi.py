@@ -80,6 +80,7 @@ def robogpu_collision(
     r_env:             float,  # env sphere radius per point
     r_robot_max:       float,  # max robot sphere radius (BVH AABB expansion)
     dynamic:           bool = False,  # refit a persistent BVH instead of rebuilding
+    ffi_target:        str = _FFI_TARGET,  # or a traced build's target
 ) -> Array:                    # [B]           int32   1=free, 0=collision
     """Fused FK + binary collision check with OptiX point-cloud BVH traversal.
 
@@ -104,7 +105,7 @@ def robogpu_collision(
     r_robot_np   = np.float32(r_robot_max)
     dynamic_np   = np.int32(1 if dynamic else 0)
     return jax.ffi.ffi_call(
-        _FFI_TARGET,
+        ffi_target,
         jax.ShapeDtypeStruct((B,), jnp.int32),
     )(
         cfg.astype(jnp.float32),

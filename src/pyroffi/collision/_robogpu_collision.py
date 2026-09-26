@@ -66,6 +66,30 @@ def _r_robot_max(f_local: Array) -> float:
 # RoboGPUCollisionChecker
 # ---------------------------------------------------------------------------
 
+def _traced_robogpu_target(robot, link_parent_joint, f_local, f_pair_i, f_pair_j, world) -> str:
+    """FFI target of the stage-1 kernel traced for this robot and scene structure."""
+    from ..cuda_kernels._traced import collision_tables_source, constant_table
+
+    lpj, fl, pi, pj = (np.asarray(a) for a in (link_parent_joint, f_local, f_pair_i, f_pair_j))
+    src = collision_tables_source(
+        np.zeros((0, 4)), np.zeros(0),
+        [np.zeros((0, 4)), np.zeros(1), np.zeros(1), np.zeros(0), np.zeros(0)],
+        tuple(w.shape[0] for w in world))
+    src += (
+        "namespace pyroffi::traced {\n"
+        f"constexpr int rg_NL = {lpj.size};\nconstexpr int rg_K = {len(fl)};\n"
+        f"constexpr int rg_Pf = {pi.size};\n"
+        + constant_table("int", "kRgLinkParentJoint", lpj)
+        + constant_table("float", "kRgFLocal", fl)
+        + constant_table("int", "kRgPairI", pi)
+        + constant_table("int", "kRgPairJ", pj)
+        + "}  // namespace pyroffi::traced\n")
+    j = robot.joints
+    (target,) = robot._backends.traced_target(
+        "robogpu", 0, robot.links.names, j.actuated_names, j.names, src, True)
+    return target
+
+
 class RoboGPUCollisionChecker:
     """OptiX-accelerated sphere-octree collision checker for point-cloud worlds.
 
@@ -87,6 +111,7 @@ class RoboGPUCollisionChecker:
         inner: RobotCollisionSpherized,
         *,
         edge_granularity: int = 16,
+        traced: bool = False,
     ) -> None:
         from ..cuda_kernels.collision._robogpu_collision_ffi import _load_and_register
         _load_and_register()
@@ -98,6 +123,9 @@ class RoboGPUCollisionChecker:
             )
 
         self._inner = inner
+        # traced=True: stage 1 compiled with this robot's sphere/pair tables and the scene's
+        # obstacle counts baked in (one build per robot and scene structure, cached on disk).
+        self._traced = traced
         self._edge_granularity = int(edge_granularity)
 
         # Robot sphere geometry (row-local, static across configs). Attachment
@@ -237,6 +265,10 @@ class RoboGPUCollisionChecker:
             _pc = self._wp
             _re = self._r_env
 
+        target = (_traced_robogpu_target(_robot, _link_parent_joint, _f_local, _f_pair_i,
+                                         _f_pair_j, (_ws, _wc, _wb, _wh))
+                  if self._traced else "robogpu_collision")
+
         def _call(cfg_flat, pc):
             j = _robot.joints
             return robogpu_collision(
@@ -261,6 +293,7 @@ class RoboGPUCollisionChecker:
                 r_env=_re,
                 r_robot_max=_r_robot,
                 dynamic=dynamic,
+                ffi_target=target,
             )
 
         if dynamic:

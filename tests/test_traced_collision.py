@@ -36,3 +36,26 @@ def test_fused_self_collision_matches_stock(panda):
     for a, b in zip(stock, traced):  # (pair distances, lowest sphere point)
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-5)
 
+
+
+def test_robogpu_verdicts_match_stock(panda):
+    import jax.numpy as jnp
+
+    from pyroffi.collision import RoboGPUCollisionChecker, Sphere
+
+    robot, model, cfg = panda
+    world = Sphere.from_center_and_radius(
+        jnp.array([[0.45, 0.1 * k, 0.35] for k in range(-4, 5)]), jnp.full((9,), 0.08))
+    rng = np.random.default_rng(0)
+    cloud = jnp.array(np.c_[rng.uniform(0.3, 0.9, 5000), rng.uniform(-0.5, 0.5, 5000),
+                            np.full(5000, 0.05)].astype(np.float32))
+    verdicts = []
+    for traced in (False, True):
+        try:
+            checker = RoboGPUCollisionChecker(model, traced=traced)
+        except RuntimeError as exc:  # library or OptiX SDK missing
+            pytest.skip(str(exc))
+        checker.set_world(world, point_cloud=cloud, r_env=0.01)
+        verdicts.append(np.asarray(checker.check_collision_free(robot, cfg)))
+    assert 0.0 < verdicts[0].mean() < 1.0  # both outcomes exercised
+    np.testing.assert_array_equal(verdicts[0], verdicts[1])
