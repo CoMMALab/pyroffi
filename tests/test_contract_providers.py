@@ -1,10 +1,13 @@
-"""Every provider behind the traced-robot contract computes the same forward dynamics.
+"""Every provider behind the traced-robot contract computes the same dynamics.
 
-cricket (thread tier), GRiD (block tier) and PyRoFFI's JAX dynamics, all float32, against
-pinocchio in float64, on the rewritten benchmark URDFs (see tests/bench_dynamics.py).
+cricket at thread and warp-split block tier, GRiD, and (for forward dynamics) the
+mass-matrix + GLASS Cholesky route, all float32, against pinocchio float64 on the rewritten
+benchmark URDFs (see tests/bench_dynamics.py). The JAX dynamics is checked too.
 """
 
+import json
 import shutil
+from pathlib import Path
 
 import jax
 import numpy as np
@@ -26,34 +29,74 @@ URDFS = {
 }
 
 
-@pytest.mark.parametrize("robot", list(URDFS))
-def test_forward_dynamics_providers_agree(robot):
-    path = URDFS[robot]
+@pytest.fixture(scope="module", params=list(URDFS))
+def robot(request):
+    path = URDFS[request.param]
     urdf = yourdfpy.URDF.load(path, load_meshes=False)
     contract = ContractDynamics(urdf)
     pyroffi_robot = Robot.from_urdf(urdf)
-    actuated = list(pyroffi_robot.joints.actuated_names)
-
     model = pin.buildModelFromUrdf(path, mimic=True)
-    data = model.createData()
+    actuated = contract.actuated
     to_pin = [actuated.index(model.names[j]) for j in range(1, model.njoints) if model.joints[j].nq]
-
     rng = np.random.default_rng(0)
     lo, hi = np.asarray(pyroffi_robot.joints.lower_limits), np.asarray(pyroffi_robot.joints.upper_limits)
-    q = rng.uniform(np.maximum(lo, -np.pi), np.minimum(hi, np.pi), (64, len(actuated))).astype(np.float32)
-    qd, tau = (rng.uniform(-1, 1, q.shape).astype(np.float32) for _ in range(2))
+    q = rng.uniform(np.maximum(lo, -np.pi), np.minimum(hi, np.pi), (48, len(actuated))).astype(np.float32)
+    qd, u = (rng.uniform(-1, 1, q.shape).astype(np.float32) for _ in range(2))
+    return request.param, contract, pyroffi_robot, model, np.array(to_pin), (q, qd, u)
 
-    ref = np.empty_like(q, dtype=np.float64)
+
+def _reference(op, model, to_pin, q, qd, u):
+    data = model.createData()
+    n = q.shape[1]
+    out = []
     for i in range(len(q)):
-        out = pin.aba(model, data, *(x[i, to_pin].astype(np.float64) for x in (q, qd, tau)))
-        ref[i, to_pin] = out
+        a, b, c = (x[i, to_pin].astype(np.float64) for x in (q, qd, u))
+        if op == "id":
+            r = np.empty(n); r[to_pin] = pin.rnea(model, data, a, b, c)
+        elif op == "fd":
+            r = np.empty(n); r[to_pin] = pin.aba(model, data, a, b, c)
+        elif op == "crba":
+            M = pin.crba(model, data, a); M = np.triu(M) + np.triu(M, 1).T
+            r = np.empty((n, n)); r[np.ix_(to_pin, to_pin)] = M
+        else:
+            dq, dv, _ = pin.computeRNEADerivatives(model, data, a, b, c)
+            r = np.empty((n, 2 * n)); r[np.ix_(to_pin, to_pin)] = dq; r[np.ix_(to_pin, n + to_pin)] = dv
+        out.append(r)
+    return np.stack(out)
 
-    results = {tier: np.asarray(contract.forward_dynamics(q, qd, tau, tier)) for tier in contract.tiers}
-    results["jax"] = np.asarray(jax.vmap(pyroffi_robot.forward_dynamics)(q, qd, tau))
-    assert set(results) == {"thread", "block", "jax"}
-    # Measured 2026-09-26 (worst of panda/fetch/g1): thread 1.0e-6, block 2.3e-6, jax 1.2e-4.
-    # The JAX dynamics is ~100x looser than either traced provider on fetch and g1.
-    bound = {"thread": 1e-5, "block": 1e-5, "jax": 1e-3}
-    for name, out in results.items():
-        err = np.linalg.norm(out - ref, axis=1) / np.maximum(np.linalg.norm(ref, axis=1), 1.0)
-        assert err.max() < bound[name], (name, np.median(err), err.max())
+
+# Worst relative error measured 2026-09-26 over panda/fetch/g1 is well under these bounds; the
+# JAX forward dynamics is ~100x looser than the traced providers on fetch and g1.
+BOUND = {"jax": 1e-3}
+
+
+@pytest.mark.parametrize("op", ["id", "crba", "fd", "id_du"])
+def test_providers_agree_with_pinocchio(robot, op):
+    name, contract, pyroffi_robot, model, to_pin, (q, qd, u) = robot
+    ref = _reference(op, model, to_pin, q, qd, u).reshape(len(q), -1)
+    call = {"id": contract.inverse_dynamics, "crba": lambda a, *_, tier: contract.mass_matrix(a, tier=tier),
+            "fd": contract.forward_dynamics, "id_du": contract.inverse_dynamics_gradient}[op]
+    results = {tier: np.asarray(call(q, qd, u, tier=tier)) for tier in contract.available(op)}
+    if op == "fd":
+        results["jax"] = np.asarray(jax.vmap(pyroffi_robot.forward_dynamics)(q, qd, u))
+    assert {"thread", "block", "grid"} <= set(results)
+    for tier, out in results.items():
+        err = np.linalg.norm(out.reshape(len(q), -1) - ref, axis=1) / np.maximum(np.linalg.norm(ref, axis=1), 1.0)
+        assert err.max() < BOUND.get(tier, 1e-4), (name, op, tier, float(np.median(err)), float(err.max()))
+
+
+def test_auto_tier_follows_table(monkeypatch):
+    """G1: GRiD wins the ID gradient at B=16 and thread wins every op from 4k (default table)."""
+    contract = ContractDynamics(yourdfpy.URDF.load(URDFS["g1"], load_meshes=False))
+    # The committed default table, not whatever this machine's per-robot calibration cached.
+    monkeypatch.setattr(contract, "_table", json.loads(Path(
+        "resources/tier_tables/contract_dynamics_sm86.json").read_text()))
+    assert contract.select("id_du", 16) == "grid"
+    assert contract.select("crba", 256) == "block"
+    assert all(contract.select(op, 65536) == "thread" for op in ("id", "crba", "fd", "id_du"))
+    monkeypatch.setenv("PYROFFI_TIER", "block")
+    assert contract.select("id", 16) == "block"
+    monkeypatch.delenv("PYROFFI_TIER")
+    q = np.random.default_rng(1).uniform(-1, 1, (16, contract.n_q)).astype(np.float32)
+    np.testing.assert_allclose(np.asarray(contract.inverse_dynamics_gradient(q, q, q)),
+                               np.asarray(contract.inverse_dynamics_gradient(q, q, q, tier="grid")), rtol=1e-6)

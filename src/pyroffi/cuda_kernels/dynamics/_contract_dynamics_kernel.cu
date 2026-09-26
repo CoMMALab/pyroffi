@@ -1,35 +1,32 @@
-// Forward dynamics through the traced-robot contract, one FFI handler per tier.
+// Traced dynamics through the robot contract: one FFI handler per (op, tier).
 //
 // Compiled per robot by dynamics/_contract_dynamics.py against a generated
-// "_contract_robot_gen.cuh" (namespace pyroffi::traced). The kernels only see the
-// contract: which generator implements each tier is decided when the header is made.
+// "_contract_robot_gen.cuh", which lists its ops in PYROFFI_CONTRACT_OPS(X) as
+// X(name, NIN, NOUT) and defines, in pyroffi::traced::ops,
 //
-//   thread  one config per thread  pyroffi::traced::thread::forward_dynamics  (cricket)
-//   block   one config per block   pyroffi::traced::block::forward_dynamics   (GRiD adapter)
+//   <name>_thread(x, y, ys)                 one config per thread
+//   <name>_block(rank, x, y, s, ys)         32 configs per block, <name>_warps warps
+//                                           splitting each level (warp-split tier)
+//   <name>_scratch, <name>_smem             block scratch floats, and whether they fit
+//                                           in shared memory (else global workspace)
 //
-// All buffers are (B, n_q) float32 in PyRoFFI's actuated joint order.
+// Buffers: input (B, NIN) row-major, in the generator's joint order (packed by the
+// caller); output (NOUT, B), so every output is a coalesced store.
 
-#include <mutex>
-#include <unordered_map>
+#include <string>
 
 #include "_contract_robot_gen.cuh"
 #include "xla/ffi/api/ffi.h"
 
 namespace ffi = xla::ffi;
-namespace traced = pyroffi::traced;
+namespace ops = pyroffi::traced::ops;
 
-static_assert(traced::contract_version == 1, "written against contract v1");
+static_assert(pyroffi::traced::contract_version == 2, "written against contract v2");
 
 namespace {
 
-constexpr int N = traced::n_q;
-
-ffi::Error CheckShape(int64_t n) {
-  if (n != N)
-    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                      "contract forward dynamics: n_q does not match the traced robot");
-  return ffi::Error::Success();
-}
+using Buf = ffi::Buffer<ffi::DataType::F32>;
+using Ret = ffi::Result<ffi::Buffer<ffi::DataType::F32>>;
 
 ffi::Error CudaCheck(cudaError_t e, const char* what) {
   if (e != cudaSuccess)
@@ -37,108 +34,79 @@ ffi::Error CudaCheck(cudaError_t e, const char* what) {
   return ffi::Error::Success();
 }
 
-__global__ void FdThreadKernel(const float* __restrict__ q, const float* __restrict__ qd,
-                               const float* __restrict__ tau, float* __restrict__ qdd, int batch) {
+ffi::Error CheckShape(const Buf& in, int nin) {
+  if (in.dimensions().size() != 2 || in.dimensions()[1] != nin)
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument, "contract op: input is not (B, NIN)");
+  return ffi::Error::Success();
+}
+
+template <int NIN, void (*F)(const float*, float*, int)>
+__global__ void ThreadKernel(const float* __restrict__ in, float* __restrict__ out, int batch) {
   const int b = blockIdx.x * blockDim.x + threadIdx.x;
   if (b >= batch) return;
-  float sq[N], sqd[N], stau[N], sqdd[N];
-  for (int i = 0; i < N; ++i) {
-    sq[i] = q[b * N + i];
-    sqd[i] = qd[b * N + i];
-    stau[i] = tau[b * N + i];
-  }
-  traced::thread::forward_dynamics(sq, sqd, stau, sqdd);
-  for (int i = 0; i < N; ++i) qdd[b * N + i] = sqdd[i];
+  float x[NIN];
+  for (int i = 0; i < NIN; ++i) x[i] = in[(long)b * NIN + i];
+  F(x, out + b, batch);
 }
 
-ffi::Error FdThreadImpl(cudaStream_t stream, ffi::Buffer<ffi::DataType::F32> q,
-                        ffi::Buffer<ffi::DataType::F32> qd, ffi::Buffer<ffi::DataType::F32> tau,
-                        ffi::Result<ffi::Buffer<ffi::DataType::F32>> qdd) {
-  const int64_t batch = q.dimensions()[0];
-  if (auto err = CheckShape(q.dimensions()[1]); err.failure()) return err;
+template <int NIN, int SCRATCH, bool SMEM, void (*F)(int, const float*, float*, float*, int)>
+__global__ void BlockKernel(const float* __restrict__ in, float* __restrict__ out, float* ws, int batch) {
+  extern __shared__ float sdyn[];
+  float* s = SMEM ? sdyn : ws + (long)blockIdx.x * SCRATCH;
+  // Lanes past the batch recompute the last config (same values, same address): every
+  // lane must reach every barrier.
+  const int b = min(blockIdx.x * 32 + (int)(threadIdx.x & 31), batch - 1);
+  float x[NIN];
+  for (int i = 0; i < NIN; ++i) x[i] = in[(long)b * NIN + i];
+  F((int)(threadIdx.x >> 5), x, out + b, s, batch);
+}
+
+template <int NIN, void (*F)(const float*, float*, int)>
+ffi::Error RunThread(cudaStream_t stream, Buf in, Ret out) {
+  if (auto err = CheckShape(in, NIN); err.failure()) return err;
+  const int64_t batch = in.dimensions()[0];
   if (batch == 0) return ffi::Error::Success();
   constexpr int kThreads = 128;
-  FdThreadKernel<<<(batch + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
-      q.typed_data(), qd.typed_data(), tau.typed_data(), qdd->typed_data(), batch);
-  return CudaCheck(cudaGetLastError(), "FdThreadKernel");
+  ThreadKernel<NIN, F><<<(batch + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+      in.typed_data(), out->typed_data(), batch);
+  return CudaCheck(cudaGetLastError(), "contract thread kernel");
 }
 
-}  // namespace
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    ContractFdThreadFfi, FdThreadImpl,
-    ffi::Ffi::Bind()
-        .Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()
-        .Ret<ffi::Buffer<ffi::DataType::F32>>());
-
-#ifdef PYROFFI_CONTRACT_BLOCK_FORWARD_DYNAMICS
-namespace {
-
-__global__ void FdBlockKernel(const float* __restrict__ q, const float* __restrict__ qd,
-                              const float* __restrict__ tau, float* __restrict__ qdd,
-                              traced::block::Model model, float gravity, int batch) {
-  // Kernel-owned shared memory is static: the block tier's provider owns the dynamic arena.
-  __shared__ float s_io[4 * N];
-  __shared__ float s_scratch[traced::block::forward_dynamics_scratch];
-  float *s_q = s_io, *s_qd = s_io + N, *s_tau = s_io + 2 * N, *s_qdd = s_io + 3 * N;
-  for (int b = blockIdx.x; b < batch; b += gridDim.x) {
-    for (int i = threadIdx.x; i < N; i += blockDim.x) {
-      s_q[i] = q[b * N + i];
-      s_qd[i] = qd[b * N + i];
-      s_tau[i] = tau[b * N + i];
-    }
-    __syncthreads();
-    traced::block::forward_dynamics(s_q, s_qd, s_tau, s_qdd, s_scratch, model, gravity);
-    for (int i = threadIdx.x; i < N; i += blockDim.x) qdd[b * N + i] = s_qdd[i];
-    __syncthreads();
-  }
-}
-
-ffi::Error FdBlockImpl(cudaStream_t stream, float gravity, ffi::Buffer<ffi::DataType::F32> q,
-                       ffi::Buffer<ffi::DataType::F32> qd, ffi::Buffer<ffi::DataType::F32> tau,
-                       ffi::Result<ffi::Buffer<ffi::DataType::F32>> qdd) {
-  const int64_t batch = q.dimensions()[0];
-  if (auto err = CheckShape(q.dimensions()[1]); err.failure()) return err;
+template <int NIN, int SCRATCH, bool SMEM, int WARPS, void (*F)(int, const float*, float*, float*, int)>
+ffi::Error RunBlock(cudaStream_t stream, ffi::ScratchAllocator scratch, Buf in, Ret out) {
+  if (auto err = CheckShape(in, NIN); err.failure()) return err;
+  const int64_t batch = in.dimensions()[0];
   if (batch == 0) return ffi::Error::Success();
-  // The provider's model lives on the device; one per device, made on first use.
-  static std::mutex mu;
-  static std::unordered_map<int, traced::block::Model> models;
-  int device = 0;
-  cudaGetDevice(&device);
-  traced::block::Model model;
-  {
-    std::lock_guard<std::mutex> lock(mu);
-    auto it = models.find(device);
-    if (it == models.end()) {
-      it = models.emplace(device, traced::block::make_model()).first;
-      if (auto err = CudaCheck(
-              cudaFuncSetAttribute(FdBlockKernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                   traced::block::forward_dynamics_smem_bytes),
-              "FdBlockKernel smem attribute");
-          err.failure())
-        return err;
-    }
-    model = it->second;
+  const int64_t blocks = (batch + 31) / 32;
+  float* ws = nullptr;
+  if (!SMEM) {
+    auto mem = scratch.Allocate(sizeof(float) * SCRATCH * blocks, 16);
+    if (!mem.has_value())
+      return ffi::Error(ffi::ErrorCode::kResourceExhausted, "contract block kernel workspace");
+    ws = static_cast<float*>(*mem);
   }
-  const int blocks = batch < 65535 ? static_cast<int>(batch) : 65535;
-  FdBlockKernel<<<blocks, traced::block::forward_dynamics_threads,
-                  traced::block::forward_dynamics_smem_bytes, stream>>>(
-      q.typed_data(), qd.typed_data(), tau.typed_data(), qdd->typed_data(), model, gravity, batch);
-  return CudaCheck(cudaGetLastError(), "FdBlockKernel");
+  constexpr size_t smem = SMEM ? sizeof(float) * SCRATCH : 0;
+  static const cudaError_t attr = cudaFuncSetAttribute(
+      BlockKernel<NIN, SCRATCH, SMEM, F>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+  if (auto err = CudaCheck(attr, "contract block kernel smem attribute"); err.failure()) return err;
+  BlockKernel<NIN, SCRATCH, SMEM, F><<<blocks, WARPS * 32, smem, stream>>>(
+      in.typed_data(), out->typed_data(), ws, batch);
+  return CudaCheck(cudaGetLastError(), "contract block kernel");
 }
 
 }  // namespace
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    ContractFdBlockFfi, FdBlockImpl,
-    ffi::Ffi::Bind()
-        .Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Attr<float>("gravity")
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()
-        .Arg<ffi::Buffer<ffi::DataType::F32>>()
-        .Ret<ffi::Buffer<ffi::DataType::F32>>());
-#endif  // PYROFFI_CONTRACT_BLOCK_FORWARD_DYNAMICS
+#define PYROFFI_CONTRACT_HANDLERS(name, NIN, NOUT)                                              \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                 \
+      Contract_##name##_thread, (RunThread<NIN, ops::name##_thread>),                            \
+      ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>().Arg<Buf>().Ret<Buf>());          \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                 \
+      Contract_##name##_block,                                                                   \
+      (RunBlock<NIN, ops::name##_scratch, ops::name##_smem, ops::name##_warps, ops::name##_block>), \
+      ffi::Ffi::Bind()                                                                           \
+          .Ctx<ffi::PlatformStream<cudaStream_t>>()                                              \
+          .Ctx<ffi::ScratchAllocator>()                                                          \
+          .Arg<Buf>()                                                                            \
+          .Ret<Buf>());
+
+PYROFFI_CONTRACT_OPS(PYROFFI_CONTRACT_HANDLERS)
