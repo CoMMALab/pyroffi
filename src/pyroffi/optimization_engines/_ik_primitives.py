@@ -171,10 +171,12 @@ _EMPTY_SELF_TABLES = (
 
 def traced_ffi_target(kernel: str, stock_targets: tuple[str, ...], robot: Robot,
                       target_link_indices: tuple[int, ...], traced: bool,
-                      robot_spheres, robot_sphere_joint, self_tables) -> tuple[str, ...]:
+                      robot_spheres, robot_sphere_joint, self_tables,
+                      world=()) -> tuple[str, ...]:
     """FFI targets for an IK kernel's handlers: ``stock_targets``, or those of a build of
     ``kernel`` compiled against cricket-traced kinematics and this call's collision tables
-    (see ``cuda_kernels/_traced.py``). Single end-effector only."""
+    (see ``cuda_kernels/_traced.py``). Single end-effector only. ``world`` is the call's
+    (spheres, capsules, boxes, halfspaces) buffers; only their row counts are baked in."""
     if not traced:
         return stock_targets
     import numpy as np
@@ -194,7 +196,8 @@ def traced_ffi_target(kernel: str, stock_targets: tuple[str, ...], robot: Robot,
 
     has_collision = robot_sphere_joint.size > 0 or self_tables[3].size > 0
     collision_src = collision_tables_source(
-        host(robot_spheres), host(robot_sphere_joint), [host(t) for t in self_tables])
+        host(robot_spheres), host(robot_sphere_joint), [host(t) for t in self_tables],
+        tuple(w.shape[0] for w in world) or (0, 0, 0, 0))
     return robot._backends.traced_target(
         kernel, int(target_link_indices[0]), robot.links.names, robot.joints.actuated_names,
         robot.joints.names, collision_src, has_collision)

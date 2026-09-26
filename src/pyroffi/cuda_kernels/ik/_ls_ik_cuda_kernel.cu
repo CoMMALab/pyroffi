@@ -131,7 +131,7 @@ void ls_ik_lm_kernel(
     float*       __restrict__ out,
     float*       __restrict__ out_err,
     int   n_problems, int n_seeds, int n_joints_arg, int n_act_arg, int n_ee_arg, int max_iter,
-    int   n_robot_spheres_arg, int n_world_spheres, int n_world_capsules, int n_world_boxes, int n_world_halfspaces,
+    int   n_robot_spheres_arg, int n_world_spheres_arg, int n_world_capsules_arg, int n_world_boxes_arg, int n_world_halfspaces_arg,
     int   n_self_pairs_arg,
     int   enable_collision,
     float pos_weight, float ori_weight, float lambda_init,
@@ -721,7 +721,9 @@ static ffi::Error LsIkCudaImpl(
     // N: the compile-time bucket holding n_act (identity-padded). 0 => n_act is
     // past MAX_ACT's ceiling, which _build_params.py should already have refused.
 #ifdef PYROFFI_TRACED_ROBOT
-    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs))
+    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs,
+                                         n_world_spheres, n_world_capsules, n_world_boxes,
+                                         n_world_halfspaces))
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "ls_ik_cuda (traced): launch does not match the robot and collision "
                           "tables this build was traced for.");

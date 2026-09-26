@@ -736,7 +736,8 @@ def sqp_ik_solve_cuda(
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     (ffi_target,) = traced_ffi_target(
         "sqp_ik", ("sqp_ik_cuda",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
-        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
     # launch, rather than serialising a kernel that already batches.
@@ -1278,7 +1279,8 @@ def _sqp_ik_solve_cuda_batch_impl(
     ) = _prep
     (ffi_target,) = traced_ffi_target(
         "sqp_ik", ("sqp_ik_cuda",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
-        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
     n_problems = previous_cfgs.shape[0]
     n_devices = jax.local_device_count()

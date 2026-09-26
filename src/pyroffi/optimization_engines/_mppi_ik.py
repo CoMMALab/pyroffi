@@ -913,7 +913,8 @@ def mppi_ik_solve_cuda(
     (ffi_target,) = traced_ffi_target(
         "mppi_ik", ("mppi_ik_cuda",), robot, target_link_indices, traced,
         robot_spheres_local, robot_sphere_joint_idx,
-        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
         # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
     # launch, rather than serialising a kernel that already batches.
@@ -1329,7 +1330,8 @@ def mppi_ik_solve_cuda_batch(
     (ffi_target,) = traced_ffi_target(
         "mppi_ik", ("mppi_ik_cuda",), robot, target_link_indices, traced,
         robot_spheres_local, robot_sphere_joint_idx,
-        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j))
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
     winners = sharded_batch_call(
         _mppi_ik_solve_cuda_batch_jit,

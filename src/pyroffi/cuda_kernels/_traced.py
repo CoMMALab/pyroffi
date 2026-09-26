@@ -124,12 +124,16 @@ def _robot_header(urdf_xml: str, ee_link: str, actuated_names: tuple[str, ...],
     )
 
 
-def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables) -> str:
-    """The call's collision geometry as compile-time tables.
+def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables,
+                            world_counts=(0, 0, 0, 0)) -> str:
+    """The call's collision structure as compile-time tables.
 
     ``robot_spheres``/``robot_sphere_joint`` are the world-collision spheres (joint frame) and
     ``self_tables`` the SRDF-filtered self-collision tables, exactly as the kernel receives them.
-    Empty inputs give empty tables, and the traced kernel then compiles collision out entirely.
+    ``world_counts`` is the number of world spheres, capsules, boxes and halfspaces: a scene's
+    obstacle set is fixed while the obstacles move, so the counts are baked in and the poses
+    stay runtime inputs. Empty inputs give empty tables, and the traced kernel then compiles
+    that part of collision out entirely.
     """
     def table(ctype: str, name: str, values) -> str:
         values = np.asarray(values).reshape(-1)
@@ -150,6 +154,8 @@ def collision_tables_source(robot_spheres, robot_sphere_joint, self_tables) -> s
         + table("int", "kSelfLinkJoint", link_joint)
         + table("int", "kSelfPairI", pair_i)
         + table("int", "kSelfPairJ", pair_j)
+        + "".join(f"constexpr int n_world_{kind} = {int(n)};\n"
+                  for kind, n in zip(("spheres", "capsules", "boxes", "halfspaces"), world_counts))
         + "}  // namespace pyroffi::traced\n"
     )
 

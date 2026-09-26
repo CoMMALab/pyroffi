@@ -85,10 +85,12 @@ static __device__ __forceinline__ void bind_collision_tables(
 
 // Host-side check that a launch matches what this build was traced for.
 static inline bool launch_matches(int n_ee, int n_act, int n_joints, int n_robot_spheres_rt,
-                                  int n_self_pairs_rt)
+                                  int n_self_pairs_rt, int n_ws, int n_wc, int n_wb, int n_wh)
 {
     return n_ee == 1 && n_act == n_q && n_joints == n_frames &&
-           n_robot_spheres_rt == n_robot_spheres && n_self_pairs_rt == n_self_pairs;
+           n_robot_spheres_rt == n_robot_spheres && n_self_pairs_rt == n_self_pairs &&
+           n_ws == n_world_spheres && n_wc == n_world_capsules && n_wb == n_world_boxes &&
+           n_wh == n_world_halfspaces;
 }
 
 }  // namespace pyroffi::traced

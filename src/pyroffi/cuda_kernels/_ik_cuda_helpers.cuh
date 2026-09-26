@@ -42,11 +42,14 @@
 // Robot-specialized (traced) builds
 // ---------------------------------------------------------------------------
 // Kernels take their sizes as `n_joints_arg`, `n_act_arg`, `n_ee_arg`,
-// `n_robot_spheres_arg`, `n_self_pairs_arg` and open with PYROFFI_IK_DIMS_PROLOGUE().
+// `n_robot_spheres_arg`, `n_self_pairs_arg`, `n_world_{spheres,capsules,boxes,halfspaces}_arg`
+// and open with PYROFFI_IK_DIMS_PROLOGUE().
 // A stock build just names those. A build with -DPYROFFI_TRACED_ROBOT (see
 // _traced_robot.cuh) makes them the robot's compile-time values -- so every loop
 // bound is a constant -- and swaps the collision buffers for the tables baked into
-// the build. There, n_act counts the SOLVED variables; any frozen joints (off the
+// the build. World obstacles keep runtime poses but a compile-time count per type: a
+// scene's obstacle set is fixed while its obstacles move, so absent types compile away
+// and the obstacle loops get constant bounds. There, n_act counts the SOLVED variables; any frozen joints (off the
 // EE chain) ride along from the seed, and n_full is every actuated joint.
 // PYROFFI_ACT_SRC(i) maps solved variable i to its column in the full-DOF inputs.
 #ifdef PYROFFI_TRACED_ROBOT
@@ -57,15 +60,23 @@
     constexpr int n_full   = pyroffi::traced::n_q;                                          \
     constexpr int n_robot_spheres = pyroffi::traced::n_robot_spheres;                       \
     constexpr int n_self_pairs    = pyroffi::traced::n_self_pairs;                          \
+    constexpr int n_world_spheres    = pyroffi::traced::n_world_spheres;                    \
+    constexpr int n_world_capsules   = pyroffi::traced::n_world_capsules;                   \
+    constexpr int n_world_boxes      = pyroffi::traced::n_world_boxes;                      \
+    constexpr int n_world_halfspaces = pyroffi::traced::n_world_halfspaces;                 \
     (void)n_joints_arg; (void)n_act_arg; (void)n_ee_arg; (void)n_full;                      \
     (void)n_robot_spheres_arg; (void)n_self_pairs_arg;                                      \
+    (void)n_world_spheres_arg; (void)n_world_capsules_arg;                                  \
+    (void)n_world_boxes_arg; (void)n_world_halfspaces_arg;                                  \
     pyroffi::traced::bind_collision_tables(robot_spheres_local, robot_sphere_joint_idx,     \
         self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j)
 #define PYROFFI_ACT_SRC(i) pyroffi::traced::solved_idx(i)
 #else
 #define PYROFFI_IK_DIMS_PROLOGUE()                                                          \
     const int n_joints = n_joints_arg, n_act = n_act_arg, n_ee = n_ee_arg;                  \
-    const int n_robot_spheres = n_robot_spheres_arg, n_self_pairs = n_self_pairs_arg
+    const int n_robot_spheres = n_robot_spheres_arg, n_self_pairs = n_self_pairs_arg;       \
+    const int n_world_spheres = n_world_spheres_arg, n_world_capsules = n_world_capsules_arg; \
+    const int n_world_boxes = n_world_boxes_arg, n_world_halfspaces = n_world_halfspaces_arg
 #define PYROFFI_ACT_SRC(i) (i)
 #endif
 

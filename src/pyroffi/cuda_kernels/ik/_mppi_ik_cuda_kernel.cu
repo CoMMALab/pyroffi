@@ -76,8 +76,8 @@ void mppi_ik_kernel(
     float*          __restrict__ out,
     float*          __restrict__ out_err,
     int   n_problems, int n_seeds, int n_joints_arg, int n_act_arg, int n_ee_arg,
-    int   n_robot_spheres_arg, int n_world_spheres, int n_world_capsules,
-    int   n_world_boxes, int n_world_halfspaces, int n_self_pairs_arg,
+    int   n_robot_spheres_arg, int n_world_spheres_arg, int n_world_capsules_arg,
+    int   n_world_boxes_arg, int n_world_halfspaces_arg, int n_self_pairs_arg,
     int   n_particles, int n_mppi_iters, int n_lbfgs_iters, int m_lbfgs,
     int   enable_collision,
     float collision_weight, float collision_margin,
@@ -603,7 +603,9 @@ static ffi::Error MppiIkCudaImpl(
     const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
 #ifdef PYROFFI_TRACED_ROBOT
-    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs))
+    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs,
+                                         n_world_spheres, n_world_capsules, n_world_boxes,
+                                         n_world_halfspaces))
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "mppi_ik_cuda (traced): launch does not match the robot and collision "
                           "tables this build was traced for.");

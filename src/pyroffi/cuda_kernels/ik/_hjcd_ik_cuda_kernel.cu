@@ -124,8 +124,8 @@ void hjcd_ik_coarse_kernel(
     float*       __restrict__ out,
     float*       __restrict__ out_err,
     int n_problems, int n_seeds, int n_joints_arg, int n_act_arg, int n_ee_arg,
-    int n_robot_spheres_arg, int n_world_spheres, int n_world_capsules,
-    int n_world_boxes, int n_world_halfspaces, int n_self_pairs_arg,
+    int n_robot_spheres_arg, int n_world_spheres_arg, int n_world_capsules_arg,
+    int n_world_boxes_arg, int n_world_halfspaces_arg, int n_self_pairs_arg,
     int k_max, int enable_collision, float collision_weight, float collision_margin)
 {
     PYROFFI_IK_DIMS_PROLOGUE();
@@ -378,8 +378,8 @@ void hjcd_ik_lm_kernel(
     float*       __restrict__ out_err,
     int*         __restrict__ stop_flag,
     int n_problems, int n_seeds, int n_joints_arg, int n_act_arg, int n_ee_arg, int max_iter,
-    int n_robot_spheres_arg, int n_world_spheres, int n_world_capsules,
-    int n_world_boxes, int n_world_halfspaces, int n_self_pairs_arg,
+    int n_robot_spheres_arg, int n_world_spheres_arg, int n_world_capsules_arg,
+    int n_world_boxes_arg, int n_world_halfspaces_arg, int n_self_pairs_arg,
     float lambda_init, float limit_prior_weight, float kick_scale,
     float eps_pos, float eps_ori, int stall_patience,
     int enable_collision, float collision_weight, float collision_margin)
@@ -853,7 +853,9 @@ static ffi::Error HjcdIkCoarseCudaImpl(
     const int n_self_pairs = static_cast<int>(self_pair_i.dimensions()[0]);
 
 #ifdef PYROFFI_TRACED_ROBOT
-    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs))
+    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs,
+                                         n_world_spheres, n_world_capsules, n_world_boxes,
+                                         n_world_halfspaces))
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "hjcd_ik_cuda (traced): launch does not match the robot and collision "
                           "tables this build was traced for.");
@@ -963,7 +965,9 @@ static ffi::Error HjcdIkLmCudaImpl(
     // N: the compile-time bucket holding n_act (identity-padded). 0 => past MAX_ACT's
     // ceiling, which _build_params.py should already have refused.
 #ifdef PYROFFI_TRACED_ROBOT
-    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs))
+    if (!pyroffi::traced::launch_matches(n_ee, n_act, n_joints, n_robot_spheres, n_self_pairs,
+                                         n_world_spheres, n_world_capsules, n_world_boxes,
+                                         n_world_halfspaces))
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "hjcd_ik_cuda (traced): launch does not match the robot and collision "
                           "tables this build was traced for.");
