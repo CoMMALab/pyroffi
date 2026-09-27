@@ -59,3 +59,21 @@ def test_stock_refuses_over_capacity_and_traced_runs():
     traced = prepare_sco_trajopt_cuda(robot, coll, WORLD, traced=True)
     trajs = np.asarray(sco_trajopt_cuda_prepared(init, start, goal, traced, CFG)[2])
     assert np.isfinite(trajs).all()
+
+
+def test_collision_cost_matches_jax():
+    """Zero iterations report the cost of the initial trajectories: the kernel's collision
+    geometry (sphere rows posed by their links' parent joints) must match the JAX model's."""
+    import dataclasses
+
+    from pyroffi.optimization_engines._sco_optimization import sco_trajopt
+
+    robot, coll, start, goal, init = _problem("resources/panda/panda_spherized.urdf", "resources/panda/panda.srdf", batch=8)
+    mid = robot.forward_kinematics(init[0, 16])[robot.links.names.index("panda_link4")][4:]
+    world = (Sphere.from_center_and_radius(mid[None], jnp.array([0.12])),)
+    cfg0 = dataclasses.replace(CFG, n_outer_iters=0, n_inner_iters=0)
+    jax_cost = np.asarray(sco_trajopt(init, start, goal, robot, coll, world, cfg0, use_cuda=False)[1])
+    for traced in (False, True):
+        prep = prepare_sco_trajopt_cuda(robot, coll, world, traced=traced)
+        np.testing.assert_allclose(np.asarray(sco_trajopt_cuda_prepared(init, start, goal, prep, cfg0)[1]),
+                                   jax_cost, rtol=5e-3)

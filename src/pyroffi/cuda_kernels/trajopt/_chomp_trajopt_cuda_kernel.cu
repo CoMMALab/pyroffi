@@ -99,6 +99,7 @@ static __device__ float chomp_collision_cost_cfg(
     fk_single(cfg, twists, parent_tf, parent_idx, act_idx,
               mimic_mul, mimic_off, mimic_act_idx, topo_inv,
               T_world, n_joints, n_act);
+    se3_identity(T_world + n_joints * 7);  // row n_joints: a root link fixed in the world
 
     float cost = 0.0f;
 
@@ -644,7 +645,7 @@ __global__ void chomp_trajopt_kernel(
     // - FD gradients: n_act slots (one per perturbed joint)
     // - line search: LS_N slots (one per alpha candidate thread)
     extern __shared__ float s_dyn[];
-    const int tw_stride = n_joints * 7;
+    const int tw_stride = (n_joints + 1) * 7;  // joint frames + the identity row
     float* s_tw_fd = s_dyn;
     float* s_tw_ls = s_dyn + n_act * tw_stride;
 
@@ -682,7 +683,7 @@ __global__ void chomp_trajopt_kernel(
             __syncthreads();
 
             if (threadIdx.x == 0) {
-                float tw_base[MAX_JOINTS * 7];
+                float tw_base[(MAX_JOINTS + 1) * 7];
                 s_collision_base = chomp_collision_cost_cfg(
                     s_cfg,
                     s_twists,
@@ -955,7 +956,7 @@ __global__ void chomp_trajopt_kernel(
     }
 
     if (threadIdx.x == 0) {
-        float tw_buffer[MAX_JOINTS * 7];
+        float tw_buffer[(MAX_JOINTS + 1) * 7];
         float final_cost = chomp_total_cost(
             traj,
             nullptr,
@@ -1078,7 +1079,7 @@ static ffi::Error ChompTrajoptCudaImpl(
     const int n = T * n_act;
     const int workspace_stride = 3 * n;
     constexpr int LS_N = 4;
-    const int dyn_shared_bytes = (n_act + LS_N) * n_joints * 7 * sizeof(float);
+    const int dyn_shared_bytes = (n_act + LS_N) * (n_joints + 1) * 7 * sizeof(float);
 
     // One warp is sufficient: n_act is small, and CHOMP work is dominated by
     // single-trajectory collision evaluations and synchronization.

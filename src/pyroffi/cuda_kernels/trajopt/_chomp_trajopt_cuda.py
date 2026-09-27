@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from pyroffi.collision._robot_collision import RobotCollisionSpherized
     from pyroffi.optimization_engines._chomp_optimization import ChompTrajOptConfig
 
+from ._sco_trajopt_cuda import sphere_rows_by_joint
+
 _LIB_NAME = "_chomp_trajopt_cuda_lib.so"
 
 
@@ -155,12 +157,15 @@ def chomp_trajopt_cuda(
 
     sphere_off_np = np.asarray(robot_coll.coll.pose.translation(), dtype=np.float32)
     sphere_rad_np = np.asarray(robot_coll.coll.radius, dtype=np.float32)
+    sphere_off_np, sphere_rad_np, pair_i_np, pair_j_np = sphere_rows_by_joint(
+        robot, robot_coll, sphere_off_np, sphere_rad_np,
+        robot_coll.active_idx_i, robot_coll.active_idx_j)
     N, S = sphere_off_np.shape[:2]
     sphere_offsets = jnp.asarray(sphere_off_np.reshape(-1), dtype=jnp.float32)
     sphere_radii = jnp.asarray(sphere_rad_np.reshape(-1), dtype=jnp.float32)
 
-    pair_i = jnp.asarray(robot_coll.active_idx_i, dtype=jnp.int32)
-    pair_j = jnp.asarray(robot_coll.active_idx_j, dtype=jnp.int32)
+    pair_i = jnp.asarray(pair_i_np)
+    pair_j = jnp.asarray(pair_j_np)
 
     ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geoms)
     world_spheres = jnp.asarray(ws_np)

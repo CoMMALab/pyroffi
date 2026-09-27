@@ -34,14 +34,20 @@
     do {                                                                    \
         const float sco_frz_[1] = {0.f};                                    \
         pyroffi::traced::frame_poses((q), sco_frz_, (T));                   \
+        se3_identity((T) + n_joints * 7);                                 \
     } while (0)
 #else
 #define SCO_INLINE
 #define SCO_FK(q, T)                                                        \
-    fk_single((q), s_twists, s_parent_tf, s_parent_idx, s_act_idx,          \
-              s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv, (T),   \
-              n_joints, n_act)
+    do {                                                                    \
+        fk_single((q), s_twists, s_parent_tf, s_parent_idx, s_act_idx,      \
+                  s_mimic_mul, s_mimic_off, s_mimic_act_idx, s_topo_inv,    \
+                  (T), n_joints, n_act);                                    \
+        se3_identity((T) + n_joints * 7);                                 \
+    } while (0)
 #endif
+// Sphere rows are posed by frame T[row]: row j < n_joints is the link hanging off joint j,
+// and row n_joints is the identity frame of a root link fixed in the world.
 
 #include <cmath>
 #include <string>
@@ -760,7 +766,7 @@ void sco_trajopt_kernel(
 
         // ---- FK + FD Jacobians (one thread per timestep) ----
         if (tid < T) {
-            float* my_Tw = T_world_pool + tid * n_joints * 7;
+            float* my_Tw = T_world_pool + tid * (n_joints + 1) * 7;
             float d_base[SCO_MAX_G];
 
             sco_compute_coll_dists(
@@ -956,7 +962,7 @@ void sco_trajopt_kernel(
     // ==== Final nonlinear cost evaluation (cooperative) ====
     float nl_cost = 0.0f;
     if (tid < T) {
-        float* my_Tw = T_world_pool + tid * n_joints * 7;
+        float* my_Tw = T_world_pool + tid * (n_joints + 1) * 7;
         const float* q_t = s_traj + tid * n_act;
 
         SCO_FK(q_t, my_Tw);
@@ -1212,13 +1218,13 @@ static ffi::Error ScoTrajoptCudaImpl(
     //   grad[n], dir[n], best_x[n], g_prev[n],
     //   J_k[T*G*n_act], s_lbfgs[m*n], y_lbfgs[m*n],
     //   rho_buf[SCO_MAX_M], alpha_hist[SCO_MAX_M],
-    //   T_world_pool[T * n_joints * 7]
+    //   T_world_pool[T * (n_joints + 1) * 7]  (joint frames + the identity row)
     const int workspace_stride =
         4 * n
         + T * SCO_MAX_G * n_act
         + 2 * m * n
         + 2 * SCO_MAX_M
-        + T * n_joints * 7;
+        + T * (n_joints + 1) * 7;
 
     // Dynamic shared memory: s_traj[n] + s_qk[n] + s_dk[T*G] + smem_r[block_dim]
     const int dyn_smem_bytes =

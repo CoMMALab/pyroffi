@@ -43,7 +43,7 @@ namespace ffi = xla::ffi;
 #endif
 
 #ifndef STOMP_MAX_DOF
-#define STOMP_MAX_DOF  8
+#define STOMP_MAX_DOF  MAX_ACT
 #endif
 
 #ifndef STOMP_MAX_N
@@ -148,11 +148,12 @@ static __device__ float stomp_collision_cost_cfg(
     int n_joints, int n_act, int N, int S, int P,
     int Ms, int Mc, int Mb, int Mh,
     float collision_margin,
-    float* __restrict__ T_world)   // thread-private FK workspace [n_joints*7]
+    float* __restrict__ T_world)   // thread-private FK workspace [(n_joints+1)*7]
 {
     fk_single(cfg, twists, parent_tf, parent_idx, act_idx,
               mimic_mul, mimic_off, mimic_act_idx, topo_inv,
               T_world, n_joints, n_act);
+    se3_identity(T_world + n_joints * 7);  // row n_joints: a root link fixed in the world
 
     float cost = 0.0f;
 
@@ -410,7 +411,7 @@ __global__ void stomp_eval_cost_kernel(
         }
 
         // ── FK + Collision cost ──
-        float T_world[STOMP_MAX_N * 7];
+        float T_world[(STOMP_MAX_N + 1) * 7];
         my_cost += w_coll * stomp_collision_cost_cfg(
             q_t, twists, parent_tf, parent_idx, act_idx,
             mimic_mul, mimic_off, mimic_act_idx, topo_inv,
@@ -652,7 +653,7 @@ __global__ void stomp_final_cost_kernel(
             my_cost += w_limits * viol * viol;
         }
 
-        float T_world[STOMP_MAX_N * 7];
+        float T_world[(STOMP_MAX_N + 1) * 7];
         my_cost += w_coll * stomp_collision_cost_cfg(
             q_t, twists, parent_tf, parent_idx, act_idx,
             mimic_mul, mimic_off, mimic_act_idx, topo_inv,

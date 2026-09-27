@@ -111,6 +111,7 @@ __device__ void lst_compute_coll_groups(
         T_world,
         n_joints,
         n_act);
+    se3_identity(T_world + n_joints * 7);  // row n_joints: a root link fixed in the world
 
     LstSmoothMinAcc acc[LST_G];
     for (int g = 0; g < LST_G; g++) {
@@ -819,7 +820,7 @@ static ffi::Error LsTrajoptCudaImpl(
 
     int n = T * n_act;
     int m = (5 * T - 3) * n_act + T * LST_G;
-    int workspace_stride = n + T * LST_G + T * LST_G * n_act + m + m + n + n + T * n_joints * 7;
+    int workspace_stride = n + T * LST_G + T * LST_G * n_act + m + m + n + n + T * (n_joints + 1) * 7;
 
     // [B, n_act] endpoint buffers mean per-trajectory endpoints; the classic
     // [n_act] buffer is broadcast to every trajectory (stride 0).

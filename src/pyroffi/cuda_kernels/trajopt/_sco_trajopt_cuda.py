@@ -213,6 +213,22 @@ def sco_tables_source(sphere_off, sphere_rad, pair_i, pair_j, world_counts) -> s
         + "}  // namespace pyroffi::traced\n")
 
 
+def sphere_rows_by_joint(robot, robot_coll, sphere_off, sphere_rad, pair_i, pair_j):
+    """Re-index a spherized model's link rows for the trajopt kernels, which pose sphere row
+    ``r`` with frame ``r``: joint ``r``'s world pose, or the identity for ``r == n_joints`` (a
+    root link fixed in the world). Rows no link maps to are padding (radius < 0)."""
+    from pyroffi.collision._cuda_collision import link_parent_joint_for
+
+    n_joints = int(robot.joints.num_joints)
+    row = np.asarray(link_parent_joint_for(robot, robot_coll), dtype=np.int32)
+    row = np.where(row < 0, n_joints, row)
+    S = sphere_rad.shape[1]
+    off = np.zeros((n_joints + 1, S, 3), np.float32)
+    rad = np.full((n_joints + 1, S), -1.0, np.float32)
+    off[row], rad[row] = sphere_off, sphere_rad
+    return off, rad, row[np.asarray(pair_i)].astype(np.int32), row[np.asarray(pair_j)].astype(np.int32)
+
+
 def prepare_sco_trajopt_cuda(
     robot: "Robot",
     robot_coll: "RobotCollisionSpherized",
@@ -248,6 +264,9 @@ def prepare_sco_trajopt_cuda(
     ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geoms)
     pair_i_np = np.asarray(robot_coll.active_idx_i, dtype=np.int32)
     pair_j_np = np.asarray(robot_coll.active_idx_j, dtype=np.int32)
+    sphere_off_np, sphere_rad_np, pair_i_np, pair_j_np = sphere_rows_by_joint(
+        robot, robot_coll, sphere_off_np, sphere_rad_np, pair_i_np, pair_j_np)
+    N = sphere_off_np.shape[0]
     target = "sco_trajopt_cuda"
     if traced:
         src = sco_tables_source(sphere_off_np, sphere_rad_np, pair_i_np, pair_j_np,
@@ -270,8 +289,8 @@ def prepare_sco_trajopt_cuda(
         upper=jnp.asarray(robot.joints.upper_limits, dtype=jnp.float32),
         sphere_offsets=jnp.asarray(sphere_off_np.reshape(-1), dtype=jnp.float32),
         sphere_radii=jnp.asarray(sphere_rad_np.reshape(-1), dtype=jnp.float32),
-        pair_i=jnp.asarray(robot_coll.active_idx_i, dtype=jnp.int32),
-        pair_j=jnp.asarray(robot_coll.active_idx_j, dtype=jnp.int32),
+        pair_i=jnp.asarray(pair_i_np),
+        pair_j=jnp.asarray(pair_j_np),
         world_spheres=jnp.asarray(ws_np),
         world_capsules=jnp.asarray(wc_np),
         world_boxes=jnp.asarray(wb_np),
@@ -321,12 +340,12 @@ def sco_trajopt_cuda_prepared(
     #   T * G * n_act  (J_k, G=5)
     #   2 * m * T*n_act(s_lbfgs + y_lbfgs)
     #   2 * 8          (rho_buf + alpha_hist, SCO_MAX_M=8)
-    #   T*n_joints*7   (T_world_pool, one FK workspace per timestep)
+    #   T*(n_joints+1)*7 (T_world_pool, one FK workspace per timestep + identity row)
     _SCO_MAX_G, _SCO_MAX_M = 5, 8
     m = opt_cfg.m_lbfgs
     n = T * n_act
     workspace_stride = (4 * n + T * _SCO_MAX_G * n_act + 2 * m * n
-                        + 2 * _SCO_MAX_M + T * prep.n_joints * 7)
+                        + 2 * _SCO_MAX_M + T * (prep.n_joints + 1) * 7)
 
     out_trajs, out_costs, _ = jax.ffi.ffi_call(
         prep.ffi_target,

@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from pyroffi.collision._robot_collision import RobotCollisionSpherized
     from pyroffi.optimization_engines._ls_trajopt_optimization import LsTrajOptConfig
 
+from ._sco_trajopt_cuda import sphere_rows_by_joint
+
 _LIB_NAME = "_ls_trajopt_cuda_lib.so"
 
 
@@ -155,12 +157,15 @@ def ls_trajopt_cuda(
 
     sphere_off_np = np.asarray(robot_coll.coll.pose.translation(), dtype=np.float32)
     sphere_rad_np = np.asarray(robot_coll.coll.radius, dtype=np.float32)
+    sphere_off_np, sphere_rad_np, pair_i_np, pair_j_np = sphere_rows_by_joint(
+        robot, robot_coll, sphere_off_np, sphere_rad_np,
+        robot_coll.active_idx_i, robot_coll.active_idx_j)
     N, S = sphere_off_np.shape[:2]
     sphere_offsets = jnp.asarray(sphere_off_np.reshape(-1), dtype=jnp.float32)
     sphere_radii = jnp.asarray(sphere_rad_np.reshape(-1), dtype=jnp.float32)
 
-    pair_i = jnp.asarray(robot_coll.active_idx_i, dtype=jnp.int32)
-    pair_j = jnp.asarray(robot_coll.active_idx_j, dtype=jnp.int32)
+    pair_i = jnp.asarray(pair_i_np)
+    pair_j = jnp.asarray(pair_j_np)
 
     ws_np, wc_np, wb_np, wh_np = _extract_world_arrays(world_geoms)
     world_spheres = jnp.asarray(ws_np)
@@ -178,11 +183,11 @@ def ls_trajopt_cuda(
     init_pinned = init_pinned.at[:, -1, :].set(goal_f)
 
     # Workspace layout per trajectory (floats):
-    # qk[n], dk[T*G], J[T*G*n_act], r0[m], r1[m], delta[n], x_base[n], T_world[n_joints*7]
+    # qk[n], dk[T*G], J[T*G*n_act], r0[m], r1[m], delta[n], x_base[n], T_world[(n_joints+1)*7]
     G = 5
     n = T * n_act
     m = (5 * T - 3) * n_act + T * G
-    workspace_stride = n + T * G + T * G * n_act + m + m + n + n + T * n_joints * 7
+    workspace_stride = n + T * G + T * G * n_act + m + m + n + n + T * (n_joints + 1) * 7
 
     out_trajs, out_costs, _ = jax.ffi.ffi_call(
         "ls_trajopt_cuda",
