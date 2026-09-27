@@ -137,6 +137,10 @@ def forward_kinematics_joints_jax(
     unroll_fk: jdc.Static[bool] = False,
 ) -> Float[Array, "*batch joint_count 7"]:
     (*batch_axes, _) = cfg.shape
+    if robot.floating_base and cfg.shape[-1] == robot.nq:
+        # A floating configuration: world joint poses, the base composed on the left.
+        T = forward_kinematics_joints_jax(robot, cfg[..., 7:], unroll_fk)
+        return (jaxlie.SE3(cfg[..., None, :7]) @ jaxlie.SE3(T)).wxyz_xyz
     assert cfg.shape == (*batch_axes, robot.joints.num_actuated_joints)
 
     # Calculate full configuration using the dedicated method

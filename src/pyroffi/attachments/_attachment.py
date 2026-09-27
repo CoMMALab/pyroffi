@@ -322,7 +322,8 @@ def link_dof_bodies(robot: "Robot") -> dict[str, tuple[int, onp.ndarray]]:
 
     Links above every actuated joint (the fixed base) map to ``dof_index == -1``
     and are silently non-loading, which is the physically correct answer: a
-    fixture bolted to the base torques nothing.
+    fixture bolted to the base torques nothing. On a floating base the same links
+    are the free base body, with ``T`` from the root link frame.
     """
     urdf = robot.urdf
     dof_index = {j.name: i for i, j in enumerate(urdf.actuated_joints)}

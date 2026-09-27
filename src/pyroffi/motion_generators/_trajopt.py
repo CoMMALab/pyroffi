@@ -38,6 +38,23 @@ from ..optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
 from ..optimization_engines._sco_optimization import ScoTrajOptConfig, sco_trajopt
 
 
+def generate_on_chart(gen, start_pose, goal_pose, key, waypoint_poses, prev_cfgs):
+    """``gen.generate`` for a floating-base robot: plan on the fixed-base chart centred on the
+    warm start's base (see :mod:`pyroffi._floating_base`), and return floating trajectories."""
+    import dataclasses
+
+    from .._floating_base import chart_robot, from_chart, to_chart
+
+    robot = gen.robot
+    if prev_cfgs is None:
+        prev_cfgs = jnp.broadcast_to(robot.default_cfg, (gen.n_timesteps, robot.nq))
+    ref = prev_cfgs[0, :7]
+    best, costs, trajs, trajopt_time, ik_time = type(gen).generate(
+        dataclasses.replace(gen, robot=chart_robot(robot, ref)), start_pose, goal_pose, key,
+        waypoint_poses, to_chart(robot, prev_cfgs, ref))
+    return from_chart(robot, best, ref), costs, from_chart(robot, trajs, ref), trajopt_time, ik_time
+
+
 @dataclass(frozen=True)
 class IKSeedConfig:
     """Configuration for the IK seeding stage."""
@@ -316,6 +333,8 @@ class TrajoptMotionGenerator:
             trajopt_time:   Wall-clock time for the SCO trajopt step (seconds).
             ik_time:        Wall-clock time for the IK seeding step (seconds).
         """
+        if self.robot.floating_base:
+            return generate_on_chart(self, start_pose, goal_pose, key, waypoint_poses, prev_cfgs)
         # Build control poses sequence: [start, *waypoints, goal]
         start_wxyz_xyz = start_pose.wxyz_xyz[None]  # [1, 7]
         goal_wxyz_xyz = goal_pose.wxyz_xyz[None]     # [1, 7]

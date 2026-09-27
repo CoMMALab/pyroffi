@@ -324,6 +324,9 @@ class NeuralRobotCollision:
         The network maps from link poses (N*7 dimensions) to distances (N*M dimensions).
         Using full SE3 poses (quaternion + position) since link orientation affects
         where collision spheres end up in world space.
+
+        A floating-base robot is sampled over its joints with the base at
+        ``robot.default_cfg``'s base pose, so the network is accurate for bases near it.
         """
         logger.info("Starting neural collision training...")
 
@@ -350,13 +353,17 @@ class NeuralRobotCollision:
         initial_pool_size = num_samples * 2
         halton_samples = halton_sequence(initial_pool_size, dof)
         q_pool = lower_limits + halton_samples * (upper_limits - lower_limits)
+        # Joints are sampled; a floating base stays at the default pose (see the docstring).
+        with_base = (lambda q: jnp.concatenate(
+            [jnp.broadcast_to(robot.default_cfg[:7], (*q.shape[:-1], 7)), q], axis=-1)
+        ) if robot.floating_base else (lambda q: q)
 
         # Compute distances for the pool to identify collision samples
         logger.info("Computing distances to identify collision samples...")
 
         def compute_min_dist(q):
             dists = self._collision_model.compute_world_collision_distance(
-                robot, q, world_geom
+                robot, with_base(q), world_geom
             )
             return jnp.min(dists)
 
@@ -379,7 +386,7 @@ class NeuralRobotCollision:
         # Compute link poses for all configurations via forward kinematics
         # Shape: (num_samples, num_links, 7) where 7 = wxyz (4) + xyz (3)
         logger.info("Computing link poses via forward kinematics...")
-        link_poses_all = robot.forward_kinematics(q_train)
+        link_poses_all = robot.forward_kinematics(with_base(q_train))
 
         # Flatten link poses to (num_samples, num_links * 7)
         X_train_raw = link_poses_all.reshape(num_samples, N * 7)
@@ -427,7 +434,7 @@ class NeuralRobotCollision:
         # Use vmap to compute distances for all configurations in parallel
         def compute_single_dist(q):
             dists = self._collision_model.compute_world_collision_distance(
-                robot, q, world_geom
+                robot, with_base(q), world_geom
             )
             return dists.reshape(-1)  # Flatten to (N*M,)
 

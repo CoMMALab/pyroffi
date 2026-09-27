@@ -43,6 +43,7 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
 from ._ik_primitives import self_collision_table_arrays, traced_ffi_target
@@ -365,9 +366,7 @@ def sqp_ik_solve(
         )
     warm_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask[None, :], previous_cfg[None, :], random_seeds
     )
@@ -490,9 +489,7 @@ def _sqp_ik_solve_cuda_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, :], previous_cfg[None, :], random_seeds
     )
@@ -1046,9 +1043,7 @@ def _sqp_ik_solve_cuda_batch_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_problems, n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_problems, n_random, n_act), lower, upper, previous_cfgs[:, None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], random_seeds
     )
@@ -1664,9 +1659,7 @@ def sqp_ik_solve_cuda_sequential(
     # ── Initial warm-start pool for waypoint 0 ────────────────────────────────
     if initial_prev_cfgs is None:
         rng_key, k0 = jax.random.split(rng_key)
-        init_prev = jax.random.uniform(
-            k0, (K, n_act), minval=lower, maxval=upper, dtype=jnp.float32
-        )
+        init_prev = sample_in_limits(k0, (K, n_act), lower, upper, jnp.zeros_like(lower)[None, :])
     else:
         init_prev = jnp.asarray(initial_prev_cfgs, dtype=jnp.float32)
         init_prev = jnp.broadcast_to(init_prev, (K, n_act))

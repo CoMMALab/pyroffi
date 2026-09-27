@@ -213,11 +213,12 @@ def compose_dynamics(robot: "Robot", aset: AttachmentSet) -> "Robot":
     link_map = link_dof_bodies(robot)
     link_names = robot.links.names
     I_body = robot.dynamics.I_body
+    I_base = robot.dynamics.I_base
 
     for a in bodies:
         link_name = link_names[a.parent_link_index]
         dof_index, T_body_link = link_map[link_name]
-        if dof_index < 0:
+        if dof_index < 0 and not robot.floating_base:
             # Attached above every actuated joint: rigidly grounded, so it adds
             # no load to any DOF. Silently correct, not an error.
             continue
@@ -232,10 +233,14 @@ def compose_dynamics(robot: "Robot", aset: AttachmentSet) -> "Robot":
         dI = gate[..., None, None] * (
             jnp.swapaxes(X, -1, -2) @ I_att @ X
         )
-        I_body = I_body.at[dof_index].add(dI)
+        if dof_index < 0:  # a floating base's own body (root link frame)
+            I_base = I_base + dI
+        else:
+            I_body = I_body.at[dof_index].add(dI)
 
     with jdc.copy_and_mutate(robot.dynamics, validate=False) as dyn:
         dyn.I_body = I_body
+        dyn.I_base = I_base
     with jdc.copy_and_mutate(robot, validate=False) as out:
         out.dynamics = dyn
         out.attached_names = tuple(a.name for a in bodies)
@@ -260,13 +265,14 @@ def attachment_wrench_to_body(
     ``dynamics._contact.manipulator_contact_fext`` already uses.
 
     Returns ``(dof_index, wrench_in_body_frame)``; ``dof_index == -1`` means the
-    attachment is grounded and the wrench loads no DOF.
+    attachment is above every actuated joint: grounded (the wrench loads no DOF) on a
+    fixed base, or on a floating base's own body (the wrench in the root link frame).
     """
     a = aset.attachments[aset.index_of(name)]
     dof_index, T_body_link = link_dof_bodies(robot)[
         robot.links.names[a.parent_link_index]
     ]
-    if dof_index < 0:
+    if dof_index < 0 and not robot.floating_base:
         return -1, jnp.zeros_like(jnp.asarray(wrench_body))
     T_DB = jaxlie.SE3.from_matrix(jnp.asarray(T_body_link)) @ jaxlie.SE3(
         a.T_parent_body

@@ -66,6 +66,33 @@ def _urdf_xml(urdf: "yourdfpy.URDF") -> str:
     return etree.tostring(root, xml_declaration=True, encoding="utf-8").decode()
 
 
+def _chart_urdf_xml(xml: str, root: str, joint_names: tuple[str, ...]) -> str:
+    """The URDF of a floating robot's chart (see :mod:`pyroffi._floating_base`): its tree
+    hung off the chart's virtual joints, which follow the real ones in ``joint_names``. The
+    chart's reference rotation is baked as the identity."""
+    from lxml import etree
+
+    from ._floating_base import CHART_JOINTS, TANGENT_JOINTS, _CHART_TWISTS, _TANGENT_TWISTS
+
+    twist = dict(zip(CHART_JOINTS + TANGENT_JOINTS, _CHART_TWISTS + _TANGENT_TWISTS))
+    virtual = [n for n in joint_names if n in twist]
+    tree = etree.fromstring(xml.encode())
+    links = ["__chart_world"] + [f"__chart_link_{i}" for i in range(len(virtual) - 1)] + [root]
+    for name in links[:-1]:
+        etree.SubElement(tree, "link", name=name)
+    for i, name in enumerate(virtual):
+        tw = twist[name]
+        kind = "prismatic" if any(tw[:3]) else "revolute"
+        axis = tw[:3] if kind == "prismatic" else tw[3:]
+        j = etree.SubElement(tree, "joint", name=name, type=kind)
+        etree.SubElement(j, "parent", link=links[i])
+        etree.SubElement(j, "child", link=links[i + 1])
+        etree.SubElement(j, "origin", xyz="0 0 0", rpy="0 0 0")
+        etree.SubElement(j, "axis", xyz=" ".join(str(float(a)) for a in axis))
+        etree.SubElement(j, "limit", lower="-1e4", upper="1e4", effort="0", velocity="1e4")
+    return etree.tostring(tree, xml_declaration=True, encoding="utf-8").decode()
+
+
 class CudaBackends:
     """Per-robot holder that lazily builds URDF-dependent backends.
 
@@ -86,8 +113,10 @@ class CudaBackends:
         parent_indices=None,
         parent_joint_indices=None,
         num_joints: int | None = None,
+        floating_base: bool = False,
     ) -> None:
         self._urdf = urdf
+        self.floating_base = floating_base
         # Lazily-populated caches (built on first use).
         self._robot_collision: Any = None            # pure-JAX RobotCollision
         self._robot_collision_spherized: Any = None  # pure-JAX RobotCollisionSpherized
@@ -165,8 +194,11 @@ class CudaBackends:
             chain.append(joint_names[j])
             j = int(self._parent_indices[j])
         chain_names = tuple(n for n in actuated_names if n in chain)
+        xml = _urdf_xml(self._urdf)
+        if getattr(self, "_chart_of", None) is not None:
+            xml = _chart_urdf_xml(xml, self._urdf.base_link, joint_names)
         return traced_target(
-            kernel, _urdf_xml(self._urdf), link_names[ee_link],
+            kernel, xml, link_names[ee_link],
             actuated_names, joint_names, chain_names, collision_src, has_collision)
 
     # ── Collision backends ─────────────────────────────────────────────────
@@ -234,6 +266,6 @@ class CudaBackends:
             from .dynamics import GRiDDynamics
 
             with _eager():
-                gd = GRiDDynamics(self._urdf, gravity=key)
+                gd = GRiDDynamics(self._urdf, gravity=key, floating_base=self.floating_base)
             self._grid[key] = gd
         return gd

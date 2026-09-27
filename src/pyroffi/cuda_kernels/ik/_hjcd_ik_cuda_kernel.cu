@@ -455,8 +455,10 @@ void hjcd_ik_lm_kernel(
     // Joint-limit mid / half-range for prior.
     float mid[MAX_ACT], half_range[MAX_ACT];
     for (int a = 0; a < n_act; a++) {
-        mid[a]        = (s_lower[a] + s_upper[a]) * 0.5f;
-        half_range[a] = (s_upper[a] - s_lower[a]) * 0.5f + 1e-8f;
+        // An unbounded coordinate (infinite limit, e.g. a floating base) gets no prior.
+        const bool bounded = isfinite(s_lower[a]) && isfinite(s_upper[a]);
+        mid[a]        = bounded ? (s_lower[a] + s_upper[a]) * 0.5f : 0.0f;
+        half_range[a] = bounded ? (s_upper[a] - s_lower[a]) * 0.5f + 1e-8f : INFINITY;
     }
 
     // Compute initial unweighted squared error (sum over all EEs).

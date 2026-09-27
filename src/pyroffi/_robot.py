@@ -196,6 +196,7 @@ class Robot:
                 parent_indices=joints.parent_indices,
                 parent_joint_indices=links.parent_joint_indices,
                 num_joints=joints.num_joints,
+                floating_base=bool(floating_base),
             ),
             _mjcf_model=mjcf_model,
             floating_base=bool(floating_base),
@@ -245,6 +246,7 @@ class Robot:
         constraint_args: Sequence = (),
         constraint_weights=None,
         use_cuda: bool = False,
+        base_region=None,
         **solver_kwargs,
     ) -> Float[Array, "n_actuated_joints"]:
         """Solve inverse kinematics, dispatching over solver and backend.
@@ -287,6 +289,10 @@ class Robot:
                                FFI kernels have no batching rule); batch instead
                                by adding leading dims to *previous_cfg*/targets
                                where the solver supports it.
+            base_region:       Floating base only: ``(lo, hi)`` world-frame xyz bounds the
+                               base position is sampled from and kept within. Without it
+                               the base is unbounded and seeds start at the warm start's base.
+                               ``fixed_joint_mask`` covers the joints, not the base.
             solver_kwargs:     Extra solver-specific options forwarded verbatim,
                                e.g. ``coarse_max_iter``/``lm_max_iter``/``epsilon``/
                                ``nu``/``lambda_init`` for ``hjcd``;
@@ -311,6 +317,7 @@ class Robot:
             constraint_args=constraint_args,
             constraint_weights=constraint_weights,
             use_cuda=use_cuda,
+            base_region=base_region,
             **solver_kwargs,
         )
 

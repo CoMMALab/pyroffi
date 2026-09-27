@@ -218,11 +218,16 @@ def extract_dh(
                        at ``n_validate`` random configs and raise on mismatch.
         tol:           Max allowed position/orientation error during validation.
 
+    A floating-base robot's chain is extracted in its base frame.
+
     Raises:
         ValueError: if the chain is branched / not a simple serial chain, or the
             reconstructed DH kinematics disagree with pyroffi FK (i.e. the chain
             is not expressible in standard DH form).
     """
+    from .._floating_base import fixed_tree
+
+    robot = fixed_tree(robot)
     link_names = list(robot.links.names)
     if ee_link_name not in link_names:
         raise ValueError(f"Unknown end-effector link {ee_link_name!r}.")

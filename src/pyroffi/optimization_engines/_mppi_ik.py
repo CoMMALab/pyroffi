@@ -50,6 +50,7 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._nullspace import project_single
@@ -502,9 +503,7 @@ def mppi_ik_solve(
         )
     warm_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask[None, :], previous_cfg[None, :], random_seeds
     )
@@ -678,9 +677,7 @@ def _mppi_ik_solve_cuda_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, :], previous_cfg[None, :], random_seeds
     )
@@ -1135,9 +1132,7 @@ def _mppi_ik_solve_cuda_batch_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_problems, n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_problems, n_random, n_act), lower, upper, previous_cfgs[:, None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], random_seeds
     )

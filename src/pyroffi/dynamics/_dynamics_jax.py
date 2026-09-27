@@ -754,5 +754,22 @@ def jacobian_jax(
     part measured at the frame origin ``r[..., i, :]`` in world axes
     (LOCAL_WORLD_ALIGNED). For a point ``p`` rigidly attached to body ``i``,
     ``J_lin(p) = J[i, 3:] - skew(p - r[i]) @ J[i, :3]``.
+
+    A floating base takes ``q = [base wxyz_xyz | joints]`` and returns ``6 + n`` columns: the
+    base's body twist ``[omega; v]`` first, then the joints.
     """
-    return _batched(_jacobian_single, dyn, q)
+    if not dyn.floating_base:
+        return _batched(_jacobian_single, dyn, q)
+    import jaxlie
+
+    base = jaxlie.SE3(q[..., :7])
+    J, r = _batched(_jacobian_single, dyn, q[..., 7:])  # in the base frame
+    R = jnp.broadcast_to(base.rotation().as_matrix()[..., None, :, :], (*r.shape, 3))
+    p = base.translation()[..., None, :]
+    r_w = jnp.einsum("...ij,...j->...i", R, r) + p
+    J_w = jnp.concatenate([R @ J[..., :3, :], R @ J[..., 3:, :]], axis=-2)
+    # A base body twist [omega; v] moves body i's origin by R omega x (r_i - p) + R v.
+    base_cols = jnp.concatenate([
+        jnp.concatenate([R, jnp.zeros_like(R)], axis=-1),
+        jnp.concatenate([-_skew_batched(r_w - p) @ R, R], axis=-1)], axis=-2)
+    return jnp.concatenate([base_cols, J_w], axis=-1), r_w

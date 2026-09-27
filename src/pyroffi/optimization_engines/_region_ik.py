@@ -58,6 +58,7 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
 from ._ls_ik import _prepare_ls_collision_buffers
 
@@ -139,7 +140,7 @@ def _generate_seeds(
         carry_cfg[None, :] + jax.random.normal(key_warm, (n_warm, n_act)) * 0.05,
         lower, upper,
     )
-    rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+    rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, carry_cfg[None, :])
     seeds_flat = jnp.concatenate([warm, rand], axis=0)
     seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
     return seeds_flat.reshape(-1, n_restarts, n_act)
@@ -702,7 +703,7 @@ def brownian_motion_sample_box_region_cuda(
             lower,
             upper,
         )
-        rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+        rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         seeds_flat = jnp.concatenate([warm, rand], axis=0)
         seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
         seeds = seeds_flat.reshape(n_batch, restarts_per_target, n_act)
@@ -984,7 +985,7 @@ def svgd_sample_box_region_cuda(
             lower,
             upper,
         )
-        rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+        rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         seeds_flat = jnp.concatenate([warm, rand], axis=0)
         seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
         seeds = seeds_flat.reshape(n_batch, restarts_per_target, n_act)
@@ -1344,7 +1345,7 @@ def hit_and_run_sample_box_region_cuda(
             lower,
             upper,
         )
-        rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+        rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         seeds_flat = jnp.concatenate([warm, rand], axis=0)
         seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
         seeds = seeds_flat.reshape(n_batch, restarts_per_target, n_act)

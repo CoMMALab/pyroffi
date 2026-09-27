@@ -40,6 +40,7 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import finite_range, sample_in_limits
 from .._robot import Robot
 from ._nullspace import project_single
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
@@ -218,8 +219,9 @@ def _lm_refine_single(
     n          = cfg.shape[0]
     n_c        = len(constraint_fns)
     n_ee       = len(target_link_indices)
-    mid        = (lower + upper) * 0.5
-    half_range = (upper - lower) * 0.5 + 1e-8
+    bounded    = jnp.isfinite(lower) & jnp.isfinite(upper)
+    mid        = jnp.where(bounded, (lower + upper) * 0.5, 0.0)
+    half_range = jnp.where(bounded, (upper - lower) * 0.5 + 1e-8, jnp.inf)  # no prior if unbounded
 
     # Joint-limit prior Hessian diagonal (original parameter space).
     D_prior_raw = limit_prior_weight / half_range ** 2   # (n,)
@@ -553,9 +555,7 @@ def hjcd_solve(
         )(warm_keys)                                           # (n_warm, n_act)
     warm_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_seeds, (n_random, n_act), minval=lower, maxval=upper
-    )                                                          # (n_random, n_act)
+    random_seeds = sample_in_limits(key_seeds, (n_random, n_act), lower, upper, previous_cfg[None, :])                                                          # (n_random, n_act)
     random_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], random_seeds)
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (B, n_act)
@@ -604,7 +604,7 @@ def hjcd_solve(
     base_cfgs    = jnp.tile(top_k_cfgs, (repeats, 1))         # (top_k*repeats, n_act)
     perturb_keys = jax.random.split(key_perturb, top_k * repeats)
     noise        = jax.vmap(
-        lambda k: jax.random.normal(k, (n_act,)) * 0.15 * (upper - lower)
+        lambda k: jax.random.normal(k, (n_act,)) * 0.15 * finite_range(lower, upper)
     )(perturb_keys)
     noise        = jnp.where(fixed_joint_mask[None, :], 0.0, noise)
     is_original  = (jnp.arange(top_k * repeats) < top_k)[:, None]
@@ -736,7 +736,7 @@ def _hjcd_solve_cuda_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(key_seeds, (n_random, n_act), minval=lower, maxval=upper)
+    random_seeds = sample_in_limits(key_seeds, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], random_seeds)
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (num_seeds, n_act)
@@ -787,7 +787,7 @@ def _hjcd_solve_cuda_jit(
     # Batched perturbation noise (single random call instead of split+vmap).
     noise        = jax.random.normal(
         key_perturb, (top_k * repeats, n_act)
-    ) * 0.15 * (upper - lower)
+    ) * 0.15 * finite_range(lower, upper)
     noise        = jnp.where(fixed_joint_mask_int[None, :], 0.0, noise)
     is_original  = (jnp.arange(top_k * repeats) < top_k)[:, None]
     lm_seeds     = jnp.where(
@@ -1280,9 +1280,7 @@ def _hjcd_solve_cuda_batch_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_seeds, (n_problems, n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_seeds, (n_problems, n_random, n_act), lower, upper, previous_cfgs[:, None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], random_seeds
     )
@@ -1331,7 +1329,7 @@ def _hjcd_solve_cuda_batch_jit(
     base_cfgs = jnp.tile(top_k_cfgs, (1, repeats, 1))
     noise = jax.random.normal(
         key_perturb, (n_problems, top_k * repeats, n_act)
-    ) * 0.15 * (upper - lower)
+    ) * 0.15 * finite_range(lower, upper)
     noise = jnp.where(fixed_joint_mask_int[None, None, :], 0.0, noise)
     is_original = (jnp.arange(top_k * repeats) < top_k)[None, :, None]
     lm_seeds = jnp.where(

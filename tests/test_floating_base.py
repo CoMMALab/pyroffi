@@ -174,15 +174,3 @@ def test_collision_moves_with_the_base():
     d_fixed = jax.vmap(lambda c: model.compute_world_collision_distance(fixed, c, world_in_base))(q)
     finite = np.isfinite(np.asarray(d_fixed))
     np.testing.assert_allclose(np.asarray(d_float)[finite], np.asarray(d_fixed)[finite], atol=1e-4)
-
-
-def test_unsupported_paths_refuse_floating_robots(g1):
-    """Solvers that assume a joint-only configuration must say so, not misread cfg."""
-    robot, _, _ = g1
-    pose = jaxlie.SE3(robot.forward_kinematics(robot.default_cfg)[robot.links.names.index("left_wrist_yaw_link")])
-    with pytest.raises(NotImplementedError, match="solver='ls'"):
-        robot.inverse_kinematics("left_wrist_yaw_link", pose, solver="hjcd")
-    from pyroffi.dynamics import GRiDDynamics
-
-    with pytest.raises(NotImplementedError, match="floating base"):
-        GRiDDynamics.from_robot(robot)

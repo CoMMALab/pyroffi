@@ -71,6 +71,71 @@ def _resolve_solver(solver: str, use_cuda: bool):
     )
 
 
+_CHART_CONSTRAINTS: dict = {}
+
+
+def _chart_constraint(fn, q_chart, chart, args):
+    """A floating robot's constraint ``fn(cfg, robot, args)`` evaluated at a chart point."""
+    from .._floating_base import from_chart
+
+    robot, ref, user_args = args
+    return fn(from_chart(robot, q_chart, ref), robot, user_args)
+
+
+def _solve_on_chart(robot, target_link_name, target_pose, rng_key, previous_cfg, solver,
+                    num_seeds, continuity_weight, fixed_joint_mask, constraints,
+                    constraint_args, constraint_weights, use_cuda, base_region, solver_kwargs):
+    import functools
+
+    from .._floating_base import chart_robot, from_chart, to_chart
+
+    ref = previous_cfg[..., :7]
+    if ref.ndim > 1:
+        # ponytail: batched warm starts share the first problem's chart centre.
+        ref = ref.reshape(-1, 7)[0]
+    if solver_kwargs.get("traced"):
+        # ponytail: traced kernels bake the chart's reference rotation as the identity, so
+        # the chart is world-aligned (singular where the base pitches 90 deg in the world).
+        ref = ref.at[:4].set(jnp.array([1.0, 0.0, 0.0, 0.0], ref.dtype))
+    chart = chart_robot(robot, ref, base_region)
+    if fixed_joint_mask is not None:
+        fixed_joint_mask = jnp.concatenate(
+            [jnp.asarray(fixed_joint_mask, bool), jnp.zeros(6, bool)])
+    wrapped = []
+    for fn in constraints:  # cached so a static constraint tuple stays hash-stable
+        wrapped.append(_CHART_CONSTRAINTS.setdefault(fn, functools.partial(_chart_constraint, fn)))
+    args = tuple((robot, ref, a) for a in constraint_args)
+    q = inverse_kinematics(
+        chart, target_link_name, target_pose, rng_key=rng_key,
+        previous_cfg=to_chart(robot, previous_cfg, ref), solver=solver, num_seeds=num_seeds,
+        continuity_weight=continuity_weight, fixed_joint_mask=fixed_joint_mask,
+        constraints=tuple(wrapped), constraint_args=args, constraint_weights=constraint_weights,
+        use_cuda=use_cuda, **solver_kwargs)
+    return from_chart(robot, q, ref)
+
+
+def _solve_analytic(robot, target_link_name, target_pose, previous_cfg, solver_kwargs):
+    """Closed-form 7-DOF arm IK (the first seven actuated joints; the rest ride along from
+    ``previous_cfg``). A floating base stays where ``previous_cfg`` puts it and the arm is
+    solved for the target expressed in the base frame: exact whenever the base is given."""
+    from .._floating_base import fixed_tree
+    from ._analytic_ik import analytic_ik_solve
+
+    if not isinstance(target_link_name, str):
+        raise ValueError("solver='analytic' takes a single target link.")
+    if previous_cfg is None:
+        previous_cfg = robot.default_cfg
+    base = None
+    if robot.floating_base:
+        base, previous_cfg = previous_cfg[:7], previous_cfg[7:]
+        target_pose = jaxlie.SE3(base).inverse() @ target_pose
+        robot = fixed_tree(robot)
+    q7, _ = analytic_ik_solve(robot, target_link_name, target_pose,
+                              previous_cfg=previous_cfg, **solver_kwargs)
+    q = jnp.asarray(previous_cfg).at[:7].set(q7)
+    return q if base is None else jnp.concatenate([base, q])
+
+
 def inverse_kinematics(
     robot: Robot,
     target_link_name: str | Sequence[str],
@@ -85,6 +150,7 @@ def inverse_kinematics(
     constraint_args: Sequence = (),
     constraint_weights=None,
     use_cuda: bool = False,
+    base_region=None,
     **solver_kwargs,
 ) -> Float[Array, "n_actuated_joints"]:
     """Solve inverse kinematics, dispatching over solver and backend.
@@ -120,15 +186,18 @@ def inverse_kinematics(
     """
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
+    if solver == "analytic":
+        return _solve_analytic(robot, target_link_name, target_pose, previous_cfg, solver_kwargs)
     if robot.floating_base:
-        # ponytail: only the JAX LS solver works in the floating base's tangent space so far;
-        # the others assume a joint-only configuration.
-        if solver != "ls" or use_cuda:
-            raise NotImplementedError(
-                "Floating-base IK is supported by solver='ls' with use_cuda=False; "
-                f"got solver={solver!r}, use_cuda={use_cuda}.")
         if previous_cfg is None:
             previous_cfg = robot.default_cfg
+        if solver != "ls" or use_cuda or base_region is not None:
+            # Every other solver runs on the fixed-base chart centred on the warm start's
+            # base (JAX LS works in the base's tangent space directly).
+            return _solve_on_chart(
+                robot, target_link_name, target_pose, rng_key, previous_cfg, solver,
+                num_seeds, continuity_weight, fixed_joint_mask, constraints, constraint_args,
+                constraint_weights, use_cuda, base_region, solver_kwargs)
     if previous_cfg is None:
         previous_cfg = (robot.joints.lower_limits + robot.joints.upper_limits) / 2
 

@@ -252,8 +252,6 @@ def prepare_sco_trajopt_cuda(
             "sco_trajopt_cuda requires a RobotCollisionSpherized collision model. "
             f"Got: {type(robot_coll).__name__}"
         )
-    if robot.floating_base:
-        raise NotImplementedError("sco_trajopt_cuda does not support a floating base yet.")
     _load_and_register()
 
     # coll.pose.translation() → (N, S, 3) sphere centres in link frame; needs a

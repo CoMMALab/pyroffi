@@ -46,6 +46,12 @@ constexpr int kNq = grid::NUM_JOINTS;
 // Per-device robot model cache (mirrors the FK kernel's ModelCache pattern).
 // ---------------------------------------------------------------------------
 
+template <typename Kernel>
+void AllowSmem(Kernel kernel, size_t bytes) {
+  if (bytes > 48 * 1024)
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)bytes);
+}
+
 grid::robotModel<T>* GetRobotModel() {
   static std::mutex mu;
   static std::unordered_map<int, grid::robotModel<T>*> models;
@@ -69,6 +75,11 @@ grid::robotModel<T>* GetRobotModel() {
                        grid::INVERSE_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>());
   cudaFuncSetAttribute(fd_du_kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        grid::FORWARD_DYNAMICS_GRADIENT_DYNAMIC_SHARED_MEM_BYTES<T>());
+  // A free-flyer's arenas can pass the default 48 KB too; opt every kernel in.
+  AllowSmem(&grid::forward_dynamics_kernel<T>,
+            grid::FORWARD_DYNAMICS_DYNAMIC_SHARED_MEM_BYTES<T>());
+  AllowSmem(&grid::minv_kernel<T>, grid::MINV_DYNAMIC_SHARED_MEM_BYTES<T>());
+  AllowSmem(&grid::crba_kernel<T>, grid::CRBA_DYNAMIC_SHARED_MEM_BYTES<T>());
   models[device] = model;
   return model;
 }
@@ -351,6 +362,13 @@ ffi::Error GridIdsvaSoImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
   const int64_t n = q.dimensions()[1];
   if (auto err = CheckDims(batch, n, q.element_count()); err.failure())
     return err;
+#ifdef PYROFFI_GRID_FLOATING_BASE
+  // GRiD emits no body-frame idsva_so for a free-flyer; the Python side refuses second
+  // derivatives through a floating base before reaching here.
+  (void)stream; (void)scratch; (void)gravity; (void)qd; (void)qdd; (void)out;
+  return ffi::Error(ffi::ErrorCode::kUnimplemented,
+                    "idsva_so: no body-frame second-order kernel for a floating base");
+#else
   grid::robotModel<T>* model = GetRobotModel();
 
   ScratchBuffer q_qd_qdd(scratch, 3 * kNq * batch);
@@ -366,6 +384,7 @@ ffi::Error GridIdsvaSoImpl(cudaStream_t stream, ffi::ScratchAllocator scratch,
           out->typed_data(), ws.ptr, q_qd_qdd.ptr, 3 * kNq, model, gravity,
           batch);
   return CudaCheck(cudaGetLastError(), "idsva_so_body_frame_kernel");
+#endif
 }
 
 }  // namespace

@@ -145,16 +145,12 @@ class GRiDDynamics:
         ``GRiDDynamics(robot.urdf, ...)``; the robot must have been created via
         :meth:`Robot.from_urdf` so its source URDF is available.
         """
-        if getattr(robot, "floating_base", False):
-            # robot.urdf is the tree below the floating base; GRiD would model it as fixed.
-            raise NotImplementedError(
-                "GRiDDynamics does not model a floating base yet; use pyroffi.dynamics "
-                "(JAX), which does.")
         return cls(
             robot.urdf,
             gravity=gravity,
             arch=arch,
             runtime_inertia=runtime_inertia,
+            floating_base=robot.floating_base,
         )
 
     def __init__(
@@ -163,9 +159,22 @@ class GRiDDynamics:
         gravity: float = _DEFAULT_GRAVITY,
         arch: str | None = None,
         runtime_inertia: bool = False,
+        floating_base: bool = False,
     ):
-        self._grid_model = build_grid_robot(urdf)
-        self.num_dof = self._grid_model.num_pos
+        """``floating_base`` models ``urdf``'s root link as free in SE(3) (GRiD's free-flyer),
+        taking pyroffi's floating layout: ``q = [base wxyz_xyz | joints]``, velocity-like
+        vectors ``[base twist [omega; v] | joints]`` (see :mod:`pyroffi._floating_base`)."""
+        if floating_base and runtime_inertia:
+            # ponytail: the runtime inertia table is laid out per joint; the free-flyer's base
+            # body row needs its own mapping. Bake the inertia (or use the JAX backend) for now.
+            raise NotImplementedError(
+                "GRiDDynamics: runtime_inertia is not wired for a floating base yet.")
+        self._grid_model = build_grid_robot(urdf, floating_base=floating_base)
+        self.floating_base = bool(floating_base)
+        n_joints = len(self._grid_model.joint_perm)
+        self.num_dof = n_joints + (6 if floating_base else 0)  # tangent (velocity) size
+        self.nq = n_joints + (7 if floating_base else 0)
+        self._nq_grid = self._grid_model.num_pos
         # Sign convention: pyroffi's ``gravity`` is the signed z-component
         # (-9.81), and the A2R-Lab GRiD kernels seed the base acceleration as
         # ``-X * gravity``, i.e. they take that same signed value. (The older
@@ -218,9 +227,14 @@ class GRiDDynamics:
             lambda q, qd, u: self._grad_raw("fd_grad", q, qd, u)
         )
 
-        # q_grid[g] = sign[g] * q_act[perm[g]]  (see GridRobotModel).
+        # q_grid[g] = sign[g] * q_act[perm[g]]  (see GridRobotModel). ``perm`` indexes the
+        # tangent: a floating base's GRiD [v_lin, omega] are pyroffi's [omega; v] swapped.
         perm = onp.asarray(self._grid_model.joint_perm)
         signs = onp.asarray(self._grid_model.axis_signs, dtype=onp.float32)
+        self._joint_perm = jnp.asarray(perm)
+        if floating_base:
+            perm = onp.concatenate([[3, 4, 5, 0, 1, 2], perm + 6])
+            signs = onp.concatenate([onp.ones(6, onp.float32), signs])
         inv_perm = onp.empty_like(perm)
         inv_perm[perm] = onp.arange(len(perm))
         self._perm = jnp.asarray(perm)
@@ -231,7 +245,7 @@ class GRiDDynamics:
         # Pure-JAX dynamics info for the custom_vjp fallback pieces
         # (mass-matrix product in the ID backward pass).
         try:
-            self._dyn_info = RobotURDFParser.parse_dynamics(urdf)
+            self._dyn_info = RobotURDFParser.parse_dynamics(urdf, floating_base=floating_base)
         except NotImplementedError:
             self._dyn_info = None
 
@@ -239,7 +253,8 @@ class GRiDDynamics:
         # viscous damping terms around the kernels here so results match the
         # pure-JAX implementation: tau += d*qd, and FD runs on u - d*qd.
         self._damping = jnp.asarray(
-            [
+            [0.0] * (6 if floating_base else 0)
+            + [
                 float(j.dynamics.damping)
                 if j.dynamics is not None and j.dynamics.damping is not None
                 else 0.0
@@ -267,15 +282,50 @@ class GRiDDynamics:
         M = M[..., self._inv_perm, :][..., :, self._inv_perm]
         return M * (self._signs_act[:, None] * self._signs_act[None, :])
 
-    def _flatten(self, *arrays: Array) -> tuple[tuple[int, ...], list[Array]]:
-        n = self.num_dof
-        batch_axes = arrays[0].shape[:-1]
-        for a in arrays:
+    def _q_to_grid(self, q: Array) -> Array:
+        if not self.floating_base:
+            return self._to_grid(q)
+        # pyroffi [w x y z, xyz | joints] -> GRiD (pinocchio) [xyz, x y z w | joints].
+        return jnp.concatenate([q[..., 4:7], q[..., 1:4], q[..., 0:1],
+                                q[..., 7:][..., self._joint_perm]], axis=-1)
+
+    def _flatten(self, q: Array, *tangents: Array) -> tuple[tuple[int, ...], list[Array]]:
+        """``q`` and tangent-space vectors in GRiD's layout, each ``(batch, NUM_POS)``: GRiD's
+        ABI passes velocity-like inputs at configuration width, a floating base's ``nv``
+        values leading and zero padding after."""
+        n, nqg = self.num_dof, self._nq_grid
+        batch_axes = q.shape[:-1]
+        assert q.shape == (*batch_axes, self.nq), (q.shape, batch_axes, self.nq)
+        for a in tangents:
             assert a.shape == (*batch_axes, n), (a.shape, batch_axes, n)
         batch = int(onp.prod(batch_axes)) if batch_axes else 1
-        return batch_axes, [
-            self._to_grid(a).reshape(batch, n).astype(jnp.float32) for a in arrays
+        pad = [(0, 0)] * len(batch_axes) + [(0, nqg - n)]
+        return batch_axes, [self._q_to_grid(q).reshape(batch, nqg).astype(jnp.float32)] + [
+            jnp.pad(self._to_grid(a), pad).reshape(batch, nqg).astype(jnp.float32)
+            for a in tangents
         ]
+
+    def _q_tangent(self, q: Array, t_q: Array) -> Array:
+        """A tangent of ``q`` (the 7 + n ambient coordinates of a floating base) as the
+        tangent-space vector the gradient kernels differentiate against."""
+        if not self.floating_base:
+            return t_q
+        import jaxlie
+
+        def local(c):  # log(T(q)^-1 T(c)) as [omega; v], then the joints
+            tw = (jaxlie.SE3(q[..., :7]).inverse() @ jaxlie.SE3(c[..., :7])).log()
+            return jnp.concatenate([tw[..., 3:], tw[..., :3], c[..., 7:]], axis=-1)
+
+        return jax.jvp(local, (q,), (t_q,))[1]
+
+    def _require_fixed_base_second_order(self):
+        if self.floating_base:
+            # ponytail: GRiD's idsva_so tensors are w.r.t. local coordinates; on SE(3) the
+            # second derivative also needs the exp-map's curvature term. Until that is
+            # composed, refuse rather than return a plausible wrong Hessian.
+            raise NotImplementedError(
+                "GRiDDynamics: second derivatives through a floating base are not supported; "
+                "first-order gradients are.")
 
     def _call(self, op: str, out_shape: tuple[int, ...], *operands, **attrs):
         # The raw FFI primitive is not vmap-aware; ``jax.vmap`` support is
@@ -295,13 +345,13 @@ class GRiDDynamics:
         batch_axes, (qf, qdf, qddf) = self._flatten(q, qd, qdd)
         c = self._call(
             "id",
-            (qf.shape[0], self.num_dof),
+            (qf.shape[0], self._nq_grid),  # nv live values at configuration stride
             qf,
             qdf,
             qddf,
             gravity=onp.float32(self.gravity),
         )
-        c = self._from_grid(c).reshape(*batch_axes, self.num_dof)
+        c = self._from_grid(c[:, : self.num_dof]).reshape(*batch_axes, self.num_dof)
         return c + self._damping * qd
 
     def _fd_raw(self, q: Array, qd: Array, u: Array) -> Array:
@@ -309,13 +359,13 @@ class GRiDDynamics:
         batch_axes, (qf, qdf, uf) = self._flatten(q, qd, u)
         qdd = self._call(
             "fd",
-            (qf.shape[0], self.num_dof),
+            (qf.shape[0], self._nq_grid),  # nv live values at configuration stride
             qf,
             qdf,
             uf,
             gravity=onp.float32(self.gravity),
         )
-        return self._from_grid(qdd).reshape(*batch_axes, self.num_dof)
+        return self._from_grid(qdd[:, : self.num_dof]).reshape(*batch_axes, self.num_dof)
 
     def _minv_raw(self, q: Array) -> Array:
         n = self.num_dof
@@ -597,6 +647,14 @@ class GRiDDynamics:
         GRiD custom_vjp rules. See :func:`pyroffi.dynamics.step_with_fd` for
         the ``substeps`` divergence caveat and stabilization tradeoff.
         """
+        extra = {}
+        if self.floating_base:
+            from types import SimpleNamespace
+
+            from .._floating_base import integrate
+
+            fb = SimpleNamespace(floating_base=True)
+            extra["retract"] = lambda q_, v_, h: integrate(fb, q_, v_, h)
         return step_with_fd(
             lambda q_, qd_: self.forward_dynamics(q_, qd_, u, f_ext),
             q,
@@ -604,6 +662,7 @@ class GRiDDynamics:
             dt,
             method,
             substeps,
+            **extra,
         )
 
     def inverse_dynamics_gradient(
@@ -669,6 +728,8 @@ def _id_jvp(gd, primals, tangents):
     out = _id_differentiable(gd, q, qd, qdd)
     n = gd.num_dof
     tan = jnp.zeros_like(out)
+    if _nz(t_q):
+        t_q = gd._q_tangent(q, t_q)
     if _nz(t_q) or _nz(t_qd):
         G = gd._idgrad_call(q, qd, qdd)  # (*b, n, 2n) = [d tau/d q | d tau/d qd]
         if _nz(t_q):
@@ -716,6 +777,7 @@ def _idgrad_jvp(gd, primals, tangents):
     q, qd, qdd = primals
     t_q, t_qd, t_qdd = tangents
     G = _idgrad_differentiable(gd, q, qd, qdd)
+    gd._require_fixed_base_second_order()
     n = gd.num_dof
     tan_q = jnp.zeros_like(G[..., :n])
     tan_qd = jnp.zeros_like(G[..., n:])
@@ -748,6 +810,7 @@ def _crba_jvp(gd, primals, tangents):
     M = _crba_differentiable(gd, q)
     tan = jnp.zeros_like(M)
     if _nz(t_q):
+        gd._require_fixed_base_second_order()
         zeros = jnp.zeros_like(q)
         _, _, _, dM_dq = gd._idsva_so_raw_b(q, zeros, zeros)
         # dM_dq[i,j,k] = d M_ij / dq_k -- M(q) does not depend on qd/qdd, so
@@ -770,6 +833,8 @@ def _fd_jvp(gd, primals, tangents):
     out = gd._fd_raw_b(q, qd, u)
     n = gd.num_dof
     tan = jnp.zeros_like(out)
+    if _nz(t_q):
+        t_q = gd._q_tangent(q, t_q)
     if _nz(t_q) or _nz(t_qd):
         # Gradient kernel at the effective (damping-compensated) torque, matching
         # _fd_raw's forward pass. G = [d qdd/d q | d qdd/d qd] holding u_eff fixed.

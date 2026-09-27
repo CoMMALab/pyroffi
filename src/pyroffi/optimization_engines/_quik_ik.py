@@ -135,6 +135,9 @@ class QuIKSolver:
         validate: bool = True,
         tol: float = 1e-4,
     ) -> None:
+        from .._floating_base import fixed_tree
+
+        robot = fixed_tree(robot)  # a floating robot's chain, in its base frame
         self.robot = robot
         self.ee_link_name = ee_link_name
         self.model = _dh_for(robot, ee_link_name, validate=validate, tol=tol)

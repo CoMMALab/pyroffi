@@ -28,7 +28,7 @@ from .._splines import (
 from ..collision import RobotCollision
 from ..optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
 from ..optimization_engines._stomp_optimization import StompTrajOptConfig, stomp_trajopt
-from ._trajopt import IKSeedConfig
+from ._trajopt import IKSeedConfig, generate_on_chart
 
 
 @dataclass
@@ -192,6 +192,8 @@ class StompMotionGenerator:
             trajopt_time:  Wall-clock time for the STOMP trajopt step (seconds).
             ik_time:       Wall-clock time for the IK seeding step (seconds).
         """
+        if self.robot.floating_base:
+            return generate_on_chart(self, start_pose, goal_pose, key, waypoint_poses, prev_cfgs)
         start_wxyz_xyz = start_pose.wxyz_xyz[None]
         goal_wxyz_xyz  = goal_pose.wxyz_xyz[None]
 

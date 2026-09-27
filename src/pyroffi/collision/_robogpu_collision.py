@@ -328,6 +328,10 @@ class RoboGPUCollisionChecker:
                 (``[Mp, 3]`` float32).  Pass ``None`` to use the cached cloud.
             r_env: Override the env sphere radius for this call.
         """
+        if robot.floating_base:  # run on the evaluation chart (pyroffi._floating_base)
+            from .._floating_base import eval_chart, to_eval_chart
+
+            cfg, robot = to_eval_chart(robot, jnp.asarray(cfg)), eval_chart(robot)
         cfg = jnp.asarray(cfg, dtype=jnp.float32)
         batch_axes = cfg.shape[:-1]
         n_act = cfg.shape[-1]
@@ -361,6 +365,10 @@ class RoboGPUCollisionChecker:
             edges = a[:, None, :] * (1 - ts)[None, :, None] + b[:, None, :] * ts[None, :, None]
             free = checker.check_edges_collision_free(robot, edges, world)
         """
+        if robot.floating_base:  # run on the evaluation chart (pyroffi._floating_base)
+            from .._floating_base import eval_chart, to_eval_chart
+
+            edge_cfgs, robot = to_eval_chart(robot, jnp.asarray(edge_cfgs)), eval_chart(robot)
         cfg = jnp.asarray(edge_cfgs, dtype=jnp.float32)
         *edge_axes, G, n_act = cfg.shape
         E = int(np.prod(edge_axes)) if edge_axes else 1

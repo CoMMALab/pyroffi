@@ -73,5 +73,7 @@ def compile_grid_library(
         # Gates the set_inertia_params entry point in the TU; the generated
         # header only declares it under the same codegen flag.
         flags.append("-DPYROFFI_GRID_RUNTIME_INERTIA")
+    if grid_model.floating_base:
+        flags.append("-DPYROFFI_GRID_FLOATING_BASE")
     grid_cuh = generate_grid_cuh(grid_model, runtime_inertia=runtime_inertia)
     return build_shared_library("grid_ffi", _TU_PATH, {"grid.cuh": grid_cuh}, flags)

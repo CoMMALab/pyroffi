@@ -1423,6 +1423,10 @@ class CUDABinaryCollisionChecker:
         per-config early exit.  Output shape is ``cfg.shape[:-1]`` (the batch
         axes); a single un-batched config returns a scalar boolean array.
         """
+        if robot.floating_base:  # run on the evaluation chart (pyroffi._floating_base)
+            from .._floating_base import eval_chart, to_eval_chart
+
+            cfg, robot = to_eval_chart(robot, jnp.asarray(cfg)), eval_chart(robot)
         self._ensure_world_cache(world_geom)
         self._ensure_jit(robot)
 
@@ -1540,6 +1544,13 @@ class FusedCUDACollisionChecker:
 
         self._robot = robot
         self._model = model
+        # A floating robot runs on its evaluation chart (see pyroffi._floating_base): exact
+        # poses, and base-twist gradients from the kernels' own Jacobians.
+        if robot.floating_base:
+            from .._floating_base import eval_chart
+
+            robot = eval_chart(robot)
+        self._kernel_robot = robot
         self._static = static_arrays(robot, model)
         # traced=True: kernels compiled with this model's sphere and pair tables baked in, the
         # self kernel against cricket-traced FK and the world kernel against the scene's
@@ -1583,7 +1594,7 @@ class FusedCUDACollisionChecker:
 
         from ..cuda_kernels._traced import collision_tables_source
 
-        j = self._robot.joints
+        j = self._kernel_robot.joints
         src = collision_tables_source(
             np.zeros((0, 4)), np.zeros(0), [np.asarray(t) for t in self._static], world_counts)
         if esdf is not None:
@@ -1591,8 +1602,8 @@ class FusedCUDACollisionChecker:
             src += ("#define PYROFFI_TRACED_ESDF\nnamespace pyroffi::traced {\n"
                     f"constexpr int esdf_nx = {nx}, esdf_ny = {ny}, esdf_nz = {nz};\n"
                     f"constexpr float esdf_voxel = {float(np.float32(voxel)):.9e}f;\n}}\n")
-        targets = self._robot._backends.traced_target(
-            "fused_collision", 0, self._robot.links.names, j.actuated_names, j.names, src, True)
+        targets = self._kernel_robot._backends.traced_target(
+            "fused_collision", 0, self._kernel_robot.links.names, j.actuated_names, j.names, src, True)
         self._traced_cache[key] = targets
         return targets
 
@@ -1639,27 +1650,21 @@ class FusedCUDACollisionChecker:
         cfg = jnp.asarray(cfg)
         return (cfg[None, :], True) if cfg.ndim == 1 else (cfg, False)
 
-    def compute_self_collision_distance(self, robot: "Robot", cfg):
-        """``[*batch, P]`` signed distances over active self-collision pairs.
+    def _kernel_cfg(self, cfg):
+        """``cfg`` as the kernels take it: the evaluation-chart configuration when floating."""
+        cfg = jnp.asarray(cfg)
+        if not self._robot.floating_base:
+            return cfg
+        from .._floating_base import to_eval_chart
 
-        Self-collision does not depend on a floating base's pose, so only the joints go to
-        the kernel.
-        """
-        if self._robot.floating_base:
-            cfg = jnp.asarray(cfg)[..., 7:]
-        cfg, squeeze = self._as_batched(cfg)
+        return to_eval_chart(self._robot, cfg)
+
+    def compute_self_collision_distance(self, robot: "Robot", cfg):
+        """``[*batch, P]`` signed distances over active self-collision pairs."""
+        cfg, squeeze = self._as_batched(self._kernel_cfg(cfg))
         out = self._model._mask_inactive_pairs(
             self._self_fn(cfg)[0], self._model.active_idx_i, self._model.active_idx_j)
         return out[0] if squeeze else out
-
-    def _require_fixed_base(self, what: str):
-        # ponytail: the fused kernels compute FK from the joints alone; world and floor
-        # queries of a floating robot need the base pose in-kernel. Until then, callers
-        # take the JAX path (RobotCollisionSpherized), which composes the base.
-        if self._robot.floating_base:
-            raise NotImplementedError(
-                f"FusedCUDACollisionChecker: {what} for a floating-base robot is not "
-                "supported yet; use RobotCollisionSpherized's JAX path.")
 
     def compute_self_collision_and_floor(self, robot: "Robot", cfg):
         """``([*batch, P], [*batch])`` — pair distances and lowest sphere point.
@@ -1671,8 +1676,7 @@ class FusedCUDACollisionChecker:
         spheres: that second FK measured 3.47 ms against this kernel's 1.93 ms
         at B=61440, i.e. it more than doubled the cost of the check.
         """
-        self._require_fixed_base("floor clearance")
-        cfg, squeeze = self._as_batched(cfg)
+        cfg, squeeze = self._as_batched(self._kernel_cfg(cfg))
         out, min_z = self._self_fn(cfg)
         out = self._model._mask_inactive_pairs(
             out, self._model.active_idx_i, self._model.active_idx_j)
@@ -1690,8 +1694,8 @@ class FusedCUDACollisionChecker:
             fused_world_collision)
         from ..kinematics._analytic_collision import world_geometry
 
-        self._require_fixed_base("world collision")
-        cfg, squeeze = self._as_batched(cfg)
+        user_cfg = cfg
+        cfg, squeeze = self._as_batched(self._kernel_cfg(cfg))
         if isinstance(world_geom, ESDFWorldGeom):
             out = self._esdf_world_distance(cfg, world_geom)[..., None]  # M = 1: one dense field
             return out[0] if squeeze else out
@@ -1700,9 +1704,10 @@ class FusedCUDACollisionChecker:
         with jax.ensure_compile_time_eval():
             w = world_geometry(world_geom)
         if len(w.capsules) or len(w.boxes) or len(w.halfspaces):
+            user_cfg, _ = self._as_batched(jnp.asarray(user_cfg))
             out = jax.vmap(
                 lambda q: self._model.compute_world_collision_distance(
-                    robot, q, world_geom))(cfg)
+                    robot, q, world_geom))(user_cfg)
             return out[0] if squeeze else out
 
         from ..cuda_kernels.collision._fused_self_collision_ffi import fused_world_collision_jac
