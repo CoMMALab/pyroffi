@@ -133,6 +133,11 @@ from ._contact_rich_trajopt import (
 from ._contact_rich_trajopt import contact_rich_trajopt as contact_rich_trajopt
 from ._dynamics_trajopt import DynamicsTrajOptConfig as DynamicsTrajOptConfig
 from ._dynamics_trajopt import dynamics_trajopt as dynamics_trajopt
+from ._dynamics_trajopt import (
+    DynamicsAwareTrajOptConfig as DynamicsAwareTrajOptConfig,
+)
+from ._dynamics_trajopt import dynamics_aware_trajopt as dynamics_aware_trajopt
+from ._dynamics_trajopt import effort_limits as effort_limits
 from ._chomp_optimization import ChompTrajOptConfig as ChompTrajOptConfig
 from ._chomp_optimization import chomp_trajopt as chomp_trajopt
 from ._stomp_optimization import StompTrajOptConfig as StompTrajOptConfig

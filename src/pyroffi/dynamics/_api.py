@@ -26,7 +26,7 @@ def _require_dynamics(robot: Robot) -> DynamicsInfo:
     if robot.dynamics is None:
         raise ValueError(
             "Robot has no dynamics information. The URDF must provide "
-            "<inertial> data (and no mimic joints) for dynamics; see "
+            "<inertial> data for dynamics; see "
             "RobotURDFParser.parse_dynamics."
         )
     return robot.dynamics

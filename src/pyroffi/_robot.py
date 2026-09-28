@@ -33,7 +33,7 @@ class Robot:
 
     dynamics: DynamicsInfo | None = None
     """Rigid body dynamics information (None when the URDF lacks inertials
-    or contains unsupported features such as mimic joints)."""
+    or contains unsupported joint types)."""
 
     _backends: jdc.Static[CudaBackends | None] = None
     """Lazy holder for URDF-dependent CUDA backends (collision, GRiD dynamics).

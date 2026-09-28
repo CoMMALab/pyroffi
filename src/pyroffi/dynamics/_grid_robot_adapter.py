@@ -30,6 +30,7 @@ import numpy as onp
 import yourdfpy
 from scipy.spatial.transform import Rotation
 
+from .._robot_urdf_parser import _mimic_locked_origin
 from ._grid_urdf import (
     Joint as GRiDJoint,
     Link as GRiDLink,
@@ -88,11 +89,6 @@ def _unit_axis(axis: onp.ndarray, joint_name: str) -> list[float]:
 def build_grid_robot(urdf: yourdfpy.URDF, floating_base: bool = False) -> GridRobotModel:
     """Build a GRiD Robot from a yourdfpy URDF (see module docstring). ``floating_base`` hangs
     the URDF's root link off GRiD's free-flyer joint."""
-    if any(j.mimic is not None for j in urdf.joint_map.values()):
-        raise NotImplementedError(
-            "GRiD dynamics does not support URDFs with mimic joints."
-        )
-
     robot = GRiDRobot(urdf.robot.name if urdf.robot is not None else "robot",
                       floating_base=floating_base)
 
@@ -133,10 +129,13 @@ def build_grid_robot(urdf: yourdfpy.URDF, floating_base: bool = False) -> GridRo
     for jid, joint in enumerate(urdf.joint_map.values()):
         grid_joint = GRiDJoint(joint.name, jid, joint.parent, joint.child)
         T = joint.origin if joint.origin is not None else onp.eye(4)
+        jtype = joint.type
+        if joint.mimic is not None:
+            # Held rigid exactly as the JAX dynamics does, so both backends agree.
+            T, jtype = _mimic_locked_origin(urdf, joint), "fixed"
         grid_joint.set_origin_xyz([float(v) for v in T[:3, 3]])
         grid_joint.set_origin_rpy(_rpy_from_matrix(T[:3, :3]))
 
-        jtype = joint.type
         if jtype == "continuous":
             jtype = "revolute"
         if jtype in ("revolute", "prismatic"):

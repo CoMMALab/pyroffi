@@ -24,9 +24,14 @@ Opt-in, all defaulting to preserve exact current behavior, it also exposes:
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 from dataclasses import dataclass
 from typing import Callable
 
+import jax
+import jax.numpy as jnp
+import numpy as onp
 from jax import Array
 from jaxtyping import Float
 
@@ -274,3 +279,237 @@ def _build_constraints(x0, opt_cfg) -> tuple:
             ),
         )
     return constraints
+
+
+# ---------------------------------------------------------------------------
+# Batched, collision-aware, dynamically feasible trajopt (the motion-generator
+# default). Same call signature as sco_trajopt / chomp_trajopt / stomp_trajopt.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DynamicsAwareTrajOptConfig:
+    """Hyper-parameters for :func:`dynamics_aware_trajopt`."""
+
+    dt: float = 0.1
+    """Seconds between waypoints; sets the velocities/accelerations the
+    velocity and torque limits see. ``n_timesteps * dt`` is the duration."""
+
+    tau_max: tuple = ()
+    """Per-joint torque limits (N·m / N). Empty ⇒ the URDF ``<limit effort>``
+    of each actuated joint (joints without one are unlimited)."""
+
+    w_vel: float = 1.0
+    w_acc: float = 0.5
+    w_jerk: float = 0.1
+    """Smoothness weights (same finite differences as :class:`ScoTrajOptConfig`)."""
+
+    collision_margin: float = 0.01
+    """Required clearance (m) for every robot link/pair along the path."""
+
+    limit_backoff: float = 0.01
+    """The AL loop converges onto active limits from outside (PyRoki wall scene:
+    velocity at 1.0001-1.001x, joint limits 5-10 mrad over). Velocity and torque
+    are enforced at ``1 - limit_backoff`` of their limits and joint limits
+    ``limit_backoff`` rad inside."""
+
+    collision_substeps: int = 4
+    """Collision is enforced at each waypoint and ``collision_substeps - 1``
+    joint-space interpolants per segment, so the path cannot tunnel through an
+    obstacle between waypoints."""
+
+    w_collision: float = 1.0
+    w_collision_max: float = 100.0
+    penalty_scale: float = 3.0
+    """Collision AL penalty: initial, maximum, and growth per outer iteration."""
+
+    path_stage: bool = True
+    """Stage 1: solve collision + joint limits alone under a strongly weighted
+    smoothness cost, then stage 2 adds velocity and torque limits from that
+    path. Solved jointly from a straight line through an obstacle, the
+    velocity limit pins the trajectory near the seed and it never clears the
+    obstacle (PyRoki wall scene, dt=0.02: 0/3 collision-free jointly, 3/3
+    fully feasible staged)."""
+
+    path_smooth_scale: float = 100.0
+    """Smoothness weight multiplier in stage 1. A weakly smoothed stage-1 path
+    is a jerky detour that stage 2 cannot retime within the velocity limit
+    (scale 1: 15-18x the velocity limit after stage 1; 100: 5-7x, then 1.0x)."""
+
+    solver: DynamicsTrajOptConfig = DynamicsTrajOptConfig(
+        n_iters=15, use_sco=True, n_outer_iters=20, adaptive_trust=True, tr_coef0=0.5
+    )
+    """Tier-1 solver settings. ``constraints`` / ``robot`` / ``grid`` in it are
+    ignored: the constraint terms are supplied here. The adaptive trust region
+    keeps the linearized steps local; without it the solve takes rad-scale jumps."""
+
+
+def effort_limits(robot) -> Float[Array, "n_act"]:
+    """Per-actuated-joint URDF effort limits; ``inf`` where the URDF gives none."""
+    joint_map = robot.urdf.joint_map
+    lim = []
+    for name in robot.joints.actuated_names:
+        limit = joint_map[name].limit
+        effort = None if limit is None else limit.effort
+        lim.append(float(effort) if effort else onp.inf)
+    return jnp.asarray(lim)
+
+
+@functools.partial(jax.jit, static_argnames=("n_probe",))
+def _changing_collision_terms(robot, robot_coll, world_geoms, n_probe: int = 4):
+    """Masks of the self pairs / per-link world entries whose distance changes
+    with the configuration. Fixed links (a base below a table) and rigidly
+    attached pairs are constant: they can never be satisfied or improved, and
+    as AL terms they only inflate penalties and duals."""
+    lo = jnp.where(jnp.isfinite(robot.joints.lower_limits), robot.joints.lower_limits, -jnp.pi)
+    hi = jnp.where(jnp.isfinite(robot.joints.upper_limits), robot.joints.upper_limits, jnp.pi)
+    qs = jax.random.uniform(jax.random.PRNGKey(0), (n_probe, lo.shape[0]), minval=lo, maxval=hi)
+    d_self = robot_coll.compute_self_collision_distance(robot, qs)
+    self_mask = jnp.any(jnp.abs(d_self - d_self[:1]) > 1e-6, axis=0)
+    world_masks = []
+    for wg in world_geoms:
+        d = robot_coll.compute_world_collision_distance(robot, qs, wg)  # (n_probe, N, M)
+        world_masks.append(jnp.any(jnp.abs(d - d[:1]) > 1e-6, axis=0))
+    return self_mask, tuple(world_masks)
+
+
+@functools.partial(jax.jit, static_argnames=("opt_cfg", "use_cuda"))
+def _dynamics_aware_trajopt_jax(
+    init_trajs, start, goal, robot, robot_coll, world_geoms, tau_max, masks, opt_cfg,
+    use_cuda,
+):
+    from ._contact_trajopt import _fd_vel_acc
+    from ._sco_optimization import _smoothness_cost
+
+    T, dof = init_trajs.shape[1:]
+    lower, upper = robot.joints.lower_limits, robot.joints.upper_limits
+    vel_max = robot.joints.velocity_limits
+    self_mask, world_masks = masks
+    cfg = opt_cfg
+    K = cfg.collision_substeps
+
+    # Endpoints are pinned by construction: only interior waypoints are decision
+    # variables, so every term still sees the start/goal transitions.
+    def full(x):
+        return jnp.concatenate([start[None], x.reshape(T - 2, dof), goal[None]])
+
+    def cost_fn(x):
+        return _smoothness_cost(full(x), cfg.w_vel, cfg.w_acc, cfg.w_jerk)
+
+    def path_points(t):
+        a = (jnp.arange(K, dtype=t.dtype) / K)[:, None, None]
+        return ((1 - a) * t[None, :-1] + a * t[None, 1:]).reshape(-1, dof)
+
+    # Every robot link / self pair separately, not a smooth-min per group: a
+    # reduced clearance lets one bad entry hide the rest.
+    def clearance(q):
+        parts = [jnp.where(self_mask, robot_coll.compute_self_collision_distance(robot, q), jnp.inf)]
+        for wg, m in zip(world_geoms, world_masks):
+            d = robot_coll.compute_world_collision_distance(robot, q, wg)
+            parts.append(jnp.where(m, d, jnp.inf).reshape(-1))
+        return jnp.concatenate(parts)
+
+    def collision_residual(x):
+        d = jax.vmap(clearance)(path_points(full(x)))
+        return jnp.where(jnp.isfinite(d), cfg.collision_margin - d, -1.0)
+
+    def limit_residual(x):
+        t = full(x)[1:-1]
+        b = cfg.limit_backoff
+        return jnp.concatenate([t - (upper - b), (lower + b) - t])
+
+    def velocity_residual(x):
+        t = full(x)
+        ok = jnp.isfinite(vel_max) & (vel_max > 0)  # URDFs often leave it 0 / unset
+        v = jnp.abs(t[1:] - t[:-1]) / (cfg.dt * jnp.where(ok, vel_max, 1.0))
+        return jnp.where(ok, v - (1.0 - cfg.limit_backoff), -1.0)
+
+    def torque_residual(x):
+        t = full(x)
+        qd, qdd = _fd_vel_acc(t, cfg.dt)
+        tau = robot.inverse_dynamics(t, qd, qdd, use_cuda=use_cuda)
+        # Dimensionless (fraction over the limit), so the torque term does not
+        # swamp the metre-scale collision term in the shared AL/trust-region loop.
+        return jnp.abs(tau) / tau_max - (1.0 - cfg.limit_backoff)
+
+    ineq = lambda fn, name, rho0=1.0, rho_max=1e3, scale=2.0: AugmentedLagrangianTerm(
+        fn, kind="ineq", rho0=rho0, rho_max=rho_max, penalty_scale=scale, name=name)
+    path_terms = (
+        ineq(collision_residual, "collision", cfg.w_collision, cfg.w_collision_max,
+             cfg.penalty_scale),
+        ineq(limit_residual, "joint_limit"),
+    )
+    terms = path_terms + (
+        ineq(velocity_residual, "velocity_limit"),
+        ineq(torque_residual, "torque_limit"),
+    )
+    solver = dataclasses.replace(cfg.solver, robot=None, grid=None, constraints=terms)
+    path_solver = dataclasses.replace(solver, constraints=path_terms)
+    s = cfg.path_smooth_scale
+    path_cost = lambda x: _smoothness_cost(full(x), s * cfg.w_vel, s * cfg.w_acc, s * cfg.w_jerk)
+
+    def solve_one(traj):
+        x = traj[1:-1].reshape(-1)
+        if cfg.path_stage:
+            x = dynamics_trajopt(x, path_cost, path_solver)
+        return full(dynamics_trajopt(x, cost_fn, solver))
+
+    trajs = init_trajs.at[:, 0].set(start).at[:, -1].set(goal)
+    final_trajs = jax.vmap(solve_one)(trajs)
+
+    # Rank by total constraint violation first, smoothness second.
+    def violation(t):
+        x = t[1:-1].reshape(-1)
+        return sum(jnp.sum(jnp.maximum(term.residual_fn(x), 0.0)) for term in terms)
+
+    viol = jax.vmap(violation)(final_trajs)
+    costs = cfg.w_collision_max * viol + jax.vmap(lambda t: cost_fn(t[1:-1].reshape(-1)))(final_trajs)
+    return final_trajs[jnp.argmin(costs)], costs, final_trajs
+
+
+def dynamics_aware_trajopt(
+    init_trajs: Float[Array, "B T DOF"],
+    start: Float[Array, "DOF"],
+    goal: Float[Array, "DOF"],
+    robot,
+    robot_coll,
+    world_geoms: tuple,
+    opt_cfg: DynamicsAwareTrajOptConfig = DynamicsAwareTrajOptConfig(),
+    *,
+    use_cuda: bool = False,
+) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"]]:
+    """Collision-free, limit-respecting, torque-feasible trajopt (tier 1).
+
+    Each seed is solved by :func:`dynamics_trajopt` as an augmented-Lagrangian
+    SCO loop over a smoothness cost (after a collision-only path stage, see
+    ``path_stage``), with inequality constraints for
+    collision clearance along the interpolated path (``collision_substeps``
+    per segment), joint limits, joint velocity limits, and ``|tau| <= tau_max``
+    (inverse dynamics on central-difference velocities/accelerations at
+    ``opt_cfg.dt``). Collision terms that cannot change with the configuration
+    (fixed links, rigid pairs) are dropped.
+
+    If ``n_timesteps * dt`` is too short for any feasible motion, the
+    least-violating trajectory is returned; ``costs`` ranks violation first.
+
+    Same signature and returns as :func:`sco_trajopt`. ``use_cuda`` selects the
+    GRiD inverse-dynamics kernels; otherwise dynamics run in pure JAX.
+    """
+    if robot.floating_base:
+        raise NotImplementedError(
+            "Dynamics-aware trajopt does not support floating-base robots yet; "
+            "pass a ScoTrajOptConfig, ChompTrajOptConfig or StompTrajOptConfig "
+            "for kinematics-only trajopt."
+        )
+    if robot.dynamics is None:
+        raise ValueError(
+            "This robot has no dynamics model (URDF without inertials or with an "
+            "unsupported joint type), so torque limits cannot be checked. "
+            "Pass a ScoTrajOptConfig, ChompTrajOptConfig or StompTrajOptConfig "
+            "for kinematics-only trajopt."
+        )
+    tau_max = jnp.asarray(opt_cfg.tau_max) if opt_cfg.tau_max else effort_limits(robot)
+    masks = _changing_collision_terms(robot, robot_coll, world_geoms)
+    return _dynamics_aware_trajopt_jax(
+        init_trajs, start, goal, robot, robot_coll, world_geoms, tau_max, masks,
+        opt_cfg, use_cuda,
+    )

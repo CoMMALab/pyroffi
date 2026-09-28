@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import jaxlie
+import numpy as onp
 import trimesh
 import yourdfpy
 from jaxtyping import Array, Bool, Float, Int
@@ -33,6 +34,24 @@ class _AttachmentFieldsMixin:
     def num_robot_links(self) -> int:
         """Geometry entries that are actual robot links (excludes attachments)."""
         return self.num_links - len(self.attach_parent_link_indices)
+
+    def get_link_collision_meshes(self) -> dict[str, trimesh.Trimesh]:
+        """Collision geometry per link as a trimesh, in the link's own frame.
+
+        PyRoki-compatible. Padding spheres and empty links give an empty mesh.
+        """
+        radii = onp.asarray(self.coll.size[..., 0])
+        result: dict[str, trimesh.Trimesh] = {}
+        for i, name in enumerate(self.link_names):
+            # Capsule layout: one primitive per link (N,); sphere layout: (N, S).
+            idxs = [(i,)] if radii.ndim == 1 else [(i, j) for j in range(radii.shape[1])]
+            meshes = [self.coll._create_one_mesh(ix) for ix in idxs if radii[ix] > 0]
+            result[name] = (
+                cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+                if meshes
+                else trimesh.Trimesh()
+            )
+        return result
 
     def with_attachments(self, aset):
         """Return a copy extended with an :class:`~pyroffi.attachments.AttachmentSet`.
@@ -181,6 +200,24 @@ class RobotCollision(_AttachmentFieldsMixin):
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
             coll=capsules,
+        )
+
+    @staticmethod
+    def from_sphere_decomposition(
+        sphere_decomposition: dict[str, dict[str, list]],
+        urdf: yourdfpy.URDF,
+        user_ignore_pairs: tuple[tuple[str, str], ...] = (),
+        ignore_immediate_adjacents: bool = True,
+    ) -> "RobotCollisionSpherized":
+        """PyRoki-compatible entry point; returns a :class:`RobotCollisionSpherized`.
+
+        See :meth:`RobotCollisionSpherized.from_sphere_decomposition`.
+        """
+        return RobotCollisionSpherized.from_sphere_decomposition(
+            sphere_decomposition,
+            urdf,
+            user_ignore_pairs=user_ignore_pairs,
+            ignore_immediate_adjacents=ignore_immediate_adjacents,
         )
 
     @staticmethod
@@ -494,18 +531,13 @@ class RobotCollision(_AttachmentFieldsMixin):
             M = world_axes[-1]
             batch_world_shape = world_axes[:-1]
 
-        # 3. Compute distances: map collide over robot links vs _world_geom (None).
-        # CollGeom batch axes are always LEADING (feature dims trail), and the
-        # number of trailing feature dims varies per leaf (e.g. a Sphere's
-        # `radius` has none, while `pose` has 7), so a single back-relative
-        # axis like -2 does NOT point at the link axis for every leaf. Since
-        # batch axes are leading, the link axis is at the same *front*-relative
-        # position for every leaf: use that instead.
-        link_axis = len(coll_robot_world.get_batch_axes()) - 1
-        _collide_links_vs_world = jax.vmap(
-            collide, in_axes=(link_axis, None), out_axes=(-2)
+        # 3. Compute distances: robot (*batch_cfg, N, 1) vs world (*batch_world, 1, M),
+        # which `collide` broadcasts to (*batch_combined, N, M). Mapping over the
+        # link axis instead lets a cfg batch collide with the world's M axis.
+        dist_matrix = collide(
+            coll_robot_world.reshape((*batch_cfg_shape, N, 1)),
+            _world_geom.reshape((*batch_world_shape, 1, M)),
         )
-        dist_matrix = _collide_links_vs_world(coll_robot_world, _world_geom)
         dist_matrix = self._mask_inactive_world(dist_matrix)
 
         # 4. Result shape check
@@ -653,6 +685,71 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
             ]
             sphere_list_per_link.append(per_link_spheres)
 
+        return RobotCollisionSpherized._from_sphere_lists(
+            urdf,
+            link_name_list,
+            sphere_list_per_link,
+            user_ignore_pairs=user_ignore_pairs,
+            srdf_path=srdf_path,
+            ignore_immediate_adjacents=ignore_immediate_adjacents,
+        )
+
+    @staticmethod
+    def from_sphere_decomposition(
+        sphere_decomposition: dict[str, dict[str, list]],
+        urdf: yourdfpy.URDF,
+        user_ignore_pairs: tuple[tuple[str, str], ...] = (),
+        ignore_immediate_adjacents: bool = True,
+        srdf_path: str | None = None,
+    ) -> "RobotCollisionSpherized":
+        """Build a sphere model from a precomputed decomposition (PyRoki format).
+
+        Args:
+            sphere_decomposition: ``{link_name: {"centers": [[x, y, z], ...],
+                "radii": [r, ...]}}`` in each link's frame. Links not listed get no
+                spheres.
+            urdf: URDF used for link names and adjacency.
+            user_ignore_pairs, ignore_immediate_adjacents, srdf_path: as in
+                :meth:`from_urdf`.
+
+        Distances stay per link (min over the link's spheres), not per sphere
+        as in PyRoki.
+        """
+        for link_name, d in sphere_decomposition.items():
+            assert d.keys() == {"centers", "radii"}, link_name
+            assert len(d["centers"]) == len(d["radii"]), link_name
+            assert all(len(c) == 3 for c in d["centers"]), link_name
+            assert all(r >= 0 for r in d["radii"]), link_name
+
+        _, link_info = RobotURDFParser.parse(urdf)
+        empty = {"centers": [], "radii": []}
+        sphere_list_per_link = [
+            [
+                Sphere.from_center_and_radius(jnp.asarray(c), jnp.asarray(r))
+                for c, r in zip(d["centers"], d["radii"])
+            ]
+            for d in (sphere_decomposition.get(n, empty) for n in link_info.names)
+        ]
+        assert any(sphere_list_per_link), "No spheres found in the provided decomposition."
+
+        return RobotCollisionSpherized._from_sphere_lists(
+            urdf,
+            link_info.names,
+            sphere_list_per_link,
+            user_ignore_pairs=user_ignore_pairs,
+            srdf_path=srdf_path,
+            ignore_immediate_adjacents=ignore_immediate_adjacents,
+        )
+
+    @staticmethod
+    def _from_sphere_lists(
+        urdf: yourdfpy.URDF,
+        link_name_list: tuple[str, ...],
+        sphere_list_per_link: list[list[Sphere]],
+        user_ignore_pairs: tuple[tuple[str, str], ...],
+        srdf_path: str | None,
+        ignore_immediate_adjacents: bool,
+    ) -> "RobotCollisionSpherized":
         # Pad each link's sphere list to max_spheres so we can stack into a
         # uniform [N, S] array. Padding uses a degenerate sphere (radius=-1e9)
         # which colldist_from_sdf will never activate.
@@ -699,13 +796,13 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
             )
 
         logger.info(
-            f"Created RobotCollision with {link_info.num_links} links "
+            f"Created RobotCollision with {len(link_name_list)} links "
             f"and {len(active_idx_i)} active self-collision pairs, "
             f"using spherical collision models."
         )
 
         return RobotCollisionSpherized(
-            num_links=link_info.num_links,
+            num_links=len(link_name_list),
             link_names=link_name_list,
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
