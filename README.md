@@ -35,23 +35,31 @@ import pyroffi as pk  # was: import pyroki as pk
 checked by `tests/test_pyroki_compat.py`. The fast paths are opt-in: pass
 `use_cuda=True`.
 
-PyRoki's jaxls cost layer is available under the same names (`pip install -e .[costs]`):
-`pk.costs.*` factories and `robot.joint_var_cls` build ordinary jaxls problems, so
-`jaxls.LeastSquaresProblem(costs, vars).analyze().solve()` works unchanged. To run the
-same problem as a single CUDA kernel (costs, kinematics and Jacobians compiled to
-straight-line code, no JAX inside the solve loop), compile it:
+PyRoki's cost layer is available under the same names, on pyroffi's own jaxls-shaped API
+(no jaxls dependency). Port PyRoki cost code by swapping the import and writing `pk.X`
+for `jaxls.X` (`pk.Var`, `pk.VarValues`, `pk.Cost.factory`, `pk.LeastSquaresProblem`,
+`pk.TrustRegionConfig`, ...):
 
 ```python
-solver = pk.costs.compile(jaxls.LeastSquaresProblem(costs, [joint_var]))
-sol = solver.solve()                     # jaxls.VarValues: sol[joint_var]
-sol = solver.solve(new_problem)          # same structure, new targets: no recompile
-x, cost, viol = solver.solve_batch(params, x0)   # B problems in one launch
+joint_var = robot.joint_var_cls(0)
+costs = [pk.costs.pose_cost_analytic_jac(robot, joint_var, target, link_idx, 50.0, 10.0),
+         pk.costs.limit_constraint(robot, joint_var)]
+sol = pk.LeastSquaresProblem(costs, [joint_var]).analyze().solve()
+cfg = sol[joint_var]
 ```
 
-Robot and collision models, NumPy arrays and Python scalars are baked into the build;
-`jax.Array` arguments (targets, rest poses, obstacles) stay runtime inputs. The compiled
-solve supports Euclidean variables up to 32 scalars (IK-sized problems); larger or
-Lie-group problems stay on jaxls. The built-in solvers remain available too:
+`analyze()` compiles the problem to one CUDA kernel: costs, kinematics and Jacobians
+become straight-line code, and `solve()` is a single launch with no JAX in the loop.
+There is no JAX solver behind it: without a CUDA device and nvcc, or for a problem the
+compiler does not support, `analyze()` raises. Robot and collision models, NumPy arrays
+and Python scalars are baked into the build; `jax.Array` arguments (targets, rest poses,
+obstacles) are runtime inputs, so re-solving with new targets reuses the build. Problems
+may be built and solved inside `jax.jit` with the robot as a traced argument, as PyRoki
+does. `analyze().solve_batch(params, x0)` solves many problems in one launch.
+
+Current limits: Euclidean variables only (no `pk.SE3Var` & co.) and at most 32 variable
+scalars (IK-sized problems; trajectories are not supported yet). The built-in solvers
+remain available too:
 
 | PyRoki pattern | PyRoFFI |
 | --- | --- |

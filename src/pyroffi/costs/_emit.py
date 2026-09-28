@@ -320,8 +320,9 @@ class Evaluator:
         self.g = graph
 
     def run(self, closed: jcore.ClosedJaxpr, args: Sequence[np.ndarray]) -> list[np.ndarray]:
-        # Constant folding and data-movement probes bind primitives eagerly; keep them off the GPU.
-        with jax.default_device(jax.devices("cpu")[0]):
+        # Constant folding and data-movement probes bind primitives eagerly (also when called
+        # inside a caller's jax.jit trace); keep them off the GPU.
+        with jax.ensure_compile_time_eval(), jax.default_device(jax.devices("cpu")[0]):
             return self._jaxpr(closed.jaxpr, [_obj(c) for c in closed.consts], list(args))
 
     def _jaxpr(self, jaxpr, consts, args):

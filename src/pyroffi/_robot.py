@@ -18,12 +18,9 @@ from . import kinematics as _kinematics
 
 
 def _joint_var_cls(default_cfg):
-    try:
-        import jaxls
-    except ImportError:
-        return None
+    from .costs._problem import Var
 
-    class JointVar(jaxls.Var[Array], default_factory=lambda: default_cfg): ...
+    class JointVar(Var[Array], default_factory=lambda: default_cfg): ...
 
     return JointVar
 
@@ -62,8 +59,8 @@ class Robot:
     velocity-like vectors are ``[base twist (6) | joints]`` (see :mod:`pyroffi._floating_base`)."""
 
     joint_var_cls: jdc.Static[type | None] = None
-    """``jaxls.Var`` subclass for this robot's configuration, defaulting to ``default_cfg``
-    (PyRoKi's ``robot.joint_var_cls``). ``None`` when jaxls is not installed."""
+    """:class:`pyroffi.Var` subclass for this robot's configuration, defaulting to
+    ``default_cfg`` (PyRoKi's ``robot.joint_var_cls``)."""
 
     attached_names: jdc.Static[tuple[str, ...]] = ()
     """Names of the attachments already folded into ``dynamics.I_body``.
@@ -117,7 +114,9 @@ class Robot:
         """
         from .attachments import compose_dynamics
 
-        return compose_dynamics(self, aset)
+        from . import _registry
+
+        return _registry.register(compose_dynamics(self, aset))
 
     @property
     def urdf(self):
@@ -218,7 +217,9 @@ class Robot:
             joint_var_cls=_joint_var_cls(default_joint_cfg),
         )
 
-        return robot
+        from . import _registry
+
+        return _registry.register(robot)
 
     @jdc.jit
     def forward_kinematics(

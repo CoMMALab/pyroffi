@@ -1,22 +1,23 @@
-"""PyRoKi-named cost factories (jaxls) and their CUDA compilation (pyroffi.costs.compile).
+"""pyroffi's jaxls-shaped API (pk.Var, pk.Cost, pk.LeastSquaresProblem, ...) and PyRoKi's
+cost factories, compiled to CUDA by ``analyze()``.
 
 The emitter tests run on CPU: they evaluate the generated scalar graph numerically and
 compare it to JAX, which checks every primitive handler and fold rule without nvcc. The
-compiled-solve tests need a CUDA device and nvcc, and are skipped otherwise.
+solve tests need a CUDA device and nvcc, and are skipped otherwise.
 """
 
 import shutil
 
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import jaxlie
 import numpy as np
 import pytest
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
-jaxls = pytest.importorskip("jaxls")
-
 import pyroffi as pk
+from pyroffi.costs import _compile as C
 from pyroffi.costs import _emit as E
 
 # The factories in PyRoKi's costs.py (upstream 388e43e).
@@ -27,6 +28,10 @@ PYROKI_COSTS = [
     "five_point_velocity_cost", "five_point_acceleration_cost", "five_point_jerk_cost",
     "limit_constraint", "limit_velocity_constraint", "world_collision_constraint",
 ]
+# jaxls's public names that pyroffi mirrors at top level.
+JAXLS_NAMES = ["Var", "VarValues", "Cost", "LeastSquaresProblem", "AnalyzedLeastSquaresProblem",
+               "TrustRegionConfig", "TerminationConfig", "AugmentedLagrangianConfig",
+               "ConjugateGradientConfig", "SolveSummary", "SE2Var", "SE3Var", "SO2Var", "SO3Var"]
 
 
 def _has_cuda() -> bool:
@@ -45,16 +50,16 @@ def panda():
     return robot, robot.links.names.index("panda_hand")
 
 
-def _ik_problem(robot, link, pos, wxyz):
+def _ik_problem(robot, link, pos, wxyz, pos_weight=50.0):
     jv = robot.joint_var_cls(0)
     target = jaxlie.SE3.from_rotation_and_translation(jaxlie.SO3(wxyz), pos)
     costs = [
         pk.costs.pose_cost_analytic_jac(robot, jv, target, jnp.array(link, jnp.int32),
-                                        pos_weight=50.0, ori_weight=10.0),
+                                        pos_weight=pos_weight, ori_weight=10.0),
         pk.costs.limit_constraint(robot, jv),
         pk.costs.rest_cost(jv, jnp.array(jv.default_factory()), 0.01),
     ]
-    return jaxls.LeastSquaresProblem(costs=costs, variables=[jv]), jv
+    return pk.LeastSquaresProblem(costs=costs, variables=[jv]), jv
 
 
 def _pose_error(robot, link, q, pos, wxyz):
@@ -63,29 +68,82 @@ def _pose_error(robot, link, q, pos, wxyz):
     return float(jnp.linalg.norm(d[:3])), float(jnp.linalg.norm(d[3:]))
 
 
-# ── drop-in names ───────────────────────────────────────────────────────────
+# ── API surface (CPU) ───────────────────────────────────────────────────────
 
-def test_pyroki_cost_names_exist():
-    missing = [n for n in PYROKI_COSTS if not callable(getattr(pk.costs, n, None))]
-    assert not missing
+def test_names_exist():
+    assert not [n for n in PYROKI_COSTS if not callable(getattr(pk.costs, n, None))]
+    assert not [n for n in JAXLS_NAMES if not hasattr(pk, n)]
 
 
-def test_joint_var_cls_defaults_to_default_cfg(panda):
+def test_joint_var_cls_and_var_values(panda):
     robot, _ = panda
-    jv = robot.joint_var_cls(0)
-    assert isinstance(jv, jaxls.Var)
-    np.testing.assert_allclose(jv.default_factory(), robot.default_cfg)
+    JointVar = robot.joint_var_cls
+    np.testing.assert_allclose(JointVar(0).default_factory(), robot.default_cfg)
+    vals = pk.VarValues.make([JointVar(jnp.arange(3)), JointVar(5).with_value(jnp.ones(robot.nq))])
+    assert vals[JointVar(jnp.arange(3))].shape == (3, robot.nq)
+    np.testing.assert_allclose(vals[JointVar(5)], 1.0)
+    assert vals[JointVar].shape == (4, robot.nq)  # stacked, sorted by id
 
 
-def test_jaxls_solve_unchanged(panda):
-    """PyRoKi's basic-IK snippet, with only the import swapped."""
+def test_traced_variable_ids_inside_jit(panda):
+    """jaxls-style code makes ids inside jit (``JointVar(jnp.arange(T))``); they are
+    recovered from the trace, but ids that depend on a jitted input are refused."""
+    robot, _ = panda
+    JointVar = robot.joint_var_cls
+
+    @jax.jit
+    def f(y):
+        ids = jnp.arange(1, 4) - 1
+        vals = pk.VarValues.make([JointVar(ids).with_value(jnp.ones((3, robot.nq)) * y)])
+        return vals[JointVar(ids)], vals[JointVar(jnp.full((), 2))]
+
+    all_, two = f(2.0)
+    assert all_.shape == (3, robot.nq)
+    np.testing.assert_allclose(two, 2.0)
+
+    with pytest.raises(ValueError, match="depend on the inputs"):
+        jax.jit(lambda i: pk.VarValues.make([JointVar(i)])[JointVar(i)])(jnp.int32(0))
+
+
+def test_analyze_fails_without_gpu(panda, monkeypatch):
+    def no_cuda(*a, **k):
+        raise RuntimeError("no cuda")
+
+    monkeypatch.setattr(C.jax, "devices", no_cuda)
     robot, link = panda
-    pos, wxyz = jnp.array([0.5, 0.1, 0.4]), jnp.array([0.0, 1.0, 0.0, 0.0])
-    problem, jv = _ik_problem(robot, link, pos, wxyz)
-    sol = problem.analyze().solve(verbose=False, linear_solver="dense_cholesky",
-                                  trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0))
-    pos_err, ori_err = _pose_error(robot, link, sol[jv], pos, wxyz)
-    assert pos_err < 1e-4 and ori_err < 1e-3
+    problem, _ = _ik_problem(robot, link, jnp.zeros(3), jnp.array([1.0, 0, 0, 0]))
+    with pytest.raises(RuntimeError, match="CUDA device"):
+        problem.analyze()
+
+
+def test_unsupported_problems_raise(monkeypatch):
+    monkeypatch.setattr(C, "_require_cuda", lambda: None)
+    monkeypatch.setattr(C, "_build", lambda header: "unused")
+    monkeypatch.setattr(C, "_KERNELS", {})  # keep mocked builds out of the real cache
+    se3 = pk.SE3Var(0)
+    lie = pk.Cost.factory(lambda vals, v: vals[v].translation())
+    with pytest.raises(NotImplementedError, match="Euclidean"):
+        pk.LeastSquaresProblem([lie(se3)], [se3]).analyze()
+
+    class Big(pk.Var[jax.Array], default_factory=lambda: jnp.zeros(40)): ...
+
+    small = pk.Cost.factory(lambda vals, v: vals[v])
+    with pytest.raises(NotImplementedError, match="up to 32"):
+        pk.LeastSquaresProblem([small(Big(0))], [Big(0)]).analyze()
+
+
+def test_builds_are_cached_by_baked_values(panda, monkeypatch):
+    """A new target reuses the build; another robot or baked weight gets its own."""
+    monkeypatch.setattr(C, "_require_cuda", lambda: None)
+    monkeypatch.setattr(C, "_build", lambda header: "unused")
+    monkeypatch.setattr(C, "_KERNELS", {})  # keep mocked builds out of the real cache
+    robot, link = panda
+    wxyz = jnp.array([0.0, 1.0, 0.0, 0.0])
+    a = _ik_problem(robot, link, jnp.zeros(3), wxyz)[0].analyze()
+    assert _ik_problem(robot, link, jnp.ones(3), wxyz)[0].analyze()._kernel is a._kernel
+    assert _ik_problem(robot, link, jnp.zeros(3), wxyz, pos_weight=10.0)[0].analyze()._kernel is not a._kernel
+    other = pk.Robot.from_urdf(load_robot_description("panda_description"))
+    assert _ik_problem(other, link, jnp.zeros(3), wxyz)[0].analyze()._kernel is not a._kernel
 
 
 # ── emitter (CPU) ───────────────────────────────────────────────────────────
@@ -125,7 +183,7 @@ def _check_emitted(fn, *args, rtol=1e-4, atol=1e-5):
 
 def test_emitter_pose_residual_and_jacobian(panda):
     robot, link = panda
-    robot = jax.tree.map(np.asarray, robot)  # baked, as compile() does
+    robot = jax.tree.map(np.asarray, robot)  # baked, as analyze() does
     target = jaxlie.SE3.from_rotation_and_translation(
         jaxlie.SO3.from_rpy_radians(0.1, 0.2, 0.3), jnp.array([0.4, 0.1, 0.5]))
 
@@ -164,81 +222,73 @@ def test_emitter_rejects_data_dependent_loops():
 # ── compiled solves (CUDA) ──────────────────────────────────────────────────
 
 @cuda
-def test_compiled_ik_matches_jaxls(panda):
+def test_ik_solve(panda):
     robot, link = panda
     pos, wxyz = jnp.array([0.5, 0.1, 0.4]), jnp.array([0.0, 1.0, 0.0, 0.0])
     problem, jv = _ik_problem(robot, link, pos, wxyz)
-    solver = pk.costs.compile(problem)
-    sol = solver.solve(trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0))
+    sol, summary = problem.analyze().solve(
+        verbose=False, linear_solver="dense_cholesky",
+        trust_region=pk.TrustRegionConfig(lambda_initial=1.0), return_summary=True)
     q = sol[jv]
     pos_err, ori_err = _pose_error(robot, link, q, pos, wxyz)
     assert pos_err < 1e-4 and ori_err < 1e-3
+    assert float(summary.constraint_violation) <= 1e-5
     assert jnp.all(q <= robot.joints.upper_limits + 1e-5)
     assert jnp.all(q >= robot.joints.lower_limits - 1e-5)
 
-    # A new target is a runtime parameter: same build, no recompilation.
-    pos2 = jnp.array([0.4, -0.2, 0.5])
-    problem2, _ = _ik_problem(robot, link, pos2, wxyz)
-    q2 = solver.solve(problem2, trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0))[jv]
-    pos_err, ori_err = _pose_error(robot, link, q2, pos2, wxyz)
-    assert pos_err < 1e-4 and ori_err < 1e-3
 
-
-def test_structure_check_rejects_other_robot_and_baked_values(panda, monkeypatch):
-    """A problem with another robot, variable class or baked weight must not reuse a build."""
-    from pyroffi.costs import _compile as C
-
-    monkeypatch.setattr(C, "_build", lambda header: "unused")  # no nvcc needed
+@cuda
+def test_pyroki_style_solve_inside_jit(panda):
+    """PyRoKi's pattern: robot and targets are jit arguments, the problem is built and
+    solved inside the trace. The traced robot resolves to its concrete original."""
     robot, link = panda
-    wxyz = jnp.array([0.0, 1.0, 0.0, 0.0])
-    solver = pk.costs.compile(_ik_problem(robot, link, jnp.zeros(3), wxyz)[0])
-    solver.params(_ik_problem(robot, link, jnp.ones(3), wxyz)[0])  # new target: fine
 
-    other = pk.Robot.from_urdf(load_robot_description("panda_description"))
-    with pytest.raises(ValueError):
-        solver.params(_ik_problem(other, link, jnp.zeros(3), wxyz)[0])
-    jv = robot.joint_var_cls(0)
-    target = jaxlie.SE3.from_rotation_and_translation(jaxlie.SO3(wxyz), jnp.zeros(3))
-    reweighted = jaxls.LeastSquaresProblem([
-        pk.costs.pose_cost_analytic_jac(robot, jv, target, jnp.array(link, jnp.int32),
-                                        pos_weight=10.0, ori_weight=10.0),
-        pk.costs.limit_constraint(robot, jv),
-        pk.costs.rest_cost(jv, jnp.array(jv.default_factory()), 0.01)], [jv])
-    with pytest.raises(ValueError):
-        solver.params(reweighted)
+    @jdc.jit
+    def solve(robot: pk.Robot, pos: jax.Array, wxyz: jax.Array, idx: jax.Array) -> jax.Array:
+        jv = robot.joint_var_cls(0)
+        target = jaxlie.SE3.from_rotation_and_translation(jaxlie.SO3(wxyz), pos)
+        costs = [pk.costs.pose_cost_analytic_jac(robot, jv, target, idx, pos_weight=50.0, ori_weight=10.0),
+                 pk.costs.limit_constraint(robot, jv)]
+        sol = pk.LeastSquaresProblem(costs=costs, variables=[jv]).analyze().solve(
+            verbose=False, trust_region=pk.TrustRegionConfig(lambda_initial=1.0))
+        return sol[jv]
+
+    wxyz = jnp.array([0.0, 1.0, 0.0, 0.0])
+    for pos in (jnp.array([0.5, 0.1, 0.4]), jnp.array([0.4, -0.2, 0.5])):
+        q = solve(robot, pos, wxyz, jnp.array(link, jnp.int32))
+        pos_err, ori_err = _pose_error(robot, link, q, pos, wxyz)
+        assert pos_err < 1e-4 and ori_err < 1e-3
 
 
 @cuda
-def test_compiled_batch_under_jit(panda):
-    """Problems built inside jax.jit from traced targets reuse the compiled kernel."""
+def test_batch_of_problems(panda):
     robot, link = panda
     wxyz = jnp.array([0.0, 1.0, 0.0, 0.0])
-    solver = pk.costs.compile(_ik_problem(robot, link, jnp.zeros(3), wxyz)[0], lambda_initial=1.0)
     targets = jnp.array([[0.5, 0.1, 0.4], [0.4, -0.2, 0.5], [0.3, 0.3, 0.6]])
 
     @jax.jit
     def solve(targets):
-        params = jax.vmap(lambda t: solver.params(_ik_problem(robot, link, t, wxyz)[0]))(targets)
-        x0 = jnp.broadcast_to(solver.initial_x(), (targets.shape[0], solver.n_x))
-        return solver.solve_batch(params, x0)
+        params = jax.vmap(lambda t: _ik_problem(robot, link, t, wxyz)[0].analyze().params())(targets)
+        analyzed = _ik_problem(robot, link, targets[0], wxyz)[0].analyze()
+        x0 = jnp.broadcast_to(analyzed.initial_x(), (targets.shape[0], analyzed.n_x))
+        return analyzed.solve_batch(params, x0, lambda_initial=1.0)
 
     q, cost, viol = solve(targets)
-    assert q.shape == (3, solver.n_x) and jnp.all(viol <= 1e-5)
+    assert q.shape[0] == 3 and jnp.all(viol <= 1e-5)
     for qi, t in zip(q, targets):
         pos_err, ori_err = _pose_error(robot, link, qi, t, wxyz)
         assert pos_err < 1e-4 and ori_err < 1e-3
 
 
 @cuda
-def test_compiled_equality_and_geq_constraints():
-    """Constraint kinds on a toy problem: min |x|^2 s.t. x0 + x1 == 1, x1 >= 0.8."""
+def test_equality_and_geq_constraints():
+    """min |x|^2 s.t. x0 + x1 == 1, x1 >= 0.8."""
 
-    class V(jaxls.Var[jax.Array], default_factory=lambda: jnp.zeros(2)): ...
+    class V(pk.Var[jax.Array], default_factory=lambda: jnp.zeros(2)): ...
 
     v = V(0)
-    small = jaxls.Cost.factory(lambda vals, v: vals[v])
-    eq = jaxls.Cost.factory(kind="constraint_eq_zero")(lambda vals, v: vals[v][:1] + vals[v][1:] - 1.0)
-    geq = jaxls.Cost.factory(kind="constraint_geq_zero")(lambda vals, v: vals[v][1:] - 0.8)
-    problem = jaxls.LeastSquaresProblem([small(v), eq(v), geq(v)], [v])
-    x = pk.costs.compile(problem).solve()[v]
+    small = pk.Cost.factory(lambda vals, v: vals[v])
+    eq = pk.Cost.factory(kind="constraint_eq_zero")(lambda vals, v: vals[v][:1] + vals[v][1:] - 1.0)
+    geq = pk.Cost.factory(kind="constraint_geq_zero")(lambda vals, v: vals[v][1:] - 0.8)
+    x = pk.LeastSquaresProblem([small(v), eq(v), geq(v)], [v]).analyze().solve()[v]
     np.testing.assert_allclose(x, [0.2, 0.8], atol=1e-3)

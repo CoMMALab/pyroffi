@@ -17,6 +17,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from pyroffi._robot import Robot
 
+from .. import _registry
 from .._robot_urdf_parser import RobotURDFParser
 from ._collision import collide, pairwise_collide
 from ._geometry import Capsule, CollGeom, Sphere
@@ -60,7 +61,7 @@ class _AttachmentFieldsMixin:
         """
         from ..attachments import compose_collision
 
-        return compose_collision(self, aset)
+        return _registry.register(compose_collision(self, aset))
 
     def entry_active(self) -> Bool[Array, " num_links"]:
         """Per-entry activity mask (robot links are always active)."""
@@ -194,13 +195,13 @@ class RobotCollision(_AttachmentFieldsMixin):
             f"{len(active_idx_i)} active self-collision pairs."
         )
 
-        return RobotCollision(
+        return _registry.register(RobotCollision(
             num_links=link_info.num_links,
             link_names=link_name_list,
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
             coll=capsules,
-        )
+        ))
 
     @staticmethod
     def from_sphere_decomposition(
@@ -801,13 +802,13 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
             f"using spherical collision models."
         )
 
-        return RobotCollisionSpherized(
+        return _registry.register(RobotCollisionSpherized(
             num_links=len(link_name_list),
             link_names=link_name_list,
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
             coll=spheres_2d,  # Sphere pytree with batch_axes (N, S)
-        )
+        ))
 
     @staticmethod
     def _get_trimesh_collision_spheres_for_link(

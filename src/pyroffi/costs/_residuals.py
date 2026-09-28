@@ -2,10 +2,9 @@
 
 Signatures and semantics follow PyRoki (upstream ``388e43e``, MIT) so that
 ``import pyroffi as pk`` runs PyRoki cost code unchanged. Each function takes ``vals``
-(a ``jaxls.VarValues``) first and can be wrapped directly with ``jaxls.Cost.factory``.
-
-Everything here is plain JAX, so the same factories run under jaxls and compile to CUDA
-through :func:`pyroffi.costs.compile`.
+(a :class:`pyroffi.VarValues`) first and can be wrapped directly with
+:meth:`pyroffi.Cost.factory`. Everything here is plain JAX, traced once and compiled to CUDA
+by ``LeastSquaresProblem.analyze()``.
 """
 
 from __future__ import annotations
@@ -14,10 +13,10 @@ import jax
 import jax.numpy as jnp
 import jaxlie
 from jax import Array
-from jaxls import Var, VarValues
 
 from .._robot import Robot
 from ..collision import CollGeom, colldist_from_sdf
+from ._problem import Var, VarValues
 
 
 # --- Pose Residuals ---
