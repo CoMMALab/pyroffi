@@ -187,30 +187,50 @@ def _require_cuda() -> None:
                            "device visible to JAX; none was found.") from e
 
 
+TIERS = ("thread", "warp", "block")
+_TIER_INDEX = {"thread": 0, "warp": 1, "block": 2}
+COOP_LOOP_MIN = 256
+"""Loop threshold of the cooperative (warp/block) variant; the thread variant is fully
+scalarized, GLASS's per-thread form."""
+_SHARED_BUDGET = 48 * 1024
+_THREAD_BUDGET = 64 * 1024
+
+
 @lru_cache(maxsize=None)
-def _build(header: str) -> str:
+def _build(header: str, tier: str) -> str:
     from ..cuda_kernels._traced import (_GLASS_DIR, _KERNELS_DIR, build_shared_library,
                                         register_cuda_targets)
 
     source = _KERNELS_DIR / "costs" / "_cost_lm_kernel.cu"
     flags = ["-O3", "-std=c++17", os.environ.get("PYROFFI_TRACED_GPU_ARCH", "-arch=native"),
-             "--shared", "--compiler-options", "-fPIC"]
+             f"-DPYROFFI_COST_TIER={_TIER_INDEX[tier]}", "--shared", "--compiler-options", "-fPIC"]
     keys = (source, *sorted(_KERNELS_DIR.glob("*.cuh")), *sorted(_GLASS_DIR.glob("*.cuh")),
             *sorted((_GLASS_DIR / "src").rglob("*.cuh")))
     try:
-        so = build_shared_library("cost_lm", source, {"_cost_gen.cuh": header}, flags,
+        so = build_shared_library(f"cost_lm_{tier}", source, {"_cost_gen.cuh": header}, flags,
                                   include_dirs=(_KERNELS_DIR, _GLASS_DIR), key_files=keys)
     except FileNotFoundError as e:
         if shutil.which("nvcc") is None:
             raise RuntimeError("pk.LeastSquaresProblem.analyze() compiles to CUDA and needs "
                                "nvcc on PATH; it was not found.") from e
         raise
-    tag = hashlib.sha1(header.encode()).hexdigest()[:16]
+    tag = hashlib.sha1((header + tier).encode()).hexdigest()[:16]
     return register_cuda_targets(so, ("CostLmFfi",), tag)[0]
 
 
+@dataclass
+class _Variant:
+    header: str
+    scratch: int       # floats of scratch per problem
+    max_extent: int    # largest loop (the parallelism a cooperative tier can use)
+
+
 class _Kernel:
-    """A compiled problem structure: generated code, FFI target and variable layout."""
+    """A compiled problem structure: the traced residual, its tier variants and FFI targets.
+
+    Variants are generated, and tiers built, on first use: a problem only pays nvcc for the
+    tiers it runs at.
+    """
 
     def __init__(self, variables: list[Var], plans: list[_CostPlan]):
         self.layout, self.slots, self.n_x = _variable_layout(variables)
@@ -221,9 +241,27 @@ class _Kernel:
         self.plans = plans
         self.param_specs = [[(tuple(p.shape), p.dtype) for p in plan.params] for plan in plans]
         self.n_p = sum(int(np.prod(s, dtype=int)) for specs in self.param_specs for s, _ in specs)
-        self.header, self.row_kinds = self._generate()
+        x0, p0 = np.zeros(self.n_x, np.float32), np.zeros(self.n_p, np.float32)
+
+        def with_jac(x, p):
+            residual = lambda x: jnp.concatenate(self._residual_rows(x, p))
+            return jax.jacfwd(lambda x: (residual(x),) * 2, has_aux=True)(x)
+
+        def with_jvp(x, p, t):
+            return jax.jvp(lambda x: jnp.concatenate(self._residual_rows(x, p)), (x,), (t,))
+
+        self.closed = jax.make_jaxpr(with_jac)(x0, p0)
+        self.closed_jvp = jax.make_jaxpr(with_jvp)(x0, p0, x0)
+        kinds, sign = [], []
+        for plan, rows in zip(self.plans, jax.eval_shape(self._residual_rows, x0, p0)):
+            kinds += [_ROW_KIND[plan.cost.kind]] * rows.shape[0]
+            sign += [-1 if plan.cost.kind == "constraint_geq_zero" else 1] * rows.shape[0]
+        self.row_kinds, self.row_sign = kinds, np.array(sign, np.float32)
+        self.n_r = len(kinds)
         self.plans = None  # only needed to trace; may hold the caller's tracers
-        self.target = _build(self.header)
+        self._variants: dict[str, _Variant] = {}
+        self._targets: dict[str, str] = {}
+        self.tier_table: dict[int, str] = {}   # batch size -> fastest tier (from calibrate)
 
     def _residual_rows(self, x, p) -> list[jax.Array]:
         """Each cost's residual rows (all batch instances), in problem order."""
@@ -245,33 +283,204 @@ class _Kernel:
             per_cost.append(jnp.concatenate(rows))
         return per_cost
 
-    def _generate(self) -> tuple[str, list[int]]:
-        x0 = np.zeros(self.n_x, np.float32)
-        p0 = np.zeros(self.n_p, np.float32)
+    # ── tiers ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def variant_of(tier: str) -> str:
+        return "thread" if tier == "thread" else "coop"
 
-        def with_jac(x, p):
-            residual = lambda x: jnp.concatenate(self._residual_rows(x, p))
-            return jax.jacfwd(lambda x: (residual(x),) * 2, has_aux=True)(x)
+    def variant(self, name: str) -> _Variant:
+        """``thread``: the residual and all Jacobian columns as one folded straight-line body
+        (one problem per thread). ``coop``: residual plus ONE Jacobian column for a runtime
+        tangent, so the lanes of a warp/block each take a column with identical code."""
+        if name not in self._variants:
+            with jax.ensure_compile_time_eval():
+                self._variants[name] = (self._generate(float("inf")) if name == "thread"
+                                        else self._generate_jvp())
+        return self._variants[name]
 
-        closed = jax.make_jaxpr(with_jac)(x0, p0)
+    def slot_bytes(self, tier: str) -> int:
+        """Per-problem solver state held in shared (warp/block) or local (thread) memory;
+        the generated code's scratch is a separate global workspace."""
+        n, r = self.n_x, self.n_r
+        return 4 * (4 * n + n * n + 5 * r + r * n)
+
+    def scratch(self, tier: str) -> int:
+        return max(self.variant(self.variant_of(tier)).scratch, 1)
+
+    def available(self, tier: str) -> bool:
+        budget = _THREAD_BUDGET if tier == "thread" else _SHARED_BUDGET
+        return self.slot_bytes(tier) + 16 <= budget
+
+    def target(self, tier: str) -> str:
+        if tier not in self._targets:
+            if not self.available(tier):
+                raise NotImplementedError(
+                    f"tier {tier!r}: this problem needs {self.slot_bytes(tier)} bytes of "
+                    "per-problem state, over the tier's budget")
+            self._targets[tier] = _build(self.variant(self.variant_of(tier)).header, tier)
+        return self._targets[tier]
+
+    def auto_tier(self, batch: int) -> str:
+        if self.tier_table:
+            nearest = min(self.tier_table, key=lambda b: abs(np.log2(b) - np.log2(max(batch, 1))))
+            return self.tier_table[nearest]
+        # Before calibration (measured, RTX A5000, Panda collision/IK): the thread tier runs the
+        # folded straight-line code and wins once there are enough problems to fill the GPU;
+        # below that, a warp per problem (one Jacobian column per lane) cuts latency. The
+        # block tier is for more columns than a warp has lanes (high-DOF robots).
+        if self.n_x > 32:
+            prefs = ["block"]
+        elif batch >= 512:
+            prefs = ["thread", "warp", "block"]
+        else:
+            prefs = ["warp", "thread", "block"]
+        return next(t for t in prefs if self.available(t))
+
+    def _signed(self, ev: E.Evaluator, v, row_of):
+        """Negate the rows of >= constraints (they are solved as <= 0)."""
+        if np.all(self.row_sign > 0):
+            return v
+        g = ev.g
+        if isinstance(v, E.Lazy):
+            sgn = g.table(self.row_sign, "f")
+            fn = v.fn
+            return E.Lazy(v.shape, v.kind, lambda i: g.op("mul", (fn(i), g.tload(sgn, row_of(g, i))), "f"),
+                          v.cost + 1)
+        out = np.empty(v.shape, dtype=object)
+        for k in range(v.size):
+            out.flat[k] = g.op("neg", (v.flat[k],), "f") if self.row_sign[row_of(None, k)] < 0 else v.flat[k]
+        return out
+
+    def _generate(self, loop_min: float) -> _Variant:
         g = E.Graph()
-        J, r = E.Evaluator(g).run(closed, [E.symbolic(g, "x", (self.n_x,)),
-                                          E.symbolic(g, "p", (self.n_p,))])
-        kinds, sign = [], []
-        for plan, rows in zip(self.plans, jax.eval_shape(self._residual_rows, x0, p0)):
-            kinds += [_ROW_KIND[plan.cost.kind]] * rows.shape[0]
-            sign += [-1 if plan.cost.kind == "constraint_geq_zero" else 1] * rows.shape[0]
-        n_r = len(kinds)
-        assert n_r == r.shape[0], (n_r, r.shape)
-        r = [g.op("neg", (v,), "f") if s < 0 else v for v, s in zip(r.flat, sign)]
-        J = [[g.op("neg", (v,), "f") if sign[i] < 0 else v for v in J[i]] for i in range(n_r)]
-
-        # H = sum_i w_i J_i J_i^T,  grad = sum_i w_i (r_i + s_i) J_i; cost rows have w = 1, s = 0.
+        ev = E.Evaluator(g, loop_min)
+        J, r = ev.run(self.closed, [E.symbolic(g, "x", (self.n_x,)), E.symbolic(g, "p", (self.n_p,))])
         n = self.n_x
+        r = self._signed(ev, r, lambda g_, i: i)
+        J = self._signed(ev, J, lambda g_, i: g_.idiv(i, n) if g_ is not None else i // n)
+        res_body, s1, e1 = g.emit_function([("r", r)])
+        scalar = not isinstance(J, E.Lazy) and not isinstance(r, E.Lazy)
+        # The scalar form uses normal_equations() below; residual_jacobian() would only bloat it.
+        jac_body, s2, e2 = ("", 0, 1) if scalar else g.emit_function([("r", r), ("J", J)])
+        scratch = max(s1, s2)
+        kinds = self.row_kinds
+        ne_src = ""
+        if scalar:
+            # Fully scalar (the thread tier's form): build H = sum w J J^T and g = sum w (r + s) J
+            # symbolically, so zero Jacobian entries fold away and everything stays in registers.
+            ne_body = self._normal_equations(g, r, J, kinds)
+            ne_src = f"""
+#define PYROFFI_COST_NORMAL_EQUATIONS 1
+__device__ __forceinline__ void normal_equations(
+    const float* __restrict__ x, const float* __restrict__ p, const float* __restrict__ w,
+    const float* __restrict__ s, float* __restrict__ r, float* __restrict__ H,
+    float* __restrict__ g, float* __restrict__ scratch, const int rank, const int size)
+{{
+    (void)p; (void)scratch; (void)size;
+{ne_body}
+}}
+"""
+        has_con = any(k != 0 for k in kinds)
+        header = f"""// Generated by pyroffi (LeastSquaresProblem.analyze). Do not edit.
+#pragma once
+#include <cmath>
+
+namespace pyroffi::costs_gen {{
+
+constexpr int n_x = {n};
+constexpr int n_r = {self.n_r};
+constexpr int n_p = {self.n_p};
+constexpr int scratch_size = {scratch};
+constexpr bool has_constraints = {"true" if has_con else "false"};
+
+__device__ __forceinline__ int row_kind(int i) {{
+    constexpr int k[n_r] = {{{", ".join(map(str, kinds))}}};
+    return k[i];
+}}
+
+{g.tables_source()}
+
+__device__ __forceinline__ void residual(
+    const float* __restrict__ x, const float* __restrict__ p, float* __restrict__ r,
+    float* __restrict__ scratch, const int rank, const int size)
+{{
+    (void)p; (void)scratch; (void)size;
+{res_body}
+}}
+
+__device__ __forceinline__ void residual_jacobian(
+    const float* __restrict__ x, const float* __restrict__ p, float* __restrict__ r,
+    float* __restrict__ J, float* __restrict__ scratch, const int rank, const int size)
+{{
+    (void)p; (void)scratch; (void)size;
+{jac_body}
+}}
+
+{ne_src}
+}}  // namespace pyroffi::costs_gen
+"""
+        return _Variant(header, scratch, max(e1, e2))
+
+    def _generate_jvp(self) -> _Variant:
+        g = E.Graph()
+        ev = E.Evaluator(g, float("inf"))
+        r, jt = ev.run(self.closed_jvp, [E.symbolic(g, "x", (self.n_x,)),
+                                         E.symbolic(g, "p", (self.n_p,)),
+                                         E.symbolic(g, "t", (self.n_x,))])
+        r = self._signed(ev, r, lambda g_, i: i)
+        jt = self._signed(ev, jt, lambda g_, i: i)
+        res_body, _, _ = g.emit_function([("r", r)], sync=False)
+        jvp_body, _, _ = g.emit_function([("r", r), ("jt", jt)], sync=False)
+        kinds = self.row_kinds
+        header = f"""// Generated by pyroffi (LeastSquaresProblem.analyze). Do not edit.
+#pragma once
+#include <cmath>
+
+namespace pyroffi::costs_gen {{
+
+constexpr int n_x = {self.n_x};
+constexpr int n_r = {self.n_r};
+constexpr int n_p = {self.n_p};
+constexpr int scratch_size = 0;
+constexpr bool has_constraints = {"true" if any(k != 0 for k in kinds) else "false"};
+#define PYROFFI_COST_JVP 1
+
+__device__ __forceinline__ int row_kind(int i) {{
+    constexpr int k[n_r] = {{{", ".join(map(str, kinds))}}};
+    return k[i];
+}}
+
+{g.tables_source()}
+
+// Lane-private straight-line code: one lane, no syncs.
+__device__ __forceinline__ void residual(
+    const float* __restrict__ x, const float* __restrict__ p, float* __restrict__ r,
+    float* __restrict__ scratch, const int rank, const int size)
+{{
+    (void)p; (void)scratch; (void)size;
+{res_body}
+}}
+
+// The residual and its directional derivative along t (one Jacobian column for t = e_j).
+__device__ __forceinline__ void residual_jvp(
+    const float* __restrict__ x, const float* __restrict__ p, const float* __restrict__ t,
+    float* __restrict__ r, float* __restrict__ jt)
+{{
+    (void)p; const int rank = 0;
+{jvp_body}
+}}
+
+}}  // namespace pyroffi::costs_gen
+"""
+        return _Variant(header, 0, self.n_x)
+
+    def _normal_equations(self, g: E.Graph, r, J, kinds) -> str:
+        n, n_r = self.n_x, self.n_r
+        r, J = list(r.flat), np.asarray(J).reshape(n_r, n)
         wJ, res = [], []
         for i in range(n_r):
-            if kinds[i] == 0:
-                wJ.append(J[i])
+            if kinds[i] == 0:  # cost rows: w = 1, s = 0
+                wJ.append(list(J[i]))
                 res.append(r[i])
             else:
                 w = g.input("w", i)
@@ -287,45 +496,16 @@ class _Kernel:
                 for i in range(n_r):
                     acc = g.op("add", (acc, g.op("mul", (wJ[i][a], J[i][b]), "f")), "f")
                 H[a][b] = H[b][a] = acc
-
-        res_body = g.emit([(f"r[{i}]", v) for i, v in enumerate(r)])
-        ne_body = g.emit([(f"r[{i}]", v) for i, v in enumerate(r)]
-                         + [(f"H[{a * n + b}]", H[a][b]) for a in range(n) for b in range(n)]
-                         + [(f"g[{a}]", grad[a]) for a in range(n)])
-        has_con = any(k != 0 for k in kinds)
-        header = f"""// Generated by pyroffi (LeastSquaresProblem.analyze). Do not edit.
-#pragma once
-#include <cmath>
-
-namespace pyroffi::costs_gen {{
-
-constexpr int n_x = {n};
-constexpr int n_r = {n_r};
-constexpr int n_p = {self.n_p};
-constexpr bool has_constraints = {"true" if has_con else "false"};
-
-__device__ __forceinline__ int row_kind(int i) {{
-    constexpr int k[n_r] = {{{", ".join(map(str, kinds))}}};
-    return k[i];
-}}
-
-__device__ __forceinline__ void residual(
-    const float* __restrict__ x, const float* __restrict__ p, float* __restrict__ r)
-{{
-{res_body}
-}}
-
-__device__ __forceinline__ void normal_equations(
-    const float* __restrict__ x, const float* __restrict__ p, const float* __restrict__ w,
-    const float* __restrict__ s, float* __restrict__ r, float* __restrict__ H,
-    float* __restrict__ g)
-{{
-{ne_body}
-}}
-
-}}  // namespace pyroffi::costs_gen
-"""
-        return header, kinds
+        H_arr = np.empty((n * n,), dtype=object)
+        for a in range(n):
+            for b in range(n):
+                H_arr[a * n + b] = H[a][b]
+        g_arr = np.empty((n,), dtype=object)
+        g_arr[:] = grad
+        r_arr = np.empty((n_r,), dtype=object)
+        r_arr[:] = r
+        body, _, _ = g.emit_function([("r", r_arr), ("H", H_arr), ("g", g_arr)])
+        return body
 
 
 # ponytail: unbounded; one entry per distinct problem structure in the process.
@@ -383,12 +563,14 @@ class AnalyzedLeastSquaresProblem:
         return VarValues({key: x[off:off + size].reshape(shape)
                           for key, (off, size, shape) in self._kernel.layout.items()})
 
-    def solve_batch(self, params: jax.Array, x0: jax.Array, **settings):
+    def solve_batch(self, params: jax.Array, x0: jax.Array, *, tier: str = "auto", **settings):
         """Solve ``B`` problems of this structure in one kernel launch.
 
         Args:
             params: ``(B, n_p)``, or ``(n_p,)`` shared by every problem.
             x0: ``(B, n_x)`` initial variables.
+            tier: ``"thread"`` (one problem per thread), ``"warp"``, ``"block"``, or
+                ``"auto"`` (the :meth:`calibrate` table, else a batch-size heuristic).
             **settings: ``max_iters``, ``al_iters``, ``lambda_initial``, ``tolerance``,
                 ``al_tolerance``.
 
@@ -404,21 +586,27 @@ class AnalyzedLeastSquaresProblem:
         else:
             params = jnp.asarray(params, jnp.float32).reshape(-1, k.n_p)
         s = {**_DEFAULTS, **settings}
-        call = jax.ffi.ffi_call(k.target, (
+        if tier == "auto":
+            tier = k.auto_tier(B)
+        elif tier not in TIERS:
+            raise ValueError(f"tier must be 'auto' or one of {TIERS}, got {tier!r}")
+        call = jax.ffi.ffi_call(k.target(tier), (
             jax.ShapeDtypeStruct((B, k.n_x), jnp.float32),
             jax.ShapeDtypeStruct((B,), jnp.float32),
-            jax.ShapeDtypeStruct((B,), jnp.float32)))
-        return call(x0, params, max_iters=np.int32(s["max_iters"]),
+            jax.ShapeDtypeStruct((B,), jnp.float32),
+            jax.ShapeDtypeStruct((B, k.scratch(tier)), jnp.float32)))
+        x, cost, viol, _ = call(x0, params, max_iters=np.int32(s["max_iters"]),
                     al_iters=np.int32(s["al_iters"]),
                     lambda_initial=np.float32(s["lambda_initial"]),
                     tolerance=np.float32(s["tolerance"]),
                     al_tolerance=np.float32(s["al_tolerance"]))
+        return x, cost, viol
 
     def solve(self, initial_vals: VarValues | None = None, *, linear_solver: str = "dense_cholesky",
               trust_region: TrustRegionConfig | None = TrustRegionConfig(),
               termination: TerminationConfig = TerminationConfig(), sparse_mode: str = "blockrow",
               verbose: bool = True, augmented_lagrangian: AugmentedLagrangianConfig | None = None,
-              return_summary: bool = False):
+              return_summary: bool = False, tier: str = "auto"):
         """Solve, with jaxls's signature. Returns :class:`VarValues` (and a
         :class:`SolveSummary` with ``return_summary=True``).
 
@@ -433,6 +621,36 @@ class AnalyzedLeastSquaresProblem:
         if augmented_lagrangian is not None:
             s["al_tolerance"] = float(augmented_lagrangian.tolerance_absolute)
             s["al_iters"] = augmented_lagrangian.max_iterations
-        x, cost, viol = self.solve_batch(self.params()[None], self.initial_x(initial_vals)[None], **s)
+        x, cost, viol = self.solve_batch(self.params()[None], self.initial_x(initial_vals)[None],
+                                         tier=tier, **s)
         vals = self.unflatten(x[0])
         return (vals, SolveSummary(cost[0], viol[0])) if return_summary else vals
+
+    def calibrate(self, batch_sizes=(1, 16, 128, 1024, 8192), tiers=TIERS, repeats: int = 3,
+                  **settings) -> dict[int, dict[str, float]]:
+        """Time each tier at each batch size and make ``tier="auto"`` pick the fastest.
+
+        The best tier depends on the problem's size *and* the batch jointly (a thread per
+        problem wins at large batch, a warp or block when problems are few), so it is
+        measured rather than assumed. Compiles every tier it times. Returns
+        ``{batch: {tier: ms}}``; the choice is kept for this problem structure.
+        """
+        import time
+
+        k = self._kernel
+        results: dict[int, dict[str, float]] = {}
+        for B in batch_sizes:
+            params = jnp.broadcast_to(self.params(), (B, k.n_p))
+            x0 = jnp.broadcast_to(self.initial_x(), (B, k.n_x))
+            results[B] = {}
+            for tier in tiers:
+                if not k.available(tier):
+                    continue
+                run = jax.jit(lambda P, X, tier=tier: self.solve_batch(P, X, tier=tier, **settings)[0])
+                jax.block_until_ready(run(params, x0))
+                t = time.perf_counter()
+                for _ in range(repeats):
+                    jax.block_until_ready(run(params, x0))
+                results[B][tier] = (time.perf_counter() - t) / repeats * 1e3
+            k.tier_table[B] = min(results[B], key=results[B].get)
+        return results
