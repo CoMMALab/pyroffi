@@ -17,6 +17,17 @@ from ._cuda_backends import CudaBackends
 from . import kinematics as _kinematics
 
 
+def _joint_var_cls(default_cfg):
+    try:
+        import jaxls
+    except ImportError:
+        return None
+
+    class JointVar(jaxls.Var[Array], default_factory=lambda: default_cfg): ...
+
+    return JointVar
+
+
 @jdc.pytree_dataclass
 class Robot:
     """A differentiable robot kinematics tree."""
@@ -49,6 +60,10 @@ class Robot:
     floating_base: jdc.Static[bool] = False
     """True when the root link is free in SE(3): ``cfg = [base wxyz_xyz (7) | joints]`` and
     velocity-like vectors are ``[base twist (6) | joints]`` (see :mod:`pyroffi._floating_base`)."""
+
+    joint_var_cls: jdc.Static[type | None] = None
+    """``jaxls.Var`` subclass for this robot's configuration, defaulting to ``default_cfg``
+    (PyRoKi's ``robot.joint_var_cls``). ``None`` when jaxls is not installed."""
 
     attached_names: jdc.Static[tuple[str, ...]] = ()
     """Names of the attachments already folded into ``dynamics.I_body``.
@@ -200,6 +215,7 @@ class Robot:
             ),
             _mjcf_model=mjcf_model,
             floating_base=bool(floating_base),
+            joint_var_cls=_joint_var_cls(default_joint_cfg),
         )
 
         return robot

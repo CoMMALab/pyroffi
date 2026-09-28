@@ -1,7 +1,6 @@
 """PyRoki (upstream 388e43e) drop-in compatibility for IK/FK, collision and viewer.
 
-`pk.costs`, the jaxls residuals and `Robot.joint_var_cls` are intentionally not
-provided, so they are not listed here.
+`pk.costs` and `Robot.joint_var_cls` (jaxls) are covered by tests/test_costs.py.
 """
 
 import dataclasses

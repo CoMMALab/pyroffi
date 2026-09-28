@@ -35,8 +35,23 @@ import pyroffi as pk  # was: import pyroki as pk
 checked by `tests/test_pyroki_compat.py`. The fast paths are opt-in: pass
 `use_cuda=True`.
 
-PyRoFFI does not ship PyRoki's jaxls cost layer (`pk.costs`, `Robot.joint_var_cls`).
-Use the built-in solvers instead:
+PyRoki's jaxls cost layer is available under the same names (`pip install -e .[costs]`):
+`pk.costs.*` factories and `robot.joint_var_cls` build ordinary jaxls problems, so
+`jaxls.LeastSquaresProblem(costs, vars).analyze().solve()` works unchanged. To run the
+same problem as a single CUDA kernel (costs, kinematics and Jacobians compiled to
+straight-line code, no JAX inside the solve loop), compile it:
+
+```python
+solver = pk.costs.compile(jaxls.LeastSquaresProblem(costs, [joint_var]))
+sol = solver.solve()                     # jaxls.VarValues: sol[joint_var]
+sol = solver.solve(new_problem)          # same structure, new targets: no recompile
+x, cost, viol = solver.solve_batch(params, x0)   # B problems in one launch
+```
+
+Robot and collision models, NumPy arrays and Python scalars are baked into the build;
+`jax.Array` arguments (targets, rest poses, obstacles) stay runtime inputs. The compiled
+solve supports Euclidean variables up to 32 scalars (IK-sized problems); larger or
+Lie-group problems stay on jaxls. The built-in solvers remain available too:
 
 | PyRoki pattern | PyRoFFI |
 | --- | --- |

@@ -57,6 +57,11 @@ cuda = [
     "jax-cuda13-plugin==0.10.2",
     "jax-cuda13-pjrt==0.10.2",
 ]
+# PyRoKi-named cost factories (pyroffi.costs) and Robot.joint_var_cls; the same
+# problems compile to CUDA with pyroffi.costs.compile (needs nvcc).
+costs = [
+    "jaxls @ git+https://github.com/brentyi/jaxls.git",
+]
 # MCP server exposing the pyroffi.toolbox primitives over stdio
 # (pyroffi.mcp / the `pyroffi-mcp` script). The toolbox layer itself has no new
 # dependencies -- only the transport adapter needs `mcp`.

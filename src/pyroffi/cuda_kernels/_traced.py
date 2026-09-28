@@ -270,16 +270,21 @@ def traced_target(kernel: str, urdf_xml: str, ee_link: str, actuated_names: tupl
     solved = chain_names if KERNELS[kernel][2] and not has_collision else actuated_names
     header = (_robot_header(urdf_xml, ee_link, actuated_names, joint_names, solved)
               + collision_src)
-    lib = ctypes.CDLL(str(_compile(kernel, header, len(solved), len(joint_names))))
+    so = _compile(kernel, header, len(solved), len(joint_names))
+    tag = hashlib.sha1(header.encode()).hexdigest()[:16]
+    return register_cuda_targets(so, KERNELS[kernel][1], f"traced_{tag}")
 
+
+def register_cuda_targets(so: Path, symbols: tuple[str, ...], tag: str) -> tuple[str, ...]:
+    """Load ``so`` and register each FFI handler symbol as CUDA target ``<symbol>_<tag>``."""
+    lib = ctypes.CDLL(str(so))
     capsule_new = ctypes.pythonapi.PyCapsule_New
     capsule_new.restype = ctypes.py_object
     capsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
-    tag = hashlib.sha1(header.encode()).hexdigest()[:16]
     names = []
-    for symbol in KERNELS[kernel][1]:
+    for symbol in symbols:
         capsule = capsule_new(
             ctypes.cast(getattr(lib, symbol), ctypes.c_void_p), b"xla._CUSTOM_CALL_TARGET", None)
-        names.append(f"{symbol}_traced_{tag}")
+        names.append(f"{symbol}_{tag}")
         jax.ffi.register_ffi_target(names[-1], capsule, platform="CUDA")
     return tuple(names)
