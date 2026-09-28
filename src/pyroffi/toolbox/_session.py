@@ -567,8 +567,8 @@ class Session:
 
         out = {"jax": True, "cuda_device": any(d.platform == "gpu" for d in jax.devices())}
         for name, module in (
-            ("cuda_collision", "pyroffi.cuda_kernels._collision_cuda_ffi"),
-            ("cuda_fk", "pyroffi.cuda_kernels._fk_cuda"),
+            ("cuda_collision", "pyroffi.cuda_kernels.collision._collision_cuda_ffi"),
+            ("cuda_fk", "pyroffi.cuda_kernels.fk._fk_cuda"),
             ("vamp", "vamp"),
         ):
             try:
