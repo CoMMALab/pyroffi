@@ -82,12 +82,17 @@ static_assert(TIER == Tier::Thread || NX <= TPB, "one Jacobian column per lane")
 static_assert(TIER == Tier::Thread || SLOT_FLOATS * 4 + 16 <= SHARED_BUDGET,
               "pyroffi.costs: per-problem state exceeds the shared-memory budget at this tier");
 
+// Termination as jaxls: relative cost change, gradient (inf-norm, from grad_start on) and
+// parameter step, whichever comes first.
 struct CostLmSettings {
     int max_iters;
     int al_iters;
     float lambda_initial;
-    float tolerance;
+    float tolerance;       // relative cost change
     float al_tolerance;
+    float grad_tolerance;
+    int grad_start;
+    float param_tolerance;
 };
 
 static __device__ __forceinline__ float merit(const float* r, const float* lam, float rho)
@@ -211,6 +216,29 @@ cost_lm_kernel(const float* __restrict__ x0, const float* __restrict__ params, i
                 for (int i = 0; i < NR; ++i) J[i * NX + rank] = jt[i];
             }
             sync();
+#ifdef PYROFFI_COST_SPARSE_NE
+            // Structurally sparse assembly: only the rows that touch both columns of an entry.
+            for (int e = rank; e < NX * NX; e += size) H[e] = 0.0f;
+            sync();
+            for (int k = rank; k < G::h_nnz; k += size) {
+                const int a = G::h_a[k], c = G::h_c[k];
+                float acc = 0.0f;
+                for (int q = G::h_ptr[k]; q < G::h_ptr[k + 1]; ++q) {
+                    const int i = G::h_rows[q];
+                    acc += w[i] * J[i * NX + a] * J[i * NX + c];
+                }
+                H[a * NX + c] = acc + (a == c ? mu : 0.0f);
+                H[c * NX + a] = acc + (a == c ? mu : 0.0f);
+            }
+            for (int a = rank; a < NX; a += size) {
+                float acc = 0.0f;
+                for (int q = G::g_ptr[a]; q < G::g_ptr[a + 1]; ++q) {
+                    const int i = G::g_rows[q];
+                    acc += w[i] * (r[i] + s[i]) * J[i * NX + a];
+                }
+                dx[a] = -acc;
+            }
+#else
             for (int e = rank; e < NX * NX; e += size) {
                 const int a = e / NX, c = e % NX;
                 float acc = 0.0f;
@@ -222,6 +250,7 @@ cost_lm_kernel(const float* __restrict__ x0, const float* __restrict__ params, i
                 for (int i = 0; i < NR; ++i) acc += w[i] * (r[i] + s[i]) * J[i * NX + a];
                 dx[a] = -acc;
             }
+#endif
 #else
             G::residual_jacobian(x, p, r, J, scratch, rank, size);  // syncs (w, s too)
             #pragma unroll
@@ -240,6 +269,11 @@ cost_lm_kernel(const float* __restrict__ x0, const float* __restrict__ params, i
                 dx[a] = -acc;
             }
 #endif
+            sync();
+            float gmax = 0.0f;  // dx holds -g here
+            #pragma unroll
+            for (int j = 0; j < NX; ++j) gmax = fmaxf(gmax, fabsf(dx[j]));
+            const bool grad_done = it >= st.grad_start && gmax < st.grad_tolerance;
             sync();
             const bool ok = pyroffi::tier_posv<TIER, float, NX>(H, dx, s_fail);
             sync();
@@ -265,11 +299,13 @@ cost_lm_kernel(const float* __restrict__ x0, const float* __restrict__ params, i
                 const float rel = (f - ft) / fmaxf(f, 1e-30f);
                 f = ft;
                 mu = fmaxf(mu * 0.25f, 1e-10f);
-                inner_done = rel < st.tolerance || step2 < st.tolerance * st.tolerance * (x2 + 1e-12f);
+                inner_done = rel < st.tolerance ||
+                             sqrtf(step2) < st.param_tolerance * (sqrtf(x2) + st.param_tolerance);
             } else {
                 mu *= 4.0f;
                 inner_done = mu > 1e10f;
             }
+            inner_done = inner_done || grad_done;
             if (!inner_done) continue;
             if constexpr (!G::has_constraints) break;
             if (al_updates++ >= st.al_iters) break;
@@ -319,11 +355,13 @@ static ffi::Error CostLmImpl(cudaStream_t stream, ffi::Buffer<ffi::DataType::F32
                              ffi::ResultBuffer<ffi::DataType::F32> viol_out,
                              ffi::ResultBuffer<ffi::DataType::F32> workspace,
                              int32_t max_iters, int32_t al_iters, float lambda_initial,
-                             float tolerance, float al_tolerance)
+                             float tolerance, float al_tolerance, float grad_tolerance,
+                             int32_t grad_start, float param_tolerance)
 {
     const int n_problems = static_cast<int>(x0.dimensions()[0]);
     const int param_stride = params.dimensions()[0] == 1 ? 0 : static_cast<int>(params.dimensions()[1]);
-    const CostLmSettings st{max_iters, al_iters, lambda_initial, tolerance, al_tolerance};
+    const CostLmSettings st{max_iters, al_iters, lambda_initial, tolerance, al_tolerance,
+                            grad_tolerance, grad_start, param_tolerance};
     const int per_block = TIER == Tier::Thread ? THREAD_TPB : (TIER == Tier::Warp ? WARPS_PER_BLOCK : 1);
     const int blocks = (n_problems + per_block - 1) / per_block;
     cost_lm_kernel<<<blocks, TPB, 0, stream>>>(
@@ -348,4 +386,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<int32_t>("al_iters")
         .Attr<float>("lambda_initial")
         .Attr<float>("tolerance")
-        .Attr<float>("al_tolerance"));
+        .Attr<float>("al_tolerance")
+        .Attr<float>("grad_tolerance")
+        .Attr<int32_t>("grad_start")
+        .Attr<float>("param_tolerance"));

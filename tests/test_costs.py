@@ -125,11 +125,18 @@ def test_unsupported_problems_raise(monkeypatch):
     with pytest.raises(NotImplementedError, match="Euclidean"):
         pk.LeastSquaresProblem([lie(se3)], [se3]).analyze()
 
-    class Big(pk.Var[jax.Array], default_factory=lambda: jnp.zeros(40)): ...
+    class Huge(pk.Var[jax.Array], default_factory=lambda: jnp.zeros(200)): ...
 
     small = pk.Cost.factory(lambda vals, v: vals[v])
-    with pytest.raises(NotImplementedError, match="up to 32"):
-        pk.LeastSquaresProblem([small(Big(0))], [Big(0)]).analyze()
+    with pytest.raises(NotImplementedError, match="up to 128"):
+        pk.LeastSquaresProblem([small(Huge(0))], [Huge(0)]).analyze()
+
+    # Past 32 variables only the block tier (one Jacobian column per thread) is offered.
+    class Big(pk.Var[jax.Array], default_factory=lambda: jnp.zeros(40)): ...
+
+    k = pk.LeastSquaresProblem([small(Big(0))], [Big(0)]).analyze()._kernel
+    assert [t for t in C.TIERS if k.available(t)] == ["block"]
+    assert k.auto_tier(1) == k.auto_tier(10_000) == "block"
 
 
 def test_builds_are_cached_by_baked_values(panda, monkeypatch):
