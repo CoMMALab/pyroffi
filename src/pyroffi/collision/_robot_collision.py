@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 from .. import _registry
 from .._robot_urdf_parser import RobotURDFParser
-from ._collision import collide, pairwise_collide
+from ._collision import collide
 from ._geometry import Capsule, CollGeom, Sphere
 
 
@@ -468,16 +468,13 @@ class RobotCollision(_AttachmentFieldsMixin):
         coll = self.at_config(robot, cfg)
         assert coll.get_batch_axes() == (*batch_axes, self.num_links)
 
-        # 2. Compute all pairwise distances using the imported function
-        dist_matrix = pairwise_collide(coll, coll)
-        assert dist_matrix.shape == (
-            *batch_axes,
-            self.num_links,
-            self.num_links,
-        )
-        # 3. Extract distances for the precomputed active pairs
-        # Use advanced indexing with the stored indices
-        active_distances = dist_matrix[..., self.active_idx_i, self.active_idx_j]
+        # 2. Distances for the precomputed active pairs only: select each pair's two capsules
+        #    along the link axis, then collide them elementwise (not all N x N link pairs).
+        def links(idx):
+            lead = (slice(None),) * len(batch_axes)
+            return jax.tree.map(lambda x: x[(*lead, idx)], coll)
+
+        active_distances = collide(links(self.active_idx_i), links(self.active_idx_j))
 
         active_distances = self._mask_inactive_pairs(
             active_distances, self.active_idx_i, self.active_idx_j
