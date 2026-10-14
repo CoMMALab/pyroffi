@@ -335,6 +335,12 @@ class DynamicsAwareTrajOptConfig:
     is a jerky detour that stage 2 cannot retime within the velocity limit
     (scale 1: 15-18x the velocity limit after stage 1; 100: 5-7x, then 1.0x)."""
 
+    extra_constraints: tuple = ()
+    """Caller inequality constraints ``fn(traj (T, DOF)) -> residual`` (feasible where
+    ``<= 0``) on the full trajectory, endpoints included, enforced in both stages (e.g. a
+    task-space region on every waypoint). Must be hashable (module-level or cached
+    callables): the config is a static jit argument."""
+
     solver: DynamicsTrajOptConfig = DynamicsTrajOptConfig(
         n_iters=15, use_sco=True, n_outer_iters=20, adaptive_trust=True, tr_coef0=0.5
     )
@@ -437,7 +443,8 @@ def _dynamics_aware_trajopt_jax(
         ineq(collision_residual, "collision", cfg.w_collision, cfg.w_collision_max,
              cfg.penalty_scale),
         ineq(limit_residual, "joint_limit"),
-    )
+    ) + tuple(ineq(lambda x, f=f: f(full(x)), f"extra_{i}")
+              for i, f in enumerate(cfg.extra_constraints))
     terms = path_terms + (
         ineq(velocity_residual, "velocity_limit"),
         ineq(torque_residual, "torque_limit"),
