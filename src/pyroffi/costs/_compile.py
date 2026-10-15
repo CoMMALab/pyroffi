@@ -1388,6 +1388,18 @@ class AnalyzedLeastSquaresProblem:
         """Flat ``(n_q,)`` variables to :class:`VarValues`."""
         return VarValues({key: sl.value(x) for key, sl in self._kernel.layout.items()})
 
+    def _upload_natives(self, target: str) -> None:
+        """This problem's native runtime data (e.g. a collision world) into the kernel that runs
+        it: the compiled kernel is shared by problems whose native data differs only in value."""
+        natives = [p.cost.native for p in self._plans if p.cost.native is not None and p.cost.native.setter]
+        if not natives:
+            return
+        from grim.motion import _build
+        from ._native import upload
+        lib = _build.LIBRARIES[target]
+        for nat in {n.setter: n for n in natives}.values():
+            upload(nat, lib)
+
     def solve_batch(self, params: jax.Array, x0: jax.Array, *, tier: str = "auto", **settings):
         """Solve ``B`` problems of this structure in one kernel launch.
 
@@ -1417,7 +1429,9 @@ class AnalyzedLeastSquaresProblem:
             tier = k.auto_tier(B)
         elif tier not in TIERS:
             raise ValueError(f"tier must be 'auto' or one of {TIERS}, got {tier!r}")
-        call = jax.ffi.ffi_call(k.target(tier), (
+        target = k.target(tier)
+        self._upload_natives(target)
+        call = jax.ffi.ffi_call(target, (
             jax.ShapeDtypeStruct((B, k.n_q), io),
             jax.ShapeDtypeStruct((B,), io),
             jax.ShapeDtypeStruct((B,), io),
