@@ -1,17 +1,12 @@
-"""Interactive: drag the Panda through a point-cloud field, RoboGPU vs CAPT.
+"""Interactive: drag the Panda through a point-cloud field, checked by RoboGPU.
 
 Grab the transform gizmo and sweep the arm (via IK) through a wall of points.
 The robot is drawn as its collision-sphere model; whenever a link's spheres
 overlap the point cloud the whole link turns **red**, and the offending points
-turn red too.  Two collision backends are evaluated every frame and reported in
-the GUI panel so you can visually confirm they agree with what you see:
-
-  * **RoboGPU**  — OptiX ray-tracing sphere-octree checker (GPU).  Uses the same
-    pyroffi spherized model that drives the red colouring, so its verdict should
-    match the "any link red" reference exactly.
-  * **CAPT**     — VAMP's Collision-Affording Point Tree checker (CPU).  Uses
-    VAMP's *own* internal spherization, so its verdict may differ slightly near
-    grazing contacts — that divergence is exactly what this tool lets you see.
+turn red too.  RoboGPU (OptiX ray-tracing sphere-octree checker) is evaluated every
+frame and reported in the GUI panel. It uses the same pyroffi spherized model that
+drives the red colouring, so its verdict should match the "any link red" reference
+exactly.
 
 The brute-force per-sphere test (NumPy) is the ground-truth reference for the
 red colouring.
@@ -28,8 +23,7 @@ Multi-GPU (pmap)
 Run (inside the `pyroffi` conda env):
     # build the kernels first:
     #   bash build_kernels/build_robogpu_collision.sh
-    #   bash build_kernels/build_cricket_jit.sh        (optional, for CAPT)
-    python examples/13_02_robogpu_vs_capt_pointcloud.py
+    python examples/13_00_robogpu_pointcloud.py
 """
 
 import os
@@ -53,7 +47,6 @@ from pyroffi.collision._cuda_collision import _spherized_local_geometry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPHERIZED_URDF = REPO_ROOT / "resources" / "panda" / "panda_spherized.urdf"
-SRDF = REPO_ROOT / "resources" / "panda" / "panda.srdf"
 
 TARGET_LINK = "panda_hand"
 R_ENV = 0.02              # environment point sphere radius
@@ -89,7 +82,6 @@ def main() -> None:
     sphere_link = np.arange(K) % NL                            # link index per sphere
     sphere_valid = f_local[:, 3] > 0.0
     radii_all = f_local[:, 3].copy()
-    r_robot_max = float(radii_all[sphere_valid].max())
 
     # Map each collision-model link to its forward-kinematics link index.
     fk_idx = np.array(
@@ -141,19 +133,6 @@ def main() -> None:
     print(f"pmap RoboGPU over {n_devices} GPU(s): "
           f"{n_devices * N_PER_DEVICE} candidates/frame")
 
-    capt = None
-    try:
-        from pyroffi.collision import VAMPCPUCollisionChecker
-        print("Building CAPT (VAMP) checker ... (first run JIT-compiles)")
-        capt = VAMPCPUCollisionChecker(SPHERIZED_URDF, srdf_path=SRDF)
-        capt.set_world(
-            far, point_cloud=points_j,
-            capt_r_min=0.0, capt_r_max=r_robot_max, capt_r_point=R_ENV,
-        )
-        print("  CAPT ready.")
-    except Exception as exc:
-        print(f"  CAPT unavailable ({exc}); continuing with RoboGPU only.")
-
     # ── Viser scene ──────────────────────────────────────────────────────────
     server = viser.ViserServer()
     server.scene.add_grid("/ground", width=2.0, height=2.0)
@@ -189,10 +168,8 @@ def main() -> None:
     # GUI readouts.
     g_ref = server.gui.add_text("Reference (red links)", "—", disabled=True)
     g_rg = server.gui.add_text("RoboGPU verdict", "—", disabled=True)
-    g_capt = server.gui.add_text("CAPT verdict", "—", disabled=True)
     g_agree = server.gui.add_text("RoboGPU == reference", "—", disabled=True)
     g_t_rg = server.gui.add_number("RoboGPU (us)", 0.0, disabled=True)
-    g_t_capt = server.gui.add_number("CAPT (us)", 0.0, disabled=True)
     g_pmap = server.gui.add_text(
         f"pmap free / total ({n_devices} GPUs)", "—", disabled=True)
     g_t_pmap = server.gui.add_number("pmap batch (us)", 0.0, disabled=True)
@@ -276,16 +253,6 @@ def main() -> None:
         g_pmap.value = f"{n_free} / {n_total}"
         pmap_ref_free = bool(verdicts_np[0, 0])
         g_pmap_agree.value = "yes" if (pmap_ref_free == rg_free) else "NO — mismatch!"
-
-        # CAPT verdict.
-        if capt is not None:
-            t0 = time.perf_counter()
-            capt_free = bool(np.asarray(
-                capt.check_collision_free(None, cfg[None, :])).reshape(()))
-            g_t_capt.value = (time.perf_counter() - t0) * 1e6
-            g_capt.value = "free" if capt_free else "COLLISION"
-        else:
-            g_capt.value = "n/a"
 
         time.sleep(0.02)
 

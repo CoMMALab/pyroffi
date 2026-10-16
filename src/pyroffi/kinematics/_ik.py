@@ -44,12 +44,6 @@ def _resolve_solver(solver: str, use_cuda: bool):
         from ..optimization_engines._ls_ik import ls_ik_solve
 
         return ls_ik_solve, False
-    if solver == "quik":
-        # QuIK is a CPU C++ (Halley's-method) serial-chain backend; it ignores
-        # use_cuda and takes no differentiable constraints.
-        from ..optimization_engines._quik_ik import quik_ik_solve
-
-        return quik_ik_solve, False
     if solver == "analytic":
         # Closed-form subproblem decomposition. Unlike the iterative solvers it
         # takes no seeds and no differentiable constraints; `use_cuda` selects
@@ -59,15 +53,9 @@ def _resolve_solver(solver: str, use_cuda: bool):
 
         return analytic_ik_solve, False
 
-    if solver == "halley":
-        # Pure-JAX reimplementation of QuIK's third-order Halley update; runs on
-        # whatever JAX platform is active (use JAX_PLATFORMS=cpu for CPU-only).
-        from ..optimization_engines._halley_ik import halley_ik_solve
-
-        return halley_ik_solve, False
     raise ValueError(
-        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls', 'quik', "
-        f"'halley' or 'analytic'."
+        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls' "
+        f"or 'analytic'."
     )
 
 
@@ -159,17 +147,9 @@ def inverse_kinematics(
 
     Args:
         solver:            ``"hjcd"`` (two-phase coordinate-descent + LM),
-                           ``"ls"`` (Levenberg-Marquardt least-squares),
-                           ``"quik"`` (QuIK C++ Halley's-method CPU backend, a
-                           fast serial-chain solver for ``JAX_PLATFORMS=cpu``
-                           planning), or ``"halley"`` (a pure-JAX reimplementation
-                           of QuIK's third-order update — same algorithm, any JAX
-                           platform).  ``quik``/``halley`` are single-end-effector
-                           serial-chain solvers and ignore differentiable
-                           constraints.
+                           or ``"ls"`` (Levenberg-Marquardt least-squares).
         use_cuda:          Select the CUDA FFI backend for the chosen solver
-                           instead of the pure-JAX implementation (ignored by
-                           ``quik``/``halley``).
+                           instead of the pure-JAX implementation.
         target_link_name:  A single link name, or a sequence of names for a
                            multi-end-effector (e.g. bimanual) solve.
         target_pose:       A matching single ``SE3`` or sequence of poses.
@@ -223,17 +203,6 @@ def inverse_kinematics(
             constraint_args=tuple(constraint_args) or None,
             constraint_weights=constraint_weights,
         )
-        # Hoist the CUDA solvers' host-side ancestor-mask precompute out of the
-        # trace by deriving it from the robot's *concrete* kinematic structure
-        # (cached on the backends holder).  Passing these lets the whole CUDA
-        # IK call run inside a caller's jax.jit.  Falls back to the solver's own
-        # in-trace-incompatible precompute if no backends holder is present.
-        if robot._backends is not None:
-            target_jnts, ancestor_masks = robot._backends.ik_ancestor_masks(
-                target_link_indices
-            )
-            constraint_kwargs["ancestor_masks"] = ancestor_masks
-            constraint_kwargs["target_jnts"] = target_jnts
     else:
         constraint_kwargs = dict(
             constraint_fns=tuple(constraints),

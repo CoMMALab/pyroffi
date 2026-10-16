@@ -61,9 +61,14 @@ def test_single_and_multi_ee(panda):
     pos, rot = _pose_errors(robot, link, q, target)
     assert pos < 1e-3 and rot < 1e-2
 
-    with pytest.raises(NotImplementedError):
-        sqp_ik_solve_cuda(robot, (link, link), (target, target), jax.random.PRNGKey(1),
-                          robot.default_cfg, traced=True)
+    # GRiM traces every frame, so several end-effectors work traced as well.
+    elbow = robot.links.names.index("panda_link4")
+    poses = robot.forward_kinematics(robot.default_cfg)
+    q = sqp_ik_solve_cuda(robot, (link, elbow), (target, jaxlie.SE3(poses[elbow])),
+                          jax.random.PRNGKey(1), robot.default_cfg, traced=True)
+    for lk in (link, elbow):
+        pos, rot = _pose_errors(robot, lk, q, jaxlie.SE3(poses[lk]))
+        assert pos < 1e-3 and rot < 1e-2
 
 
 @pytest.mark.parametrize("solve", BATCH_SOLVERS, ids=SOLVER_IDS)

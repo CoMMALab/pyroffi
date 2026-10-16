@@ -1,85 +1,31 @@
-"""JAX FFI wrapper for the CUDA analytic-IK kernel.
+"""Analytic IK on the GPU: GRiM's closed-form kernel (``grim.motion.analytic_ik``).
 
-The companion shared library ``_analytic_ik_cuda_lib.so`` must be compiled from
-``_analytic_ik_cuda_kernel.cu`` before this module can be imported:
-
-    bash build_kernels/build_analytic_ik_cuda.sh
-
-Unlike the LM-based CUDA IK solvers, this one takes no robot-model buffers.
-The arm geometry is resolved once on the host by
-:func:`pyroffi.kinematics._analytic_ik.build_geometry` and packed into a single
-flat float64 blob, so the kernel does no model traversal at all.
-
-Requires JAX >= 0.4.14 (for jax.ffi).
+GRiM bakes the arm geometry into a per-robot build, so a solve takes the build's FFI target
+(:func:`build_target`, outside jit) rather than a geometry blob. This module adds what the
+JAX front end needs on top: obstacle flattening, zero-derivative declaration, and a
+``custom_vmap`` rule that folds a vmap into the kernel's own batch.
 """
 
 from __future__ import annotations
 
-import ctypes
 from functools import lru_cache
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
-
-from ...optimization_engines._batching import constant_wrt_autodiff
 import numpy as np
 
-_LIB_NAME = "_analytic_ik_cuda_lib.so"
-
-#: Scalars in the packed geometry blob. Must equal GEOM_N_SCALARS in the kernel;
-#: the kernel re-checks and errors out rather than reading past the end.
-GEOM_N_SCALARS = 95
+from ._batching import constant_wrt_autodiff
 
 
-@lru_cache(maxsize=1)
-def _load_and_register() -> None:
-    """Load the shared library and register the FFI target (runs once)."""
-    lib_path = Path(__file__).parent / _LIB_NAME
-    if not lib_path.exists():
-        raise RuntimeError(
-            f"Analytic-IK CUDA library not found at {lib_path}.\n"
-            "Compile it first with:  bash build_kernels/build_analytic_ik_cuda.sh\n"
-        )
-    lib = ctypes.CDLL(str(lib_path))
+def build_target(robot, ee_link_index: int) -> str:
+    """GRiM's analytic-IK kernel for the chain ending at link ``ee_link_index``."""
+    from .. import _grim
 
-    _PyCapsule_New = ctypes.pythonapi.PyCapsule_New
-    _PyCapsule_New.restype = ctypes.py_object
-    _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    _grim.ensure_importable()
+    from grim.motion import analytic_ik
 
-    capsule = _PyCapsule_New(
-        ctypes.cast(getattr(lib, "AnalyticIkCudaFfi"), ctypes.c_void_p),
-        b"xla._CUSTOM_CALL_TARGET",
-        None,
-    )
-    jax.ffi.register_ffi_target("analytic_ik_cuda", capsule, platform="CUDA")
-
-
-def pack_geometry(geom) -> np.ndarray:
-    """Flatten an :class:`~pyroffi.kinematics._analytic_ik.ArmGeometry` blob.
-
-    Field order must match ``struct ArmGeom`` in the kernel exactly. It is
-    asserted rather than trusted: a silent layout drift would not crash, it
-    would return plausible-looking wrong joint angles.
-    """
-    m_home = np.asarray(geom.m_home, dtype=np.float64)
-    parts = [
-        np.asarray(geom.axes, dtype=np.float64).reshape(-1),      # 21
-        np.asarray(geom.points, dtype=np.float64).reshape(-1),    # 21
-        np.asarray(geom.shoulder, dtype=np.float64).reshape(-1),  # 3
-        np.asarray(geom.wrist, dtype=np.float64).reshape(-1),     # 3
-        m_home.reshape(-1),                                       # 16
-        np.linalg.inv(m_home).reshape(-1),                        # 16
-        np.atleast_1d(np.asarray(geom.cos_alpha, dtype=np.float64)),  # 1
-        np.asarray(geom.lower, dtype=np.float64).reshape(-1),     # 7
-        np.asarray(geom.upper, dtype=np.float64).reshape(-1),     # 7
-    ]
-    blob = np.concatenate(parts)
-    if blob.size != GEOM_N_SCALARS:
-        raise AssertionError(
-            f"packed geometry has {blob.size} scalars, kernel expects "
-            f"{GEOM_N_SCALARS}; the struct layout and packer have drifted apart")
-    return blob
+    joint = int(robot._backends._parent_joint_indices[int(ee_link_index)])
+    return analytic_ik.build(_grim.motion_robot(robot), joint)
 
 
 class _Coll:
@@ -96,7 +42,7 @@ class _Coll:
 @lru_cache(maxsize=1)
 def _empty_collision_buffers():
     """Cached zero-length device buffers for the no-collision path."""
-    return (jnp.zeros((0, 4), jnp.float64),
+    return (jnp.zeros((0, 4), jnp.float32),
             jnp.zeros((0,), jnp.int32),
             jnp.zeros((0, 2), jnp.int32))
 
@@ -120,7 +66,7 @@ def world_arrays(world):
                 jnp.asarray(world.boxes, jnp.float32),
                 jnp.asarray(world.halfspaces, jnp.float32))
 
-    from ...collision._cuda_collision import _extract_world_arrays
+    from ..collision._cuda_collision import _extract_world_arrays
     items = world if isinstance(world, (list, tuple)) else (world,)
     chunks = ([], [], [], [])
     for w in items:
@@ -139,13 +85,8 @@ def _empty_world():
             jnp.zeros((0, 15), jnp.float32), jnp.zeros((0, 6), jnp.float32))
 
 
-_EMPTY_SPH = np.zeros((0, 4), dtype=np.float64)
-_EMPTY_IDX = np.zeros((0,), dtype=np.int32)
-_EMPTY_PAIR = np.zeros((0, 2), dtype=np.int32)
-
-
 def _analytic_ik_cuda_raw(
-    geom_blob,
+    target,
     targets,
     q7_samples,
     previous_cfg=None,
@@ -159,79 +100,46 @@ def _analytic_ik_cuda_raw(
     """Batched analytic IK on the GPU.
 
     Args:
-        geom_blob: ``[95]`` float64 blob from :func:`pack_geometry`.
+        target: FFI target from :func:`build_target`.
         targets: ``[B, 4, 4]`` target poses.
         q7_samples: ``[S]`` redundancy-parameter values to try.
         previous_cfg: optional ``[B, 7]``; when given the returned branch is the
             valid one closest to it in joint space (continuity resolution)
             rather than the lowest-error one.
+        collision: spheres_home / sphere_joint / self_pairs carrier, or None.
+        world_spheres: the four world buffers, or None.
         respect_limits: discard branches outside the joint limits.
         err_tol: pose-error threshold below which a branch counts as a solution.
 
     Returns:
-        ``(q[B, 7], err[B], found[B])`` with ``found`` a boolean array. When
+        ``(q[B, 7], err[B], found[B], clearance[B])`` with ``found`` a boolean array. When
         ``found`` is False, ``q`` still holds the lowest-error near-miss.
     """
-    _load_and_register()
+    from grim.motion import analytic_ik
+    from grim.motion.ik import World
 
-    targets = jnp.asarray(targets, dtype=jnp.float64)
+    targets = jnp.asarray(targets, jnp.float32)
     if targets.ndim == 2:
         targets = targets[None, ...]
-    batch = targets.shape[0]
-
-    q7_samples = jnp.asarray(q7_samples, dtype=jnp.float32).reshape(-1)
-    geom_blob = jnp.asarray(geom_blob, dtype=jnp.float64).reshape(-1)
-
     use_prev = previous_cfg is not None
-    prev = (jnp.asarray(previous_cfg, dtype=jnp.float32).reshape(batch, 7)
-            if use_prev else jnp.zeros((batch, 7), dtype=jnp.float32))
-
-    # Collision buffers; empty arrays disable the collision path entirely, and
-    # the kernel then allocates no sphere scratch and keeps its full block size.
-    if collision is None:
-        sph_home, sph_joint, pairs = _EMPTY_SPH, _EMPTY_IDX, _EMPTY_PAIR
-    else:
-        sph_home = collision.spheres_home
-        sph_joint = collision.sphere_joint
-        pairs = collision.self_pairs
+    sph_home, sph_joint, pairs = (_empty_collision_buffers() if collision is None else
+                                  (collision.spheres_home, collision.sphere_joint,
+                                   collision.self_pairs))
     world = _empty_world() if world_spheres is None else world_spheres
-    w_sph, w_cap, w_box, w_hs = world
 
-    # Zero-derivative by declaration; the implicit rule supplies the real
-    # gradient. Operands positional -- see constant_wrt_autodiff.
-    # Every ARRAY is an operand, in the handler's declared order. The three
-    # collision buffers belong here, not in the keyword block: they are written
-    # with `dtype=` rather than `.astype()`, and an earlier split that keyed on
-    # the presence of "=" misfiled them as attributes. The FFI then rejected the
-    # call with "bad operands at: 5, 6, 7, 9, 10, 11" -- positions, not names,
-    # which is why it read as a dtype problem rather than a missing-argument one.
-    _ops = (
-        geom_blob, targets, q7_samples, prev,
-        jnp.asarray(sph_home, dtype=jnp.float64),
-        jnp.asarray(sph_joint, dtype=jnp.int32),
-        jnp.asarray(pairs, dtype=jnp.int32).reshape(-1, 2),
-        w_sph, w_cap, w_box, w_hs,
-    )
+    # Zero-derivative by declaration; the implicit rule supplies the real gradient. Every
+    # array is an operand of the wrapped call -- see constant_wrt_autodiff.
+    def _run(targets, q7, prev, sph_home, sph_joint, pairs, *world):
+        return analytic_ik.run(target, targets, q7, prev if use_prev else None,
+                               spheres_home=sph_home, sphere_joint=sph_joint,
+                               self_pairs=pairs, world=World(*world),
+                               respect_limits=bool(respect_limits), err_tol=float(err_tol),
+                               margin=float(margin))
 
-    def _run(*ops):
-        return jax.ffi.ffi_call(
-            "analytic_ik_cuda",
-            (
-                jax.ShapeDtypeStruct((batch, 7), jnp.float32),
-                jax.ShapeDtypeStruct((batch,), jnp.float32),
-                jax.ShapeDtypeStruct((batch,), jnp.int32),
-                jax.ShapeDtypeStruct((batch,), jnp.float32),
-            ),
-            vmap_method="sequential",
-        )(
-            *ops,
-            respect_limits=np.int64(bool(respect_limits)),
-            use_prev=np.int64(bool(use_prev)),
-            err_tol=np.float32(err_tol),
-            margin=np.float32(margin),
-        )
-
-    q, err, found, clearance = constant_wrt_autodiff(_run)(*_ops)
+    prev = (jnp.zeros((targets.shape[0], 7), jnp.float32) if previous_cfg is None
+            else previous_cfg)
+    q, err, found, clearance = constant_wrt_autodiff(_run)(
+        targets, q7_samples, prev, sph_home, sph_joint, pairs, *world)
     return q, err, found.astype(bool), clearance
 
 
@@ -262,29 +170,29 @@ def _flatten_leading(x, ndim_core):
 # scene's geometry for every later call — a stale-obstacle bug that produces
 # plausible wrong answers rather than an error.
 @lru_cache(maxsize=16)
-def _make_batched(respect_limits: bool, err_tol: float, use_prev: bool,
+def _make_batched(target: str, respect_limits: bool, err_tol: float, use_prev: bool,
                   margin: float, has_collision: bool):
     @jax.custom_batching.custom_vmap
-    def f(geom_blob, targets, q7_samples, prev,
+    def f(targets, q7_samples, prev,
           sph_home, sph_joint, pairs, w_sph, w_cap, w_box, w_hs):
         coll = _Coll(sph_home, sph_joint, pairs) if has_collision else None
         return _analytic_ik_cuda_raw(
-            geom_blob, targets, q7_samples, prev if use_prev else None,
+            target, targets, q7_samples, prev if use_prev else None,
             coll, (w_sph, w_cap, w_box, w_hs),
             respect_limits=respect_limits, err_tol=err_tol, margin=margin)
 
     @f.def_vmap
-    def _rule(axis_size, in_batched, geom_blob, targets, q7_samples, prev,
+    def _rule(axis_size, in_batched, targets, q7_samples, prev,
               sph_home, sph_joint, pairs, w_sph, w_cap, w_box, w_hs):
-        geom_b, tgt_b, q7_b, prev_b = in_batched[:4]
-        coll_b = any(in_batched[4:])
+        tgt_b, q7_b, prev_b = in_batched[:3]
+        coll_b = any(in_batched[3:])
 
-        # Geometry, the q7 sweep and the collision scene are shared across a
-        # vmap in every sane use; a per-example one would need its own launch,
-        # so refuse loudly rather than silently applying example 0's to all.
-        if geom_b or q7_b or coll_b:
+        # The q7 sweep and the collision scene are shared across a vmap in
+        # every sane use; a per-example one would need its own launch, so
+        # refuse loudly rather than silently applying example 0's to all.
+        if q7_b or coll_b:
             raise NotImplementedError(
-                "analytic_ik_cuda: vmap over the geometry blob, q7 samples or "
+                "analytic_ik_cuda: vmap over the q7 samples or "
                 "collision scene is not supported (one per launch). vmap over "
                 "`targets`.")
 
@@ -298,7 +206,7 @@ def _make_batched(respect_limits: bool, err_tol: float, use_prev: bool,
 
         coll = _Coll(sph_home, sph_joint, pairs) if has_collision else None
         q, err, found, clr = _analytic_ik_cuda_raw(
-            geom_blob, flat_t, q7_samples, flat_p if use_prev else None,
+            target, flat_t, q7_samples, flat_p if use_prev else None,
             coll, (w_sph, w_cap, w_box, w_hs),
             respect_limits=respect_limits, err_tol=err_tol, margin=margin)
 
@@ -309,7 +217,7 @@ def _make_batched(respect_limits: bool, err_tol: float, use_prev: bool,
     return f
 
 
-def analytic_ik_cuda(geom_blob, targets, q7_samples, previous_cfg=None, *,
+def analytic_ik_cuda(target, targets, q7_samples, previous_cfg=None, *,
                      collision=None, world_spheres=None,
                      respect_limits: bool = True, err_tol: float = 1e-4,
                      margin: float = 0.005):
@@ -326,7 +234,7 @@ def analytic_ik_cuda(geom_blob, targets, q7_samples, previous_cfg=None, *,
         ``(q[B,7], err[B], found[B], clearance[B])``. Clearance is ``+1e30``
         when collision checking is disabled.
     """
-    targets = jnp.asarray(targets, dtype=jnp.float64)
+    targets = jnp.asarray(targets, dtype=jnp.float32)
     if targets.ndim == 2:
         targets = targets[None, ...]
     batch = targets.shape[0]
@@ -342,14 +250,14 @@ def analytic_ik_cuda(geom_blob, targets, q7_samples, previous_cfg=None, *,
     # nearly doubled the no-collision solve at small batches.
     has_coll = collision is not None
     if has_coll:
-        sph_home = jnp.asarray(collision.spheres_home, dtype=jnp.float64)
+        sph_home = jnp.asarray(collision.spheres_home, dtype=jnp.float32)
         sph_joint = jnp.asarray(collision.sphere_joint, dtype=jnp.int32)
         pairs = jnp.asarray(collision.self_pairs, dtype=jnp.int32).reshape(-1, 2)
     else:
         sph_home, sph_joint, pairs = _empty_collision_buffers()
     world = world_arrays(world_spheres)
 
-    f = _make_batched(bool(respect_limits), float(err_tol), use_prev,
+    f = _make_batched(target, bool(respect_limits), float(err_tol), use_prev,
                       float(margin), has_coll)
-    return f(geom_blob, targets, q7_samples, prev,
+    return f(targets, q7_samples, prev,
              sph_home, sph_joint, pairs, *world)

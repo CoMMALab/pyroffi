@@ -46,7 +46,7 @@ from jaxtyping import Float
 from .._floating_base import sample_in_limits
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
-from ._ik_primitives import self_collision_table_arrays, traced_ffi_target
+from ._ik_primitives import grim_targets, run_grim, self_collision_table_arrays
 from ._batching import (
     dispatch_vmap_to_batched,
     make_sharded_pmap,
@@ -443,10 +443,6 @@ def _sqp_ik_solve_cuda_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
@@ -455,11 +451,6 @@ def _sqp_ik_solve_cuda_jit(
     # trace time bakes into the first trace and is silently reused, so enabling
     # self-collision would change nothing. As arguments their shapes are part of
     # the jit signature, so empty and populated tables compile separately.
-    self_sph_local:       Array,
-    self_link_start:      Array,
-    self_link_joint:      Array,
-    self_pair_i:          Array,
-    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -467,9 +458,8 @@ def _sqp_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
-    ffi_target:           str = "sqp_ik_cuda",
+    ffi_target=None,
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -497,44 +487,21 @@ def _sqp_ik_solve_cuda_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
 
     # ── CUDA SQP kernel (all EEs simultaneously) ──────────────────────────
-    cfgs, errors, feasible = sqp_ik_cuda(
-        seeds          = seeds[None],           # (1, n_seeds, n_act)
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_Ts[None],       # (1, n_ee, 7)
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        self_sph_local = self_sph_local,
-        self_link_start = self_link_start,
-        self_link_joint = self_link_joint,
-        self_pair_i = self_pair_i,
-        self_pair_j = self_pair_j,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        max_iter       = max_iter,
-        n_inner_iters  = n_inner_iters,
-        pos_weight     = pos_weight,
-        ori_weight     = ori_weight,
-        lambda_init    = lambda_init,
-        eps_pos        = eps_pos,
-        eps_ori        = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
-        ffi_target     = ffi_target,
+    cfgs, errors, feasible = run_grim(
+        ffi_target, seeds[None], target_Ts[None],
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        max_iter=max_iter,
+        n_inner_iters=n_inner_iters,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
     cfgs     = cfgs[0]      # (n_seeds, n_act)
     errors   = errors[0]    # (n_seeds,)
@@ -622,8 +589,7 @@ def sqp_ik_solve_cuda(
     ``n_inner_iters`` projected gradient steps (float32) to enforce joint
     limits as hard QP constraints.
 
-    Requires ``_sqp_ik_cuda_lib.so`` compiled from ``_sqp_ik_cuda_kernel.cu``:
-        bash build_kernels/build_sqp_ik_cuda.sh
+    GRiM's kernel (``external/GRiM``, ``kernels/ik/sqp_ik.cu``) compiles for the robot on first use.
 
     Multi-EE support
         Pass multiple end-effectors via ``target_link_indices`` (tuple) and
@@ -698,25 +664,6 @@ def sqp_ik_solve_cuda(
         collision_free=collision_free,
     )
 
-    # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    parent_idx_np           = np.array(robot.joints.parent_indices)
-    n_joints                = robot.joints.num_joints
-    n_ee_count              = len(target_link_indices)
-
-    target_joints_np  = np.zeros(n_ee_count, dtype=np.int32)
-    ancestor_masks_np = np.zeros((n_ee_count, n_joints), dtype=np.int32)
-    for _i, _link_idx in enumerate(target_link_indices):
-        _tgt_jnt = int(parent_joint_indices_np[_link_idx])
-        target_joints_np[_i] = _tgt_jnt
-        _j = _tgt_jnt
-        while _j >= 0:
-            ancestor_masks_np[_i, _j] = 1
-            _j = int(parent_idx_np[_j])
-
-    target_jnts    = jnp.array(target_joints_np)
-    ancestor_masks = jnp.array(ancestor_masks_np)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -731,8 +678,8 @@ def sqp_ik_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
-    (ffi_target,) = traced_ffi_target(
-        "sqp_ik", ("sqp_ik_cuda",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+    (ffi_target,) = grim_targets(
+        ("sqp",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
@@ -755,19 +702,10 @@ def sqp_ik_solve_cuda(
             eps_ori=eps_ori,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             enable_collision=bool(collision_free and collision_enabled),
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -803,19 +741,10 @@ def sqp_ik_solve_cuda(
             eps_ori=eps_ori,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             enable_collision=bool(collision_free and collision_enabled),
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -895,7 +824,7 @@ def _make_pmapped_batch(
     collision_margin:    float,
     target_link_indices: tuple,
     constraint_fns:      tuple,
-    ffi_target:          str = "sqp_ik_cuda",
+    ffi_target=None,
 ) -> Callable:
     """Build (once per static signature) a pmapped per-device batched solver.
 
@@ -908,11 +837,8 @@ def _make_pmapped_batch(
     """
     def _body(
         rng_key, previous_cfgs, target_wxyz,
-        robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
-        robot_spheres_local, robot_sphere_joint_idx,
+        robot, fixed_joint_mask_int,
         world_spheres, world_capsules, world_boxes, world_halfspaces,
-        self_sph_local, self_link_start, self_link_joint,
-        self_pair_i, self_pair_j,
         constraint_weights, constraint_args,
     ):
         return _sqp_ik_solve_cuda_batch_jit(
@@ -930,19 +856,10 @@ def _make_pmapped_batch(
             eps_ori=eps_ori,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             enable_collision=enable_collision,
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -957,10 +874,10 @@ def _make_pmapped_batch(
     # (including constraint_args — array data, so a runtime broadcast arg rather
     # than part of the lru_cache compilation key, which must stay hashable).
     # Mapped: rng_key, previous_cfgs, target_wxyz. Broadcast: the remaining
-    # 17 -- robot model, collision buffers, per-EE masks, constraint
-    # weights. Those describe the robot and the world rather than the problem,
-    # so replicating them is correct and splitting them would be a bug.
-    return make_sharded_pmap(_body, 17)
+    # 8 -- robot model, fixed mask, world buffers, constraint weights and args.
+    # Those describe the robot and the world rather than the problem, so
+    # replicating them is correct and splitting them would be a bug.
+    return make_sharded_pmap(_body, 8)
 
 
 @functools.partial(
@@ -997,10 +914,6 @@ def _sqp_ik_solve_cuda_batch_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
@@ -1009,11 +922,6 @@ def _sqp_ik_solve_cuda_batch_jit(
     # trace time bakes into the first trace and is silently reused, so enabling
     # self-collision would change nothing. As arguments their shapes are part of
     # the jit signature, so empty and populated tables compile separately.
-    self_sph_local:       Array,
-    self_link_start:      Array,
-    self_link_joint:      Array,
-    self_pair_i:          Array,
-    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -1021,9 +929,8 @@ def _sqp_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
-    ffi_target:           str = "sqp_ik_cuda",
+    ffi_target=None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits
@@ -1050,44 +957,21 @@ def _sqp_ik_solve_cuda_batch_jit(
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, n_seeds, n_act)
 
-    cfgs, errors, feasible = sqp_ik_cuda(
-        seeds          = seeds,
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_T_batch,
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        self_sph_local = self_sph_local,
-        self_link_start = self_link_start,
-        self_link_joint = self_link_joint,
-        self_pair_i = self_pair_i,
-        self_pair_j = self_pair_j,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        max_iter       = max_iter,
-        n_inner_iters  = n_inner_iters,
-        pos_weight     = pos_weight,
-        ori_weight     = ori_weight,
-        lambda_init    = lambda_init,
-        eps_pos        = eps_pos,
-        eps_ori        = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
-        ffi_target     = ffi_target,
+    cfgs, errors, feasible = run_grim(
+        ffi_target, seeds, target_T_batch,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        max_iter=max_iter,
+        n_inner_iters=n_inner_iters,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
 
     if len(constraint_fns) > 0:
@@ -1161,18 +1045,6 @@ def _sqp_ik_batch_prep(
         collision_free=collision_free,
     )
 
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
-    parent_idx_np    = np.array(robot.joints.parent_indices)
-    n_joints         = robot.joints.num_joints
-    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1193,7 +1065,6 @@ def _sqp_ik_batch_prep(
         _robot_k, target_link_indices, n_act, fixed_joint_mask_int,
         cuda_constraint_fns, cuda_constraint_args, cuda_constraint_weights,
         post_constraint_fns, post_constraint_args, post_constraint_weights,
-        ancestor_masks, target_jnts,
         robot_spheres_local, robot_sphere_joint_idx, world_spheres,
         world_capsules, world_boxes, world_halfspaces,
         self_sph_local, self_link_start, self_link_joint,
@@ -1266,14 +1137,13 @@ def _sqp_ik_solve_cuda_batch_impl(
         _robot_k, target_link_indices, n_act, fixed_joint_mask_int,
         cuda_constraint_fns, cuda_constraint_args, cuda_constraint_weights,
         post_constraint_fns, post_constraint_args, post_constraint_weights,
-        ancestor_masks, target_jnts,
         robot_spheres_local, robot_sphere_joint_idx, world_spheres,
         world_capsules, world_boxes, world_halfspaces,
         self_sph_local, self_link_start, self_link_joint,
         self_pair_i, self_pair_j, enable_collision,
     ) = _prep
-    (ffi_target,) = traced_ffi_target(
-        "sqp_ik", ("sqp_ik_cuda",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+    (ffi_target,) = grim_targets(
+        ("sqp",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
@@ -1293,11 +1163,8 @@ def _sqp_ik_solve_cuda_batch_impl(
         )
         winners = run_sharded(
             pmapped, target_poses, rng_key, previous_cfgs, n_devices,
-            robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
-            robot_spheres_local, robot_sphere_joint_idx,
+            robot, fixed_joint_mask_int,
             world_spheres, world_capsules, world_boxes, world_halfspaces,
-            self_sph_local, self_link_start, self_link_joint,
-            self_pair_i, self_pair_j,
             cuda_constraint_weights, tuple(cuda_constraint_args),
         )
     else:
@@ -1316,19 +1183,10 @@ def _sqp_ik_solve_cuda_batch_impl(
             eps_ori=eps_ori,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             enable_collision=enable_collision,
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -1624,19 +1482,6 @@ def sqp_ik_solve_cuda_sequential(
             "use the per-waypoint sqp_ik_solve_cuda_batch loop for those."
         )
 
-    # ── Per-EE ancestor masks (single-EE convention, mirrors the batch path) ──
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
-    parent_idx_np    = np.array(robot.joints.parent_indices)
-    n_joints         = robot.joints.num_joints
-    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1649,9 +1494,12 @@ def sqp_ik_solve_cuda_sequential(
     # Self-collision comes along with the checker: a spherized model carries its
     # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
     # (any other checker, or none) leave the kernel's self-collision path off.
-    (self_sph_local, self_link_start, self_link_joint,
-     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    self_tables = self_collision_table_arrays(robot, collision_checker)
     enable_collision = bool(collision_free and collision_enabled)
+    (ffi_target,) = grim_targets(
+        ("sqp",), robot, target_link_indices, False, robot_spheres_local,
+        robot_sphere_joint_idx, self_tables,
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
     lower = robot.joints.lower_limits
     upper = robot.joints.upper_limits
@@ -1695,19 +1543,10 @@ def sqp_ik_solve_cuda_sequential(
                 eps_ori=eps_ori,
                 continuity_weight=cont_i,
                 fixed_joint_mask_int=fixed_joint_mask_int,
-                ancestor_masks=ancestor_masks,
-                target_jnts=target_jnts,
-                robot_spheres_local=robot_spheres_local,
-                robot_sphere_joint_idx=robot_sphere_joint_idx,
                 world_spheres=world_spheres,
                 world_capsules=world_capsules,
                 world_boxes=world_boxes,
                 world_halfspaces=world_halfspaces,
-                self_sph_local=self_sph_local,
-                self_link_start=self_link_start,
-                self_link_joint=self_link_joint,
-                self_pair_i=self_pair_i,
-                self_pair_j=self_pair_j,
                 enable_collision=enable_collision,
                 collision_weight=collision_weight,
                 collision_margin=collision_margin,
@@ -1715,6 +1554,7 @@ def sqp_ik_solve_cuda_sequential(
                 constraint_fns=cuda_constraint_fns,
                 constraint_args=cuda_constraint_args,
                 constraint_weights=cuda_constraint_weights,
+                ffi_target=ffi_target,
             )   # (k_local, n_act) — one winner per thread
             return winners, winners
 

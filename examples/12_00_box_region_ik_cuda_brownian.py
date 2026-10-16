@@ -1,7 +1,6 @@
 """Sample Panda IK configurations with end-effector coverage inside a box region.
 
-Prerequisite:
-    bash build_kernels/build_brownian_motion_ik_cuda.sh
+The GRiM kernel compiles for the robot on first use.
 """
 
 from __future__ import annotations

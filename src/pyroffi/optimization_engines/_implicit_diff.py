@@ -394,66 +394,40 @@ def differentiable_ik_solution_batch(
     )(q_stars, target_poses.wxyz_xyz, jacs)
 
 
-#: Ancestor tables are derived by walking the chain with numpy, so they cannot be
-#: built under a trace. Keyed on link NAMES plus the EE tuple -- not id(robot),
-#: which would hand back another robot's chain after a garbage collection.
-_ANCESTOR_CACHE: dict = {}
-
-
 def _batch_task_jacobians(q_stars, robot, target_link_indices, target_wxyz_xyz):
-    """``(n_problems, 6*n_ee, n_act)`` task Jacobians from CUDA, or None.
+    """``(n_problems, 6*n_ee, n_act)`` task Jacobians from GRiM's kinematics kernel, or None.
 
-    Returns None -- and the caller falls back to ``jax.jacobian`` -- when the
-    kernel is unavailable or the robot's arrays are still tracers. The fallback
-    is deliberate: this is an optimisation of HOW J_q is obtained, and a missing
-    .so or an exotic tracing context should cost speed, never correctness.
+    Returns None -- and the caller falls back to ``jax.jacobian`` -- when the robot carries
+    no URDF for GRiM to build from. This is an optimisation of HOW J_q is obtained, so a
+    missing build costs speed, never correctness.
+
+    CONVENTION: ``J`` is the Jacobian of the kernels' residual (world-frame position error
+    stacked with a world-frame rotation error), so callers pair it with
+    ``_ik_residual_kernel_convention`` for the other blocks.
     """
-    from ..cuda_kernels.ik import _ik_jacobian
+    from .. import _grim
 
-    if not _ik_jacobian.library_available():
+    if robot._backends is None:
         return None
+    _grim.ensure_importable()
+    from grim.motion.kinematics import kinematics
 
     link_idx = ((target_link_indices,) if isinstance(target_link_indices, int)
                 else tuple(int(i) for i in target_link_indices))
-    try:
-        key = (tuple(robot.links.names), link_idx)
-        tables = _ANCESTOR_CACHE.get(key)
-        if tables is None:
-            tables = _ik_jacobian.ancestor_tables(robot, link_idx)
-            # NEVER cache a tracer. The tables are constants -- a numpy walk of
-            # the chain -- but `jnp.asarray` inside an active trace returns a
-            # value BOUND to that trace, and storing it in this module-level
-            # dict lets it outlive the transformation. The next call then reads
-            # it back and dies with UnexpectedTracerError, pointing at
-            # `ancestor_tables` rather than at the cache that kept it. Recompute
-            # instead: it is a short numpy loop, and the cached fast path still
-            # covers every call made outside a trace.
-            if not any(isinstance(t, jax.core.Tracer) for t in tables):
-                _ANCESTOR_CACHE[key] = tables
-        target_jnts, ancestor_masks = tables
+    parent_joint = robot._backends._parent_joint_indices
+    n_problems = q_stars.shape[0]
+    # EVERY input is detached. J_q enters the tangent rule as a CONSTANT, and an input
+    # still carrying a tangent makes JAX try to differentiate the FFI itself.
+    targets = jax.lax.stop_gradient(
+        jnp.asarray(target_wxyz_xyz).reshape(n_problems, len(link_idx), 7))
+    from .._floating_base import chart_rotation
 
-        # EVERY input is detached. J_q enters the tangent rule as a CONSTANT --
-        # differentiating it would be a second-order term the rule does not use
-        # -- and an input still carrying a tangent makes JAX try to
-        # differentiate the FFI itself, which fails outright with "The FFI call
-        # to `ik_task_jacobian` cannot be differentiated". This is the same cut
-        # `detached_robot` makes for the solve kernels, and the same treatment
-        # GRiD gives its analytic gradient kernels (constants for second order).
-        J = jax.tree.map(jax.lax.stop_gradient, robot.joints)
-        buffers = (J.twists, J.parent_transforms, J.parent_indices,
-                   J.actuated_indices, J.mimic_multiplier, J.mimic_offset,
-                   J.mimic_act_indices, J._topo_sort_inv)
-        n_problems = q_stars.shape[0]
-        targets = jax.lax.stop_gradient(
-            jnp.asarray(target_wxyz_xyz).reshape(n_problems, len(link_idx), 7))
-        _r, jac = _ik_jacobian.task_jacobian(
-            jax.lax.stop_gradient(q_stars), buffers,
-            target_jnts, ancestor_masks, targets)
-        return jac
-    except Exception:
-        # Tracer-valued robot arrays, a capacity overflow, an unregistered
-        # target -- all recoverable by computing J_q in JAX instead.
-        return None
+    rot_joint, rot = chart_rotation(robot)
+    _T, _r, jac = kinematics(_grim.motion_robot(robot), jax.lax.stop_gradient(q_stars), targets,
+                             tuple(int(parent_joint[i]) for i in link_idx),
+                             runtime_rot_joint=rot_joint,
+                             rot=None if rot is None else jax.lax.stop_gradient(rot))
+    return jac
 
 
 def detached_robot(robot):

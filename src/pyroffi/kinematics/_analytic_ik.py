@@ -441,9 +441,9 @@ CROSSOVER_BATCH = 20
 
 def _cuda_available() -> bool:
     try:
-        from ..cuda_kernels.ik._analytic_ik_cuda import _load_and_register
+        from .. import _grim
 
-        _load_and_register()
+        _grim.ensure_importable()
         return any(d.platform == "gpu" for d in jax.devices())
     except Exception:
         return False
@@ -499,15 +499,15 @@ def analytic_ik_solve_batched(
     if backend == "cuda" and not _cuda_available():
         raise RuntimeError(
             "analytic IK: backend='cuda' requested but the kernel is "
-            "unavailable; build it with build_kernels/build_analytic_ik_cuda.sh")
+            "unavailable (needs a GPU and the external/GRiM checkout)")
 
     if use_cuda:
-        from ..cuda_kernels.ik._analytic_ik_cuda import (
-            analytic_ik_cuda, pack_geometry)
+        from ..optimization_engines._analytic_ik_cuda import analytic_ik_cuda, build_target
 
-        blob = jnp.asarray(pack_geometry(geom))
+        # GRiM derives the geometry from the robot itself; ``geometry`` only feeds the JAX path.
+        target = build_target(robot, list(robot.links.names).index(target_link_name))
         q, _err, found, _clr = analytic_ik_cuda(
-            blob, T_solve, samples, previous_cfg,
+            target, T_solve, samples, previous_cfg,
             respect_limits=respect_limits,
             err_tol=default_err_tol() if err_tol is None else err_tol)
     else:

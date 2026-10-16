@@ -32,8 +32,6 @@ resources/bench_dynamics_targets_*.npz
 .claude
 baselines
 
-# TAMP experiments: third-party checkouts (see tamp/setup_externals.sh)
-tamp/external/
 # PDDLStream writes these into the working directory on every solve
 statistics/
 temp/

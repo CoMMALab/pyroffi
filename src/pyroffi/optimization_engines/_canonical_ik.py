@@ -96,64 +96,60 @@ def canonicalize_batch(cfgs, cfg_refs, robot, link_idx, target_wxyz_xyz,
     tested against, but it is not the path to use: it cost 61x to 149x the IK
     solve purely in XLA dispatch overhead.
     """
-    from ..cuda_kernels.ik import _canonical_ik_cuda as _cuda
-
     n_ee = len(link_idx)
     targets = jnp.asarray(target_wxyz_xyz).reshape(cfgs.shape[0], n_ee, 7)
 
-    if _cuda.library_available():
-        try:
-            j = robot.joints
-            buffers = (j.twists, j.parent_transforms, j.parent_indices,
-                       j.actuated_indices, j.mimic_multiplier, j.mimic_offset,
-                       j.mimic_act_indices, j._topo_sort_inv)
-            tj, am = _ancestor_tables(robot, link_idx)
-            q, _iters = _cuda.canonicalize_cuda(
-                cfgs, cfg_refs, buffers, tj, am, targets,
-                collision=collision, max_iters=iters, step=step,
-                collision_margin=max(float(collision_margin), 1e-3))
-            q = jnp.asarray(q, cfgs.dtype)
-        except Exception:
-            q = None
-        if q is not None:
-            if polish <= 0:
-                return q
-            return jax.vmap(
-                lambda a, b, t: canonicalize(a, b, robot, link_idx, t,
-                                             polish, step)
-            )(q, cfg_refs, targets)
+    try:
+        q = _canonicalize_grim(cfgs, cfg_refs, robot, link_idx, targets, collision, iters,
+                               step, collision_margin)
+    except Exception:
+        # No URDF to build from, or collision tables that are still tracers: the
+        # pure-JAX walk below is the same map, only slower.
+        q = None
+    if q is not None:
+        if polish <= 0:
+            return q
+        return jax.vmap(
+            lambda a, b, t: canonicalize(a, b, robot, link_idx, t, polish, step)
+        )(q, cfg_refs, targets)
 
     return jax.vmap(
         lambda a, b, t: canonicalize(a, b, robot, link_idx, t, iters, step)
     )(cfgs, cfg_refs, targets)
 
 
-def _ancestor_tables(robot, link_idx):
-    from ..cuda_kernels.ik._ik_jacobian import ancestor_tables
-    key = (tuple(robot.links.names), tuple(link_idx))
-    hit = _ANCESTOR_CACHE.get(key)
-    if hit is None:
-        hit = ancestor_tables(robot, link_idx)
-        # NEVER cache a tracer.  The tables are constants -- a numpy walk of the
-        # chain -- but `jnp.asarray` inside an active trace returns a value
-        # BOUND to that trace, and storing it in this module-level dict lets it
-        # outlive the transformation.  A later call reads it back and dies with
-        # UnexpectedTracerError pointing at `ancestor_tables` rather than at the
-        # cache that kept it.  Measured: with `sqp_ik_solve_cuda_batch` now
-        # routed through `custom_vmap`, a plain call AFTER a vmapped one hit
-        # exactly that, because custom_vmap traces its primal even when
-        # unmapped.  The sibling cache in `_implicit_diff._batch_task_jacobians`
-        # carries the same guard; this path is the one `canonical_ik` takes
-        # (CANONICAL_BY_DEFAULT with a cfg_ref returns before reaching that
-        # one), so it needs it too.
-        if not any(isinstance(t, jax.core.Tracer) for t in hit):
-            _ANCESTOR_CACHE[key] = hit
-    return hit
+def _canonicalize_grim(cfgs, cfg_refs, robot, link_idx, targets, collision, iters, step,
+                       collision_margin):
+    """The walk in GRiM's canonical-IK kernel. ``collision`` is the solve kernel's 11
+    buffers (robot spheres + joint, four world kinds, five self-collision tables) or None.
 
+    ``collision_margin`` is floored at 1 mm so the guard is CONSERVATIVE relative to whoever
+    scores the result: the kernel tests clearance in float32, and a float64 scorer
+    disagreed on boundary configurations (0.4% self / 0.4% world violations) until the
+    margin was wider than the discrepancy.
+    """
+    from .. import _grim
+    from ._ik_primitives import _EMPTY_SELF_TABLES, grim_targets
 
-#: Chain walks use numpy, so they cannot run under a trace; cached on link names
-#: rather than id(robot), which would survive a garbage collection wrongly.
-_ANCESTOR_CACHE: dict = {}
+    _grim.ensure_importable()
+    from grim.motion import ik
+
+    if collision is None:
+        world = ik.World().arrays()
+        spheres, sphere_joint, self_tables = (jnp.zeros((0, 4)), jnp.zeros((0,), jnp.int32),
+                                              _EMPTY_SELF_TABLES)
+    else:
+        spheres, sphere_joint, *world = collision[:6]
+        self_tables = collision[6:]
+    (target,) = grim_targets(("canonical",), robot, link_idx, False, spheres, sphere_joint,
+                             self_tables, world=tuple(world))
+    from .._floating_base import chart_rotation
+
+    q, _iters = ik.run_canonical(target, cfgs, cfg_refs, targets, world=ik.World(*world),
+                                 rot=chart_rotation(robot)[1] if target.runtime_rot else None,
+                                 max_iters=iters, step=step, damping=1e-9,
+                                 collision_margin=max(float(collision_margin), 1e-3))
+    return jnp.asarray(q, cfgs.dtype)
 
 
 def canonicalize(cfg, cfg_ref, robot, link_idx, target_wxyz_xyz,

@@ -1,7 +1,7 @@
 """CUDA-accelerated rigid body dynamics via GRiD-generated kernels.
 
-``GRiDDynamics`` JIT-generates and compiles per-robot CUDA kernels (see
-``_grid_codegen``) and exposes them through the JAX FFI, following the
+``GRiDDynamics`` JIT-generates per-robot CUDA kernels (see ``_grid_codegen``) and calls
+them through GRiM's any-batch JAX FFI handlers, following the
 collision-checker pattern (a separate class rather than ``Robot`` methods,
 since compiled-library handles cannot live in a jdc pytree).
 
@@ -27,9 +27,7 @@ this backend or the pure-JAX ``Robot.inverse_dynamics``.
 
 from __future__ import annotations
 
-import ctypes
 import functools
-from pathlib import Path
 
 import jax
 import numpy as onp
@@ -43,19 +41,6 @@ from ._dynamics_jax import _DEFAULT_GRAVITY, jacobian_jax
 from ._grid_codegen import compile_grid_library
 from ._grid_robot_adapter import build_grid_robot
 from ._integrators import StepMethod, step_with_fd
-
-_SYMBOLS = {
-    "id": "GridIdFfi",
-    "fd": "GridFdFfi",
-    "minv": "GridMinvFfi",
-    "crba": "GridCrbaFfi",
-    "id_grad": "GridIdGradFfi",
-    "fd_grad": "GridFdGradFfi",
-    "idsva_so": "GridIdsvaSoFfi",
-}
-
-_registered_libs: dict[str, dict[str, str]] = {}
-
 
 def _batchable(impl):
     """Give ``impl`` a *true* (single-launch) ``jax.vmap`` rule.
@@ -93,35 +78,6 @@ def _batchable(impl):
     return f
 
 
-def _register_library(so_path: Path) -> dict[str, str]:
-    """CDLL the compiled library and register its FFI targets.
-
-    Target names are namespaced by the library's cache key so multiple robots
-    coexist in one process. Returns op-name -> FFI target name.
-    """
-    key = so_path.parent.name[:12]
-    if key in _registered_libs:
-        return _registered_libs[key]
-
-    lib = ctypes.CDLL(str(so_path))
-    _PyCapsule_New = ctypes.pythonapi.PyCapsule_New
-    _PyCapsule_New.restype = ctypes.py_object
-    _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
-
-    targets = {}
-    for op, symbol in _SYMBOLS.items():
-        capsule = _PyCapsule_New(
-            ctypes.cast(getattr(lib, symbol), ctypes.c_void_p),
-            b"xla._CUSTOM_CALL_TARGET",
-            None,
-        )
-        target = f"grid_{op}_{key}"
-        jax.ffi.register_ffi_target(target, capsule, platform="CUDA")
-        targets[op] = target
-    _registered_libs[key] = targets
-    return targets
-
-
 class GRiDDynamics:
     """Per-robot GRiD dynamics kernels behind a batched JAX interface.
 
@@ -135,7 +91,6 @@ class GRiDDynamics:
         cls,
         robot,
         gravity: float = _DEFAULT_GRAVITY,
-        arch: str | None = None,
         runtime_inertia: bool = False,
     ) -> "GRiDDynamics":
         """Build from a pyroffi :class:`~pyroffi.Robot` (uses ``robot.urdf``).
@@ -148,7 +103,6 @@ class GRiDDynamics:
         return cls(
             robot.urdf,
             gravity=gravity,
-            arch=arch,
             runtime_inertia=runtime_inertia,
             floating_base=robot.floating_base,
         )
@@ -157,7 +111,6 @@ class GRiDDynamics:
         self,
         urdf: yourdfpy.URDF,
         gravity: float = _DEFAULT_GRAVITY,
-        arch: str | None = None,
         runtime_inertia: bool = False,
         floating_base: bool = False,
     ):
@@ -182,10 +135,9 @@ class GRiDDynamics:
         # used to be passed negated; passing the old sign now silently flips
         # every gravity torque while leaving M(q) correct.)
         self.gravity = float(gravity)
-        so_path = compile_grid_library(
-            self._grid_model, arch=arch, runtime_inertia=runtime_inertia
+        self._targets, so_path = compile_grid_library(
+            self._grid_model, runtime_inertia=runtime_inertia
         )
-        self._targets = _register_library(so_path)
         self.runtime_inertia = bool(runtime_inertia)
         self._model_state = None
         self._so_path = so_path

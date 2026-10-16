@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import jaxlie
 from jax import Array
 
+from .._floating_base import split_cfg
 from .._robot import Robot
 from ..collision import CollGeom, colldist_from_sdf
 from ._problem import Var, VarValues
@@ -107,6 +108,11 @@ def pose_with_base_residual(
 # --- Limit Residuals ---
 
 
+def _joints(robot: Robot, cfg: Array) -> Array:
+    """The actuated joints of a configuration (a floating base's pose has no limits)."""
+    return split_cfg(robot, cfg)[1]
+
+
 def limit_residual(
     vals: VarValues,
     robot: Robot,
@@ -114,7 +120,7 @@ def limit_residual(
     weight: Array | float = 1.0,
 ) -> Array:
     """Joint limit violation: positive when violated, zero when satisfied (``<= 0`` is feasible)."""
-    joint_cfg = vals[joint_var]
+    joint_cfg = _joints(robot, vals[joint_var])
     joint_cfg_eff = robot.joints.get_full_config(joint_cfg)
     upper_violation = jnp.maximum(0.0, joint_cfg_eff - robot.joints.upper_limits_all)
     lower_violation = jnp.maximum(0.0, robot.joints.lower_limits_all - joint_cfg_eff)
@@ -130,7 +136,7 @@ def limit_velocity_residual(
     weight: Array | float = 1.0,
 ) -> Array:
     """Joint velocity limit violation: positive when ``|velocity| > limit``, else zero."""
-    joint_vel = (vals[joint_var] - vals[prev_joint_var]) / dt
+    joint_vel = (_joints(robot, vals[joint_var]) - _joints(robot, vals[prev_joint_var])) / dt
     residual = jnp.maximum(0.0, jnp.abs(joint_vel) - robot.joints.velocity_limits)
     return (residual * weight).flatten()
 
@@ -251,10 +257,8 @@ def five_point_velocity_residual(
     weight: Array | float = 1.0,
 ) -> Array:
     """Velocity limit violation using a 5-point stencil (positive when violated)."""
-    q_tm2 = vals[var_t_minus_2]
-    q_tm1 = vals[var_t_minus_1]
-    q_tp1 = vals[var_t_plus_1]
-    q_tp2 = vals[var_t_plus_2]
+    q_tm2, q_tm1, q_tp1, q_tp2 = (_joints(robot, vals[v]) for v in
+                                  (var_t_minus_2, var_t_minus_1, var_t_plus_1, var_t_plus_2))
     velocity = (-q_tp2 + 8 * q_tp1 - 8 * q_tm1 + q_tm2) / (12 * dt)
     residual = jnp.maximum(0.0, jnp.abs(velocity) - robot.joints.velocity_limits)
     return (residual * weight).flatten()

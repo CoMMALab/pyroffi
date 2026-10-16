@@ -236,12 +236,10 @@ class Robot:
         Args:
             cfg: The configuration of the actuated joints, in the format `(*batch actuated_count)`.
             unroll_fk: If True, unroll the JAX fori_loop over joints (ignored when use_cuda=True).
-            use_cuda: If True, dispatch to an external CUDA kernel via the JAX FFI instead of
-                the default JAX implementation.  Requires ``_fk_cuda.so`` to be compiled first
-                (see ``build_kernels/build_fk_cuda.sh``).  jit-compatible: the kernel derives
-                its buffers from ``robot.joints.*`` and calls the FFI, so it may be freely
-                wrapped in ``jax.jit`` (``jax.vmap`` is not supported by the FFI kernel — use a
-                leading batch dimension on ``cfg`` instead).
+            use_cuda: If True, dispatch to GRiM's kinematics kernel (compiled for this robot's
+                URDF on first use) instead of the default JAX implementation. It reads the
+                URDF's kinematics, not ``robot.joints.*``. jit-compatible (``jax.vmap`` is not
+                supported by the FFI kernel — use a leading batch dimension on ``cfg``).
 
         Returns:
             The SE(3) transforms of the links, ordered by `self.link.names`,

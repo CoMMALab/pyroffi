@@ -129,8 +129,8 @@ class GridModelState:
     def __init__(self, so_path: Path, num_bodies: int, baseline: onp.ndarray):
         lib = ctypes.CDLL(str(so_path))
         try:
-            self._set = lib.GridSetInertiaParams
-            self._size_fn = lib.GridInertiaParamsSize
+            self._set = lib.DynSetInertiaParams
+            self._size_fn = lib.DynInertiaParamsSize
         except AttributeError as exc:  # pragma: no cover - build-config error
             raise RuntimeError(
                 "This GRiD library was built without runtime_inertia; construct "

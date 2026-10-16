@@ -390,10 +390,10 @@ Previously the JAX FK was called *inside* the vmap — once per batch element. N
 
 ### What must be compiled
 
-The CUDA backend requires two compiled shared libraries:
+The CUDA backend requires the collision library, plus the external/GRiM checkout for FK
+(GRiM's kinematics kernel compiles per robot on first use):
 
 ```bash
-bash build_kernels/build_fk_cuda.sh         # _fk_cuda_lib.so
 bash build_kernels/build_collision_cuda.sh  # _collision_cuda_lib.so
 ```
 

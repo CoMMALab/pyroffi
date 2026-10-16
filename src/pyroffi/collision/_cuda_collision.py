@@ -123,8 +123,8 @@ def _extract_world_arrays(
 
     NOTE on ESDFWorldGeom: this function's 4-tuple return is a shared
     contract -- besides CUDADifferentiableSDFCollisionChecker, it's imported
-    and unpacked as exactly 4 values by _robogpu_collision.py,
-    _vamp_collision.py, and optimization_engines/_ls_ik.py, none of which
+    and unpacked as exactly 4 values by _robogpu_collision.py
+    and optimization_engines/_ls_ik.py, neither of which
     know what an ESDF is. Smuggling grid data out as a 5th return value would
     silently break all of those (ValueError: too many values to unpack) --
     the isinstance branch below intentionally raises instead of trying to
@@ -146,7 +146,7 @@ def _extract_world_arrays(
             "CUDADifferentiableSDFCollisionChecker.compute_world_collision_distance "
             "understands ESDFWorldGeom -- it intercepts it in set_world "
             "before reaching this function. Other world-collision backends "
-            "(RoboGPU, VAMP, LS-IK trajopt) do not support ESDF worlds."
+            "(RoboGPU, LS-IK trajopt) do not support ESDF worlds."
         )
 
     axes = world_geom.get_batch_axes()
@@ -200,15 +200,15 @@ def _extract_world_arrays(
     if isinstance(world_geom, Heightmap):
         raise NotImplementedError(
             "Cannot convert a Heightmap to collision-checker world buffers: neither "
-            "the CUDA binary checker nor the VAMP backend has a heightmap primitive. "
-            "Approximate the surface with Boxes (or a point cloud for the VAMP "
-            "backend) before calling set_world()."
+            "the CUDA binary checker nor RoboGPU has a heightmap primitive. "
+            "Approximate the surface with Boxes (or a point cloud for RoboGPU) "
+            "before calling set_world()."
         )
 
     raise NotImplementedError(
         f"Cannot convert world_geom of type {type(world_geom).__name__!r} to "
         "collision-checker world buffers. Supported geometries: Sphere, Capsule, "
-        "Box, HalfSpace (HalfSpace is CUDA-only; the VAMP backend rejects it)."
+        "Box, HalfSpace."
     )
 
 
@@ -270,7 +270,7 @@ def _extract_world_arrays_jax(
 
     NOTE on ESDFWorldGeom: same 4-tuple-contract reasoning as
     :func:`_extract_world_arrays` -- this function is also imported directly
-    by _vamp_collision.py and unpacked as exactly 4 values. Mirrors that
+    by _robogpu_collision.py and unpacked as exactly 4 values. Mirrors that
     function's ESDFWorldGeom branch (raises instead of trying to return a
     5th value); keep the two in sync.
     """
@@ -287,7 +287,7 @@ def _extract_world_arrays_jax(
             "CUDADifferentiableSDFCollisionChecker.compute_world_collision_distance "
             "understands ESDFWorldGeom -- it intercepts it in set_world "
             "before reaching this function. Other world-collision backends "
-            "(VAMP) do not support ESDF worlds."
+            "(RoboGPU) do not support ESDF worlds."
         )
 
     axes = world_geom.get_batch_axes()
@@ -299,7 +299,7 @@ def _extract_world_arrays_jax(
 
     if len(axes) > 1:
         raise ValueError(
-            "VAMP/CUDA world extraction only supports world_geom without leading "
+            "CUDA world extraction only supports world_geom without leading "
             f"batch dimensions; got shape {axes}. Pre-flatten the world geometry."
         )
 
@@ -1532,15 +1532,14 @@ class FusedCUDACollisionChecker:
       padding-sentinel convention plus float32 reduction ordering. Well below
       any sane collision threshold, and verdicts agree exactly, but do not
       expect bitwise equality.
-    * **Not differentiable.** The kernel returns distances only; use the JAX
-      path or :class:`CUDADifferentiableSDFCollisionChecker` for trajopt.
+    * **Differentiable.** Tangents come from the kernels' own Jacobian variants.
     * **World capsules/boxes/half-spaces are implemented but unverified** — the
       JAX reference accepts one ``CollGeom`` type per call, so only the sphere
       path has been checked against it.
     """
 
     def __init__(self, robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):
-        from ..cuda_kernels.collision._fused_self_collision_ffi import static_arrays
+        from .. import _grim
 
         self._robot = robot
         self._model = model
@@ -1550,80 +1549,41 @@ class FusedCUDACollisionChecker:
             from .._floating_base import eval_chart
 
             robot = eval_chart(robot)
-        self._kernel_robot = robot
-        self._static = static_arrays(robot, model)
-        # traced=True: kernels compiled with this model's sphere and pair tables baked in, the
-        # self kernel against cricket-traced FK and the world kernel against the scene's
-        # obstacle counts (built once per robot, model and scene structure; cached on disk).
+        _grim.ensure_importable()
+        from grim.motion._build import SelfCollision
+
+        self._mrobot = _grim.motion_robot(robot)
+        self._sc = SelfCollision(*static_arrays(robot, model))
+        # traced=True: kernels against cricket's straight-line FK instead of baked tables.
         self._traced = traced
-        self._traced_cache: dict = {}
-        base = self._traced_targets((0, 0, 0, 0)) if traced else None
-        self._self_target = base[0] if traced else "fused_self_collision"
-        self._self_jac_target = base[3] if traced else "fused_self_collision_jac"
-        j = robot.joints
-        self._robot_buffers = (
-            j.twists, j.parent_transforms, j.parent_indices, j.actuated_indices,
-            j.mimic_multiplier, j.mimic_offset, j.mimic_act_indices,
-            j._topo_sort_inv,
-        )
         self._self_fn = self._build_self_fn()
 
+    def _checker(self, world_counts=(0, 0, 0, 0)):
+        """GRiM's kernels for this model and obstacle counts (built once; cached by GRiM)."""
+        from grim.motion import collision
+
+        return collision.build(self._mrobot, self._sc, world_counts, self._traced)
+
     # -- gradients ---------------------------------------------------------
-    # The FFI call is opaque to autodiff: JAX has no derivative for a custom
-    # call unless one is supplied. The underlying quantity is perfectly
-    # differentiable (FK, sphere transform and sphere-sphere distance are all
-    # smooth; the min over pairs is smooth almost everywhere), so a custom_jvp
-    # runs the fast kernel forward and takes tangents from the pure-JAX path.
-    # custom_jvp covers forward mode and, by transposition, reverse mode too.
-    #
-    # The trade is explicit: forward gets the kernel's speedup, backward pays
-    # the full JAX price. That is a clear win when forward calls dominate --
-    # thousands of validity checks per gradient step in a planner -- and no win
-    # for trajopt, where every forward has a matching backward. In-kernel
-    # analytic gradients would fix that; the geometry helpers already ship
-    # gradient variants for it.
-    def _traced_targets(self, world_counts, esdf=None):
-        """(self, world, esdf) FFI targets of the traced build for one scene structure
-        (memoised). ``esdf = (nx, ny, nz, voxel_size)`` also bakes a voxel grid's shape and
-        resolution into the ESDF kernel; its values and origin stay runtime inputs."""
-        key = (world_counts, esdf)
-        cached = self._traced_cache.get(key)
-        if cached is not None:
-            return cached
-        import numpy as np
-
-        from ..cuda_kernels._traced import collision_tables_source
-
-        j = self._kernel_robot.joints
-        src = collision_tables_source(
-            np.zeros((0, 4)), np.zeros(0), [np.asarray(t) for t in self._static], world_counts)
-        if esdf is not None:
-            nx, ny, nz, voxel = esdf
-            src += ("#define PYROFFI_TRACED_ESDF\nnamespace pyroffi::traced {\n"
-                    f"constexpr int esdf_nx = {nx}, esdf_ny = {ny}, esdf_nz = {nz};\n"
-                    f"constexpr float esdf_voxel = {float(np.float32(voxel)):.9e}f;\n}}\n")
-        targets = self._kernel_robot._backends.traced_target(
-            "fused_collision", 0, self._kernel_robot.links.names, j.actuated_names, j.names, src, True)
-        self._traced_cache[key] = targets
-        return targets
-
+    # The FFI call is opaque to autodiff, so a custom_jvp runs the distance kernel forward
+    # and takes tangents from the Jacobian kernel's d(out)/dq: forward mode, and reverse by
+    # transposing the linear map, both stay on the GPU.
     def _build_self_fn(self):
-        from ..cuda_kernels.collision._fused_self_collision_ffi import (
-            fused_self_collision, fused_self_collision_jac)
+        from grim.motion import collision
 
-        rb, static = self._robot_buffers, self._static
+        checker = self._checker()
 
-        # Forward: the distance-only kernel. Tangents: the Jacobian kernel's d(out)/dq, so
-        # autodiff (forward, and reverse by transposing the linear map) stays on the GPU.
         @jax.custom_jvp
         def f(cfg):
-            return fused_self_collision(cfg, rb, static, self._self_target)
+            return collision.self_distances(checker, cfg)
 
         @f.defjvp
         def f_jvp(primals, tangents):
             (cfg,), (dcfg,) = primals, tangents
-            d, J, z, Jz = fused_self_collision_jac(cfg, rb, static, self._self_jac_target)
-            return (d, z), (jnp.einsum("bpn,bn->bp", J, dcfg), jnp.einsum("bn,bn->b", Jz, dcfg))
+            d, J, z, Jz = collision.self_distances(checker, cfg, jacobian=True)
+            # Tangents in the kernel's float32, whatever precision dcfg arrives in.
+            return (d, z), (jnp.einsum("bpn,bn->bp", J, dcfg).astype(d.dtype),
+                            jnp.einsum("bn,bn->b", Jz, dcfg).astype(z.dtype))
 
         return f
 
@@ -1635,12 +1595,11 @@ class FusedCUDACollisionChecker:
 
     @staticmethod
     def available() -> bool:
-        """True when the compiled library and a GPU are both present."""
+        """True when GRiM and a GPU are both present."""
         try:
-            from ..cuda_kernels.collision._fused_self_collision_ffi import (
-                _load_and_register)
+            from .. import _grim
 
-            _load_and_register()
+            _grim.ensure_importable()
             return any(d.platform == "gpu" for d in jax.devices())
         except Exception:
             return False
@@ -1690,8 +1649,9 @@ class FusedCUDACollisionChecker:
         the JAX reference (which accepts one CollGeom type per call), so those
         fall back rather than silently returning unverified numbers.
         """
-        from ..cuda_kernels.collision._fused_self_collision_ffi import (
-            fused_world_collision)
+        from grim.motion import collision
+        from grim.motion.ik import World
+
         from ..kinematics._analytic_collision import world_geometry
 
         user_cfg = cfg
@@ -1710,62 +1670,74 @@ class FusedCUDACollisionChecker:
                     robot, q, world_geom))(user_cfg)
             return out[0] if squeeze else out
 
-        from ..cuda_kernels.collision._fused_self_collision_ffi import fused_world_collision_jac
-
-        world = (w.spheres, w.capsules, w.boxes, w.halfspaces)
-        if self._traced:
-            targets = self._traced_targets(tuple(len(x) for x in world))
-            target, jac_target = targets[1], targets[4]
-        else:
-            target, jac_target = "fused_world_collision", "fused_world_collision_jac"
-        rb, static = self._robot_buffers, self._static
+        world = World(w.spheres, w.capsules, w.boxes, w.halfspaces)
+        checker = self._checker(world.counts())
 
         @jax.custom_jvp
         def f(c):
-            return fused_world_collision(c, rb, static, world, target)
+            return collision.world_distances(checker, c, world)
 
         @f.defjvp
         def f_jvp(primals, tangents):
             (c,), (dc,) = primals, tangents
-            d, J = fused_world_collision_jac(c, rb, static, world, jac_target)
-            return d, jnp.einsum("bnmk,bk->bnm", J, dc)
+            d, J = collision.world_distances(checker, c, world, jacobian=True)
+            return d, jnp.einsum("bnmk,bk->bnm", J, dc).astype(d.dtype)
 
         out = self._model._mask_inactive_world(f(cfg))
         return out[0] if squeeze else out
 
-
     def _esdf_world_distance(self, cfg, esdf: ESDFWorldGeom):
         """``[B, N]`` link distances to a voxel ESDF, forward and Jacobian from the GPU."""
-        from ..cuda_kernels.collision._fused_self_collision_ffi import (
-            fused_world_esdf, fused_world_esdf_jac)
+        from grim.motion import collision
 
         grid = jnp.asarray(esdf.grid, jnp.float32)
         origin = jnp.asarray(esdf.origin, jnp.float32)
         voxel = float(esdf.voxel_size)
-        if self._traced:
-            targets = self._traced_targets((0, 0, 0, 0), (*grid.shape, voxel))
-            target, jac_target = targets[2], targets[5]
-        else:
-            target, jac_target = "fused_world_esdf", "fused_world_esdf_jac"
-        rb, static = self._robot_buffers, self._static
+        checker = self._checker()
 
         @jax.custom_jvp
         def f(c):
-            return fused_world_esdf(c, rb, static, grid, origin, voxel, target)
+            return collision.esdf_distances(checker, c, grid, origin, voxel)
 
         @f.defjvp
         def f_jvp(primals, tangents):
             (c,), (dc,) = primals, tangents
-            d, J = fused_world_esdf_jac(c, rb, static, grid, origin, voxel, jac_target)
-            return d, jnp.einsum("bnk,bk->bn", J, dc)
+            d, J = collision.esdf_distances(checker, c, grid, origin, voxel, jacobian=True)
+            return d, jnp.einsum("bnk,bk->bn", J, dc).astype(d.dtype)
 
         return self._model._mask_inactive_world(f(cfg)[..., None])[..., 0]
 
 
-def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):
-    """Build a :class:`FusedCUDACollisionChecker`.
+def static_arrays(robot, model):
+    """Flatten a spherized collision model into the fused kernels' self-collision model.
 
-    Raises ``RuntimeError`` if the compiled library is missing; build it with
-    ``bash build_kernels/build_fused_self_collision_cuda.sh``.
+    Returns ``(sph_local[K,4], link_start[N+1], link_joint[N], pair_i[P], pair_j[P])``.
+
+    Padding slots (negative-radius sentinel) are dropped here rather than
+    skipped in the kernel, and spheres are grouped by link so each link's run is
+    contiguous — that is what lets the kernel walk a CSR range instead of
+    scanning all ``S`` slots per link.
     """
+    n_link, n_sph = model.coll.get_batch_axes()
+    local = np.asarray(model.coll.pose.translation()).reshape(n_link, n_sph, 3)
+    radii = np.asarray(model.coll.radius).reshape(n_link, n_sph)
+
+    sph, starts = [], [0]
+    for li in range(n_link):
+        for si in range(n_sph):
+            r = float(radii[li, si])
+            if r <= 0.0:
+                continue
+            sph.append([*local[li, si], r])
+        starts.append(len(sph))
+
+    return (np.asarray(sph, dtype=np.float32).reshape(-1, 4),
+            np.asarray(starts, dtype=np.int32),
+            np.asarray(link_parent_joint_for(robot, model), dtype=np.int32),
+            np.asarray(model.active_idx_i, dtype=np.int32),
+            np.asarray(model.active_idx_j, dtype=np.int32))
+
+
+def make_fused_checker(robot: "Robot", model: RobotCollisionSpherized, traced: bool = False):
+    """Build a :class:`FusedCUDACollisionChecker`. Kernels compile on first use."""
     return FusedCUDACollisionChecker(robot, model, traced=traced)

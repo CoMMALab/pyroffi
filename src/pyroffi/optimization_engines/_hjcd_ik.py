@@ -44,7 +44,7 @@ from .._floating_base import finite_range, sample_in_limits
 from .._robot import Robot
 from ._nullspace import project_single
 from ._ik_primitives import _LS_ALPHAS, _ik_residual, _adaptive_weights, split_cuda_and_post_constraints  # noqa: F401
-from ._ik_primitives import self_collision_table_arrays, traced_ffi_target
+from ._ik_primitives import grim_targets, run_grim, self_collision_table_arrays
 from ._batching import dispatch_vmap_to_batched, sharded_batch_call
 from ._implicit_diff import (
     detached_robot,
@@ -687,10 +687,6 @@ def _hjcd_solve_cuda_jit(
     limit_prior_weight: float,
     kick_scale: float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks: Array,
-    target_jnts: Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
@@ -699,11 +695,6 @@ def _hjcd_solve_cuda_jit(
     # trace time bakes into the first trace and is silently reused, so enabling
     # self-collision would change nothing. As arguments their shapes are part of
     # the jit signature, so empty and populated tables compile separately.
-    self_sph_local:       Array,
-    self_link_start:      Array,
-    self_link_joint:      Array,
-    self_pair_i:          Array,
-    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -711,9 +702,8 @@ def _hjcd_solve_cuda_jit(
     constraint_fns: tuple = (),
     constraint_args: tuple = (),
     constraint_weights: Float[Array, "n_constraints"] | None = None,
-    ffi_targets: tuple = ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"),
+    ffi_targets: tuple = (),
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -742,38 +732,15 @@ def _hjcd_solve_cuda_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)  # (num_seeds, n_act)
 
     # ── Phase 1: CUDA coarse coordinate descent (all EEs) ────────────────
-    coarse_cfgs, coarse_errors = hjcd_ik_coarse_cuda(
-        seeds=seeds[None],              # (1, num_seeds, n_act)
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        ancestor_masks=ancestor_masks,
-        target_T=target_Ts[None],       # (1, n_ee, 7)
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        lower=lower,
-        upper=upper,
-        fixed_mask=fixed_joint_mask_int,
-        target_jnts=target_jnts,
+    coarse_cfgs, coarse_errors = run_grim(
+        ffi_targets[0], seeds[None], target_Ts[None],
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
         k_max=coarse_max_iter,
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
-        ffi_target=ffi_targets[0],
+        robot=robot,
     )
     coarse_cfgs   = coarse_cfgs[0]    # (num_seeds, n_act)
     coarse_errors = coarse_errors[0]  # (num_seeds,) — all EEs from CUDA kernel
@@ -801,36 +768,16 @@ def _hjcd_solve_cuda_jit(
     ).astype(jnp.float32)
 
     # ── Phase 2: CUDA Levenberg-Marquardt refinement (all EEs) ───────────
-    refine_cfgs, refine_errors_raw = hjcd_ik_lm_cuda(
-        seeds=lm_seeds[None],           # (1, n_lm_seeds, n_act)
-        noise=lm_kick_noise[None],      # (1, n_lm_seeds, lm_max_iter, n_act)
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        ancestor_masks=ancestor_masks,
-        target_T=target_Ts[None],       # (1, n_ee, 7)
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        lower=lower,
-        upper=upper,
-        fixed_mask=fixed_joint_mask_int,
-        target_jnts=target_jnts,
+    refine_cfgs, refine_errors_raw, _ = run_grim(
+        ffi_targets[1], lm_seeds[None], target_Ts[None],
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        noise=lm_kick_noise[None],
         max_iter=lm_max_iter,
         stall_patience=_STALL_PATIENCE,
+        # Every seed runs to the end: the winner is picked with a continuity term, so
+        # non-best seeds matter, and GRiM's early stop leaves them scheduling-dependent.
+        early_stop=False,
         lambda_init=lambda_init,
         limit_prior_weight=limit_prior_weight,
         kick_scale=kick_scale,
@@ -839,7 +786,7 @@ def _hjcd_solve_cuda_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
-        ffi_target=ffi_targets[1],
+        robot=robot,
     )
     refine_cfgs       = refine_cfgs[0]       # (n_lm_seeds, n_act)
     refine_errors_raw = refine_errors_raw[0]  # (n_lm_seeds,) — all EEs from CUDA
@@ -897,8 +844,6 @@ def hjcd_solve_cuda(
     collision_weight: float = 1e4,
     collision_margin: float = 0.02,
     constraint_refine_iters: int = 12,
-    ancestor_masks: Array | None = None,
-    target_jnts: Array | None = None,
     traced: bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`hjcd_solve`.
@@ -909,7 +854,7 @@ def hjcd_solve_cuda(
     reuse the FK device function from ``_fk_cuda_helpers.cuh``.
 
     This entry point uses a partial JIT wrapper for the JAX-side logic while
-    keeping Python-level precomputation (ancestor mask) outside the trace.
+    keeping Python-level precomputation (the GRiM kernel build) outside the trace.
     The CUDA kernels are still launched via ``jax.ffi.ffi_call`` inside the
     JITed region, so seed generation, top-K selection, and winner selection
     benefit from JAX's tracing/dispatch cache.
@@ -928,8 +873,7 @@ def hjcd_solve_cuda(
       - All kernel launches use the caller's CUDA stream so there are no
         implicit device synchronisations.
 
-    Requires ``_hjcd_ik_cuda_lib.so`` to be compiled first:
-        bash build_kernels/build_hjcd_ik_cuda.sh
+    GRiM's kernel (``external/GRiM``, ``kernels/ik/hjcd_ik.cu``) compiles for the robot on first use.
 
     Kinematic constraints
         Because the CUDA kernel cannot call arbitrary Python/JAX functions,
@@ -1016,31 +960,6 @@ def hjcd_solve_cuda(
         collision_free=collision_free,
     )
 
-    # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
-    # These cannot be computed inside jax.jit because parent_joint_indices
-    # and parent_indices are JAX-array leaves of the Robot pytree.  Callers that
-    # want to run this solver *inside* a jax.jit trace (e.g. via
-    # Robot.inverse_kinematics) precompute them from the robot's concrete
-    # kinematic structure and pass them in, skipping this host-side block.
-    if ancestor_masks is None or target_jnts is None:
-        parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-        parent_idx_np           = np.array(robot.joints.parent_indices)
-        n_joints                = robot.joints.num_joints
-        n_ee_count              = len(target_link_indices)
-
-        target_joints_np    = np.zeros(n_ee_count, dtype=np.int32)
-        ancestor_masks_np   = np.zeros((n_ee_count, n_joints), dtype=np.int32)
-        for _i, _link_idx in enumerate(target_link_indices):
-            _tgt_jnt = int(parent_joint_indices_np[_link_idx])
-            target_joints_np[_i] = _tgt_jnt
-            _j = _tgt_jnt
-            while _j >= 0:
-                ancestor_masks_np[_i, _j] = 1
-                _j = int(parent_idx_np[_j])
-
-        target_jnts    = jnp.array(target_joints_np)
-        ancestor_masks = jnp.array(ancestor_masks_np)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1055,8 +974,8 @@ def hjcd_solve_cuda(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
-    ffi_targets = traced_ffi_target(
-        "hjcd_ik", ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"), robot, target_link_indices,
+    ffi_targets = grim_targets(
+        ("hjcd_coarse", "hjcd_lm"), robot, target_link_indices,
         traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
@@ -1082,19 +1001,10 @@ def hjcd_solve_cuda(
             limit_prior_weight=limit_prior_weight,
             kick_scale=kick_scale,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             enable_collision=bool(collision_free and collision_enabled),
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -1132,19 +1042,10 @@ def hjcd_solve_cuda(
             limit_prior_weight=limit_prior_weight,
             kick_scale=kick_scale,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             enable_collision=bool(collision_free and collision_enabled),
             collision_weight=collision_weight,
             collision_margin=collision_margin,
@@ -1231,10 +1132,6 @@ def _hjcd_solve_cuda_batch_jit(
     limit_prior_weight:   float,
     kick_scale:           float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
@@ -1243,11 +1140,6 @@ def _hjcd_solve_cuda_batch_jit(
     # trace time bakes into the first trace and is silently reused, so enabling
     # self-collision would change nothing. As arguments their shapes are part of
     # the jit signature, so empty and populated tables compile separately.
-    self_sph_local:       Array,
-    self_link_start:      Array,
-    self_link_joint:      Array,
-    self_pair_i:          Array,
-    self_pair_j:          Array,
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -1255,9 +1147,8 @@ def _hjcd_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
-    ffi_targets:          tuple = ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"),
+    ffi_targets: tuple = (),
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels.ik._hjcd_ik_cuda import hjcd_ik_coarse_cuda, hjcd_ik_lm_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits
@@ -1288,38 +1179,15 @@ def _hjcd_solve_cuda_batch_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, num_seeds, n_act)
 
     # ── Phase 1: CUDA coarse coordinate descent (all EEs) ────────────────
-    coarse_cfgs, coarse_errors = hjcd_ik_coarse_cuda(
-        seeds=seeds,                     # (n_problems, num_seeds, n_act)
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        ancestor_masks=ancestor_masks,
-        target_T=target_T_batch,         # (n_problems, 1, 7)
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        lower=lower,
-        upper=upper,
-        fixed_mask=fixed_joint_mask_int,
-        target_jnts=target_jnts,
+    coarse_cfgs, coarse_errors = run_grim(
+        ffi_targets[0], seeds, target_T_batch,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
         k_max=coarse_max_iter,
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
-        ffi_target=ffi_targets[0],
+        robot=robot,
     )
 
     # ── Phase 2 setup: top-K selection + perturbation ─────────────────────
@@ -1343,36 +1211,16 @@ def _hjcd_solve_cuda_batch_jit(
     ).astype(jnp.float32)
 
     # ── Phase 2: CUDA Levenberg-Marquardt refinement (all EEs) ───────────
-    refine_cfgs, refine_errors_raw = hjcd_ik_lm_cuda(
-        seeds=lm_seeds,
+    refine_cfgs, refine_errors_raw, _ = run_grim(
+        ffi_targets[1], lm_seeds, target_T_batch,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
         noise=lm_kick_noise,
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        ancestor_masks=ancestor_masks,
-        target_T=target_T_batch,         # (n_problems, 1, 7)
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        self_sph_local=self_sph_local,
-        self_link_start=self_link_start,
-        self_link_joint=self_link_joint,
-        self_pair_i=self_pair_i,
-        self_pair_j=self_pair_j,
-        lower=lower,
-        upper=upper,
-        fixed_mask=fixed_joint_mask_int,
-        target_jnts=target_jnts,
         max_iter=lm_max_iter,
         stall_patience=_STALL_PATIENCE,
+        # Every seed runs to the end: the winner is picked with a continuity term, so
+        # non-best seeds matter, and GRiM's early stop leaves them scheduling-dependent.
+        early_stop=False,
         lambda_init=lambda_init,
         limit_prior_weight=limit_prior_weight,
         kick_scale=kick_scale,
@@ -1381,7 +1229,7 @@ def _hjcd_solve_cuda_batch_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
-        ffi_target=ffi_targets[1],
+        robot=robot,
     )
 
     # ── Winner selection: task (all EEs) + constraint penalties + continuity ─
@@ -1509,20 +1357,6 @@ def hjcd_solve_cuda_batch(
         collision_free=collision_free,
     )
 
-    # Ancestor mask using first EE only (batch path is single-EE; wrap in n_ee=1 format).
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx = int(parent_joint_indices_np[target_link_indices[0]])
-    parent_idx_np = np.array(robot.joints.parent_indices)
-    n_joints = robot.joints.num_joints
-    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    # Wrap in (1, n_joints) for n_ee=1.
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1537,8 +1371,8 @@ def hjcd_solve_cuda_batch(
     # (any other checker, or none) leave the kernel's self-collision path off.
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
-    ffi_targets = traced_ffi_target(
-        "hjcd_ik", ("hjcd_ik_coarse_cuda", "hjcd_ik_lm_cuda"), robot, target_link_indices,
+    ffi_targets = grim_targets(
+        ("hjcd_coarse", "hjcd_lm"), robot, target_link_indices,
         traced, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
@@ -1554,19 +1388,10 @@ def hjcd_solve_cuda_batch(
             nu=nu,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
-            self_sph_local=self_sph_local,
-            self_link_start=self_link_start,
-            self_link_joint=self_link_joint,
-            self_pair_i=self_pair_i,
-            self_pair_j=self_pair_j,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
         ),

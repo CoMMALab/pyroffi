@@ -1,4 +1,4 @@
-"""SCO trajopt: the traced build optimizes as well as stock, and runs robots stock cannot."""
+"""CUDA trajopt (GRiM kernels): table and traced builds agree, and high-DOF robots run."""
 
 import shutil
 
@@ -15,7 +15,7 @@ if shutil.which("nvcc") is None or jax.default_backend() != "gpu":
 from pyroffi import Robot
 from pyroffi._robot_srdf_parser import read_disabled_collisions_from_srdf
 from pyroffi.collision import RobotCollisionSpherized, Sphere
-from pyroffi.cuda_kernels.trajopt._sco_trajopt_cuda import prepare_sco_trajopt_cuda, sco_trajopt_cuda_prepared
+from pyroffi.optimization_engines._trajopt_cuda import prepare, run
 from pyroffi.optimization_engines._sco_optimization import ScoTrajOptConfig
 
 CFG = ScoTrajOptConfig(n_outer_iters=10, n_inner_iters=30, m_lbfgs=6, w_smooth=1.0, w_vel=1.0, w_acc=0.5,
@@ -38,26 +38,25 @@ def _problem(urdf_path, srdf_path, batch=16, T=32):
     return robot, coll, start, goal, init
 
 
-def test_traced_matches_stock_cost():
+def test_traced_matches_table_cost():
     robot, coll, start, goal, init = _problem("resources/panda/panda_spherized.urdf", "resources/panda/panda.srdf")
     costs = {}
     for traced in (False, True):
-        prep = prepare_sco_trajopt_cuda(robot, coll, WORLD, traced=traced)
-        costs[traced] = np.asarray(sco_trajopt_cuda_prepared(init, start, goal, prep, CFG)[1])
+        prep = prepare(robot, coll, WORLD, traced=traced)
+        costs[traced] = np.asarray(run("sco", prep, init, start, goal, CFG)[1])
     # Float-level differences steer individual runs to different (equally good) optima.
     np.testing.assert_allclose(np.median(costs[True]), np.median(costs[False]), rtol=0.05)
 
 
-def test_stock_refuses_over_capacity_and_traced_runs():
-    """G1 with hands: 1214 self pairs and 10 spheres per link exceed the stock build's arrays."""
+@pytest.mark.parametrize("traced", [False, True])
+def test_high_dof_robot_runs(traced):
+    """G1 with hands (43 DOF, 1214 self pairs, 10 spheres per link) overflowed the old
+    runtime-table build's arrays; per-robot builds are sized to the robot."""
     robot, coll, start, goal, init = _problem(
         "resources/g1_description/g1_29dof_with_hand_rev_1_0_spherized.urdf",
         "resources/g1_description/g1_29dof_with_hand.srdf", batch=4)
-    stock = prepare_sco_trajopt_cuda(robot, coll, WORLD, traced=False)
-    with pytest.raises(Exception, match="exceeds this build's capacity"):
-        jax.block_until_ready(sco_trajopt_cuda_prepared(init, start, goal, stock, CFG))
-    traced = prepare_sco_trajopt_cuda(robot, coll, WORLD, traced=True)
-    trajs = np.asarray(sco_trajopt_cuda_prepared(init, start, goal, traced, CFG)[2])
+    trajs = np.asarray(run("sco", prepare(robot, coll, WORLD, traced=traced), init, start, goal,
+                           CFG)[2])
     assert np.isfinite(trajs).all()
 
 
@@ -74,6 +73,6 @@ def test_collision_cost_matches_jax():
     cfg0 = dataclasses.replace(CFG, n_outer_iters=0, n_inner_iters=0)
     jax_cost = np.asarray(sco_trajopt(init, start, goal, robot, coll, world, cfg0, use_cuda=False)[1])
     for traced in (False, True):
-        prep = prepare_sco_trajopt_cuda(robot, coll, world, traced=traced)
-        np.testing.assert_allclose(np.asarray(sco_trajopt_cuda_prepared(init, start, goal, prep, cfg0)[1]),
+        prep = prepare(robot, coll, world, traced=traced)
+        np.testing.assert_allclose(np.asarray(run("sco", prep, init, start, goal, cfg0)[1]),
                                    jax_cost, rtol=5e-3)

@@ -1,4 +1,4 @@
-"""Toolbox / MCP / viewer surface for attached bodies.
+"""Toolbox / viewer surface for attached bodies.
 
 The behaviour worth pinning here is the *bookkeeping*, not the geometry (which
 ``test_attachments.py`` covers): an object must be either a world obstacle or
@@ -139,30 +139,7 @@ def test_dynamics_picks_up_the_payload_too(tb):
     np.testing.assert_array_equal(np.asarray(s.robot.dynamics.I_body), before)
 
 
-# --- MCP surface -----------------------------------------------------------
-
-
-def test_mcp_dispatches_the_attachment_tools(tb):
-    from pyroffi.mcp._tools import TOOLS_BY_NAME, dispatch
-
-    for name in ("attach_object", "detach_object", "list_attachments"):
-        assert name in TOOLS_BY_NAME
-
-    dispatch(
-        tb,
-        "add_object",
-        {"name": "cube", "shape": "box", "position": CUBE["position"],
-         "params": CUBE["params"]},
-    )
-    r = dispatch(tb, "attach_object", {"name": "cube"})
-    assert r["attached"] == "cube"
-    listed = dispatch(tb, "list_attachments", {})
-    assert [a["name"] for a in listed["attachments"]] == ["cube"]
-    assert listed["n_attached"] == 1
-
-    d = dispatch(tb, "detach_object", {"name": "cube"})
-    assert d["detached"] == "cube"
-    assert dispatch(tb, "list_attachments", {})["n_attached"] == 0
+# --- reset_scene ----------------------------------------------------------
 
 
 def test_reset_scene_hands_back_an_empty_session_that_is_still_warm(tb):
@@ -206,26 +183,6 @@ def test_reset_scene_can_drop_the_ground_plane_when_asked(tb):
     r = tb.reset_scene(keep_ground_plane=False)
     assert "ground" in r["removed_objects"]
     assert tb.session.scene.names() == []
-
-
-def test_mcp_dispatches_reset_scene(tb):
-    from pyroffi.mcp._tools import TOOLS_BY_NAME, dispatch
-
-    assert "reset_scene" in TOOLS_BY_NAME
-    _add_cube(tb)
-    r = dispatch(tb, "reset_scene", {})
-    assert r["removed_objects"] == ["cube"]
-    assert r["handles_invalidated"] is True
-
-
-def test_mcp_tool_schemas_all_map_to_real_methods():
-    from pyroffi.mcp._tools import TOOLS
-    from pyroffi.toolbox import Toolbox as _TB
-
-    for spec in TOOLS:
-        if spec.method == "recreate_session":
-            continue  # handled by the server, not the toolbox
-        assert hasattr(_TB, spec.method), f"{spec.name} -> missing {spec.method}"
 
 
 # --- viewer ----------------------------------------------------------------

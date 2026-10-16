@@ -7,7 +7,7 @@ import pytest
 if shutil.which("nvcc") is None:
     pytest.skip("needs nvcc", allow_module_level=True)
 
-from pyroffi.cuda_kernels._traced import build_shared_library
+from pyroffi.cuda_kernels._build import build_shared_library
 
 FLAGS = ["-O0", "--shared", "--compiler-options", "-fPIC"]
 

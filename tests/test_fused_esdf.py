@@ -69,15 +69,3 @@ def test_matches_jax_and_differentiates(scene, traced):
     ref_loss = lambda c: jnp.sum(jnp.where(jnp.isfinite(r := _reference(robot, model, esdf, c)), r, 0.0))
     np.testing.assert_allclose(np.asarray(jax.grad(loss)(q[:16])), np.asarray(jax.grad(ref_loss)(q[:16])),
                                rtol=1e-4, atol=1e-5)
-
-
-def test_traced_rejects_other_grid_shape(scene):
-    robot, model, esdf, q = scene
-    checker = FusedCUDACollisionChecker(robot, model, traced=True)
-    checker.compute_world_collision_distance(robot, q[:4], esdf)
-    target = checker._traced_targets((0, 0, 0, 0), (*esdf.grid.shape, esdf.voxel_size))[2]
-    from pyroffi.cuda_kernels.collision._fused_self_collision_ffi import fused_world_esdf
-
-    with pytest.raises(Exception, match="grid shape or voxel size"):
-        jax.block_until_ready(fused_world_esdf(q[:4], checker._robot_buffers, checker._static,
-                                               esdf.grid[:-1], esdf.origin, esdf.voxel_size, target))

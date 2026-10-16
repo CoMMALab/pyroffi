@@ -27,11 +27,10 @@ needs_gpu = pytest.mark.skipif(not GPU, reason="CUDA kernels need nvcc and a GPU
 PANDA = "resources/panda/panda_spherized.urdf"
 EE = "panda_hand"
 COVERED: set[str] = set()
-# Deliberately out of scope: VAMP is being migrated out of pyroffi; link_poses_from_joint_poses
-# takes joint poses, not a configuration.
-EXEMPT = {"collision.VAMPCPUCollisionChecker", "collision.make_vamp_cpu_checker",
-          "kinematics.VAMPCPUForwardKinematics", "kinematics.make_vamp_cpu_fk",
-          "bindings.VAMPCPUForwardKinematics", "kinematics.link_poses_from_joint_poses"}
+# Deliberately out of scope: link_poses_from_joint_poses takes joint poses, not a configuration.
+# pose_with_base_residual: PyRoKi's mobile base (fixed-base robot + separate base variable); a
+# floating-base robot carries its base in the configuration instead.
+EXEMPT = {"kinematics.link_poses_from_joint_poses", "costs.pose_with_base_residual"}
 
 
 def covers(*names):
@@ -161,7 +160,7 @@ def test_forward_kinematics(scene):
 
 @covers("kinematics.inverse_kinematics")
 @pytest.mark.parametrize("solver,cuda", [
-    ("ls", False), ("hjcd", False), ("halley", False), ("quik", False), ("analytic", False),
+    ("ls", False), ("hjcd", False), ("analytic", False),
     pytest.param("ls", True, marks=needs_gpu), pytest.param("hjcd", True, marks=needs_gpu)])
 def test_inverse_kinematics(scene, solver, cuda):
     robot = scene["robot"]
@@ -182,12 +181,11 @@ def test_inverse_kinematics_base_region(scene):
     assert _ee_error(robot, q, target)[0] < 1e-2
 
 
-@covers("kinematics.extract_dh", "bindings.QuIKSolver")
+@covers("kinematics.extract_dh")
 def test_chain_models_live_in_the_base_frame(scene):
     robot = scene["robot"]
     dh = pyroffi.kinematics.extract_dh(robot, EE, validate=True)  # checked against base-frame FK
     assert dh.dof == 7
-    assert pyroffi.bindings.QuIKSolver.from_robot(robot, EE).robot.floating_base is False
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +517,40 @@ def test_viewer_helpers(scene):
     ell = ManipulabilityEllipse(type("Server", (), {"scene": _Scene()})(), robot, target_link_name=EE)
     ell.update(cfg[0])
     assert ell.manipulability > 0.0
+
+
+@covers("costs.limit_residual", "costs.limit_velocity_residual", "costs.five_point_velocity_residual",
+        "costs.manipulability_residual", "costs.pose_residual", "costs.self_collision_residual",
+        "costs.world_collision_residual")
+def test_residuals_accept_floating_configurations(scene):
+    """PyRoKi's residuals (re-exported in pk.costs) on a floating base: limits apply to the joints."""
+    robot, model, world, cfg = scene["robot"], scene["model"], scene["world"], scene["cfg"]
+    a, b = pyroffi.Var(0), pyroffi.Var(1)
+    vals = {a: cfg[0], b: cfg[1]}
+    link = robot.links.num_links - 1
+    T = jaxlie.SE3(robot.forward_kinematics(cfg[0])[link])
+    c = pyroffi.costs
+    n = robot.joints.num_actuated_joints
+    out = {
+        "limit": c.limit_residual(vals, robot, a),
+        "limit_vel": c.limit_velocity_residual(vals, robot, a, b, 0.1),
+        "five_vel": c.five_point_velocity_residual(vals, robot, a, a, b, b, 0.1),
+        "manip": c.manipulability_residual(vals, robot, a, jnp.array([link])),
+        "pose": c.pose_residual(vals, robot, a, T, link, 1.0, 1.0),
+        "self": c.self_collision_residual(vals, robot, model, a, 0.01),
+        "world": c.world_collision_residual(vals, robot, model, a, world, 0.01),
+    }
+    assert all(bool(jnp.all(jnp.isfinite(r))) for r in out.values())
+    assert out["limit_vel"].shape == out["five_vel"].shape == (n,)
+    assert float(jnp.abs(out["limit"]).max()) == 0.0          # cfg sampled inside the limits
+    assert float(jnp.abs(out["pose"]).max()) < 1e-4
+
+
+@covers("costs.world_collision_native")
+def test_native_world_collision_rejects_floating_base(scene):
+    robot, model, world = scene["robot"], scene["model"], scene["world"]
+    with pytest.raises(NotImplementedError, match="fixed-base"):
+        pyroffi.costs.world_collision_native(robot, model, None, world, 0.01)
 
 
 # ---------------------------------------------------------------------------

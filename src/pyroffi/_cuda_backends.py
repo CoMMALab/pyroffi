@@ -12,9 +12,8 @@ compared by value** — do not give it ``__eq__``/``__hash__`` overrides, and do
 not store traced arrays on it.  Two value-equal ``Robot`` objects with distinct
 backend holders simply don't share cached wrappers, which is harmless.
 
-The stateless CUDA paths (FK, IK) do not appear here: they derive their buffers
-directly from ``robot.joints.*`` arrays and load a process-global FFI ``.so``
-singleton, so they need no per-robot object.
+The GRiM kernels (FK, IK, trajopt, robot-side collision) build from the URDF this holder
+keeps (:meth:`CudaBackends.urdf_xml`) and cache per robot on GRiM's side.
 """
 
 from __future__ import annotations
@@ -134,72 +133,17 @@ class CudaBackends:
             else onp.asarray(parent_joint_indices, dtype=onp.int32)
         )
         self._num_joints = num_joints
-        # CUDA IK ancestor masks, cached per target-link-index tuple.
-        self._ik_masks: dict[tuple[int, ...], tuple] = {}
 
     @property
     def urdf(self) -> "yourdfpy.URDF":
         return self._urdf
 
-    # ── CUDA IK structural precompute ──────────────────────────────────────
-
-    def ik_ancestor_masks(self, target_link_indices: tuple[int, ...]):
-        """Return ``(target_jnts, ancestor_masks)`` as JAX arrays for the given
-        end-effector link indices.
-
-        Computed purely from the *concrete* kinematic structure cached at
-        construction, so it is safe to call while the owning ``Robot`` is a JAX
-        tracer — the CUDA IK solvers can then run inside ``jax.jit``.  Results
-        are constant per ``target_link_indices`` and memoised.
-        """
-        from jax import numpy as jnp
-
-        if self._parent_indices is None or self._parent_joint_indices is None:
-            raise RuntimeError(
-                "CUDA IK ancestor masks require the concrete kinematic structure; "
-                "this Robot was not created via Robot.from_urdf."
-            )
-
-        key = tuple(int(i) for i in target_link_indices)
-        cached = self._ik_masks.get(key)
-        if cached is not None:
-            return cached
-
-        n_ee = len(key)
-        target_joints = onp.zeros(n_ee, dtype=onp.int32)
-        ancestor_masks = onp.zeros((n_ee, self._num_joints), dtype=onp.int32)
-        for i, link_idx in enumerate(key):
-            j = int(self._parent_joint_indices[link_idx])
-            target_joints[i] = j
-            while j >= 0:
-                ancestor_masks[i, j] = 1
-                j = int(self._parent_indices[j])
-
-        out = (jnp.asarray(target_joints), jnp.asarray(ancestor_masks))
-        self._ik_masks[key] = out
-        return out
-
-    def traced_target(
-        self, kernel: str, ee_link: int, link_names: tuple[str, ...],
-        actuated_names: tuple[str, ...], joint_names: tuple[str, ...],
-        collision_src: str, has_collision: bool,
-    ) -> tuple[str, ...]:
-        """FFI targets of ``kernel`` compiled against cricket-traced kinematics for
-        ``ee_link`` (built once per robot, link and collision tables; cached on disk)."""
-        from .cuda_kernels._traced import traced_target
-
-        chain = []
-        j = int(self._parent_joint_indices[ee_link])
-        while j >= 0:
-            chain.append(joint_names[j])
-            j = int(self._parent_indices[j])
-        chain_names = tuple(n for n in actuated_names if n in chain)
+    def urdf_xml(self, joint_names: tuple[str, ...]) -> str:
+        """The URDF GRiM compiles kernels from: a floating robot's is its chart's."""
         xml = _urdf_xml(self._urdf)
         if getattr(self, "_chart_of", None) is not None:
             xml = _chart_urdf_xml(xml, self._urdf.base_link, joint_names)
-        return traced_target(
-            kernel, xml, link_names[ee_link],
-            actuated_names, joint_names, chain_names, collision_src, has_collision)
+        return xml
 
     # ── Collision backends ─────────────────────────────────────────────────
 

@@ -4,13 +4,12 @@ Methods
     pyroffi:    HJCD/LS/SQP/MPPI/Analytic-IK, each with a JAX backend and a CUDA/FFI
                 kernel backend. Learned-IK (Flax MLP warm-start + LM refinement, JAX only).
     Baselines:  cuRobo (own conda env, see below), PyRoKi-LS / PyRoKi-AnalyticJac
-                (jaxls LM; "AnalyticJac" swaps in the analytic task-space Jacobian),
-                QuIK-CPU (Halley's-method CPU IK).
+                (jaxls LM; "AnalyticJac" swaps in the analytic task-space Jacobian).
 
 Timing
     Sequential: one pose at a time, for single-problem latency. pyroffi solvers use
     JIT device timers inside a fixed-count lax.scan (no Python dispatch in the timed
-    loop); cuRobo uses CUDA events; PyRoKi/QuIK use wall clocks.
+    loop); cuRobo uses CUDA events; PyRoKi uses wall clocks.
     Batch: N_TARGETS_BATCH targets at once, for throughput; effective per-problem
     time = total_time / N_TARGETS_BATCH.
 
@@ -80,16 +79,10 @@ import sys
 import time
 from dataclasses import dataclass
 
-# JAX reads platform selection during import/initialization.  Parse this flag
-# before importing jax so ``--cpu-only`` can prevent GPU backend setup.
-_CPU_ONLY = "--cpu-only" in sys.argv[1:]
-if _CPU_ONLY:
-    os.environ["JAX_PLATFORMS"] = "cpu"
-
 # ``--no-jax`` skips all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, Learned-JAX,
 # PyRoKi) but keeps CUDA/FFI kernel solvers and GPU monitoring enabled, so the
-# FFI kernels can be benchmarked in isolation.  ``--cpu-only`` implies it.
-_NO_JAX = _CPU_ONLY or "--no-jax" in sys.argv[1:]
+# FFI kernels can be benchmarked in isolation.
+_NO_JAX = "--no-jax" in sys.argv[1:]
 
 # Isolation model (see main() / _run_solver_subprocess): each solver is
 # benchmarked in its OWN subprocess, invoked with ``--solver LABEL``. A process
@@ -135,7 +128,7 @@ from bench_ik_utils import (
 )
 
 if not _IS_CUROBO_CHILD:
-    if not _CPU_ONLY and not _IS_SOLVER_CHILD:
+    if not _IS_SOLVER_CHILD:
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
     # Analytic-IK (closed-form) children run in float64: the 7-DOF branch solve
@@ -164,26 +157,25 @@ if not _IS_CUROBO_CHILD:
     from pyroffi.optimization_engines._sqp_ik import sqp_ik_solve
     from pyroffi.optimization_engines._mppi_ik import mppi_ik_solve
 
-    if not _CPU_ONLY:
-        from pyroffi.optimization_engines._hjcd_ik import (
-            hjcd_solve_cuda,
-            hjcd_solve_cuda_batch,
-        )
-        from pyroffi.optimization_engines._ls_ik import (
-            ls_ik_solve_cuda,
-            ls_ik_solve_cuda_batch,
-        )
-        from pyroffi.optimization_engines._sqp_ik import (
-            sqp_ik_solve_cuda,
-            sqp_ik_solve_cuda_batch,
-        )
-        from pyroffi.optimization_engines._mppi_ik import (
-            mppi_ik_solve_cuda,
-            mppi_ik_solve_cuda_batch,
-        )
+    from pyroffi.optimization_engines._hjcd_ik import (
+        hjcd_solve_cuda,
+        hjcd_solve_cuda_batch,
+    )
+    from pyroffi.optimization_engines._ls_ik import (
+        ls_ik_solve_cuda,
+        ls_ik_solve_cuda_batch,
+    )
+    from pyroffi.optimization_engines._sqp_ik import (
+        sqp_ik_solve_cuda,
+        sqp_ik_solve_cuda_batch,
+    )
+    from pyroffi.optimization_engines._mppi_ik import (
+        mppi_ik_solve_cuda,
+        mppi_ik_solve_cuda_batch,
+    )
 
     # Analytic (closed-form) IK for the 7-DOF spherical-wrist family.  The JAX
-    # backend is pure JAX (available in CPU-only mode too); the CUDA/FFI
+    # backend is pure JAX; the CUDA/FFI
     # backend needs a GPU and float64 (see the pre-import JAX_ENABLE_X64 flag
     # above).
     from pyroffi.kinematics._analytic_ik import (
@@ -192,30 +184,10 @@ if not _IS_CUROBO_CHILD:
         build_geometry,
     )
 
-    if not _CPU_ONLY:
-        from pyroffi.optimization_engines._analytic_ik import (
-            analytic_ik_solve_cuda,
-            analytic_ik_solve_cuda_batch,
-        )
-
-    # QuIK CPU (Halley's-method) IK backend (optional; needs cricket JIT + a
-    # DH-representable serial chain).  It always runs on the CPU, so it is
-    # timed here as the CPU alternative to the CUDA solvers.
-    try:
-        from pyroffi.optimization_engines._quik_ik import QuIKSolver
-        _QUIK_IMPORT_OK = True
-    except Exception:
-        _QUIK_IMPORT_OK = False
-
-    # VAMP CPU collision checker + MPPI collision-free projection kernel
-    # (optional; needs cricket JIT).  Used to give QuIK a collision-aware
-    # mode: seeds are projected onto the collision-free manifold and
-    # solutions collision-filtered.
-    try:
-        from pyroffi.collision import VAMPCPUCollisionChecker
-        _VAMP_CPU_IMPORT_OK = True
-    except Exception:
-        _VAMP_CPU_IMPORT_OK = False
+    from pyroffi.optimization_engines._analytic_ik import (
+        analytic_ik_solve_cuda,
+        analytic_ik_solve_cuda_batch,
+    )
 
     # Learned-IK: imports only; model is loaded inside main() after the robot
     # is known.
@@ -266,12 +238,12 @@ _ANALYTIC_ROBOTS = frozenset(("panda", "fetch", "baxter"))
 
 
 def _candidate_solvers(
-    cpu_only: bool, no_jax: bool, robot_name: str | None = None,
+    no_jax: bool, robot_name: str | None = None,
 ) -> list[str]:
     """Base solver labels to benchmark, one subprocess each (see main()).
 
     This is the STATIC candidate set implied by the mode flags; the optional
-    solvers (Learned/PyRoKi/QuIK/cuRobo) may still be unavailable at runtime, in
+    solvers (Learned/PyRoKi/cuRobo) may still be unavailable at runtime, in
     which case that solver's child finds nothing to run and exits without writing
     rows.  When robot_name is given the set is further restricted to methods that
     support that robot: Analytic-IK only for 7-DOF spherical-wrist arms, cuRobo
@@ -281,18 +253,15 @@ def _candidate_solvers(
     for m in _CORE_METHODS:
         if not no_jax:
             labels.append(f"{m}-JAX")
-        if not cpu_only:
-            labels.append(f"{m}-CUDA")
-    if not cpu_only:
-        labels += [f"{m}-CUDA-Traced" for m in _CORE_METHODS]
+        labels.append(f"{m}-CUDA")
+    labels += [f"{m}-CUDA-Traced" for m in _CORE_METHODS]
     _analytic_ok = robot_name is None or robot_name in _ANALYTIC_ROBOTS
     if not no_jax and _analytic_ok:
         labels.append("Analytic-JAX")
-    if not cpu_only and _analytic_ok:
+    if _analytic_ok:
         labels.append("Analytic-CUDA")
     if not no_jax:
         labels += ["Learned-JAX", "PyRoKi-LS", "PyRoKi-AnalyticJac"]
-    labels.append("QuIK-CPU")
     if robot_name is not None and robot_name in _CUROBO_ROBOT_FILES:
         labels.append("cuRobo")
     return labels
@@ -1025,166 +994,6 @@ def _run_pyroki_batch(
                        peak_gpu_util=peak_gpu, avg_gpu_util=avg_gpu, peak_vram_mb=peak_vram)
 
 
-def _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker):
-    """Shared seed-generation / solution-selection for the QuIK bench runners.
-
-    Returns ``(make_seeds, pick_best)``:
-
-    ``make_seeds(rng, n_batch)`` draws ``[n_batch, num_seeds, dof]`` chain-space
-    seeds; when ``vamp_checker`` is given they are first pushed onto the
-    collision-free manifold with the MPPI projection kernel
-    (:meth:`VAMPCPUCollisionChecker.project_collision_free`), scattered through
-    the robot's full actuated vector (non-chain joints at the limit midpoint).
-
-    ``pick_best(q_actuated, err)`` selects the lowest-error solution per
-    problem; with a checker, the lowest-error *collision-free* solution
-    (falling back to lowest error when none is free).
-    """
-    order = quik.model.actuated_order
-    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
-    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
-    n_act = lo.shape[0]
-    mid = np.where(np.isfinite(lo) & np.isfinite(hi), (lo + hi) / 2.0, 0.0)
-    lo_f = np.where(np.isfinite(lo), lo, -np.pi).astype(np.float32)
-    hi_f = np.where(np.isfinite(hi), hi, np.pi).astype(np.float32)
-
-    def make_seeds(rng, n_batch: int) -> np.ndarray:
-        seeds = rng.uniform(
-            lo_c, hi_c, (n_batch, num_seeds, quik.dof)
-        ).astype(np.float32)
-        if vamp_checker is None:
-            return seeds
-        q_full = np.broadcast_to(
-            mid.astype(np.float32), (n_batch, num_seeds, n_act)
-        ).copy()
-        q_full[..., order] = seeds
-        qp, _ok = vamp_checker.project_collision_free(
-            None, q_full.reshape(-1, n_act),
-            lower=lo_f, upper=hi_f, seed=int(rng.integers(2**31)),
-        )
-        return np.asarray(qp).reshape(n_batch, num_seeds, n_act)[..., order]
-
-    def pick_best(q_actuated: np.ndarray, err: np.ndarray) -> np.ndarray:
-        # q_actuated: [n_batch, num_seeds, n_act]; err: [n_batch, num_seeds]
-        if vamp_checker is not None:
-            free = np.asarray(
-                vamp_checker.check_collision_free(
-                    None, q_actuated.reshape(-1, q_actuated.shape[-1])
-                )
-            ).reshape(err.shape)
-            err = np.where(free, err, err + 1e6)  # free solutions always win
-        best = np.argmin(err, axis=1)
-        return q_actuated[np.arange(err.shape[0]), best]
-
-    return make_seeds, pick_best
-
-
-def _run_quik_sequential(
-    quik: "QuIKSolver",
-    robot: "pk.Robot",
-    target_link_index: int,
-    target_poses: list,
-    lo: np.ndarray,
-    hi: np.ndarray,
-    num_seeds: int,
-    algorithm: int = 0,
-    vamp_checker=None,
-) -> list[SolveResult]:
-    """Run the QuIK CPU solver sequentially, timing with plain wall-clock.
-
-    QuIK is a CPU C++ FFI kernel, so (like PyRoKi) it is timed with wall-clock
-    rather than the JAX ``lax.scan`` device timer.  Seeds are drawn in the
-    chain-joint subspace; the returned config is scattered back into the robot's
-    full actuated-joint vector for a like-for-like FK error evaluation.
-
-    With ``vamp_checker`` the run is collision-aware: seeds are MPPI-projected
-    onto the collision-free manifold before solving, and the best
-    collision-free solution is preferred (both inside the timed region).
-    """
-    make_seeds, pick_best = _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker)
-
-    def one(pose_mat, rng) -> jax.Array:
-        seeds = make_seeds(rng, 1)[0]
-        poses = jnp.broadcast_to(jnp.asarray(pose_mat, jnp.float32), (num_seeds, 4, 4))
-        out = quik.solve_to_actuated(poses, jnp.asarray(seeds), algorithm=algorithm)
-        q = np.asarray(out["q_actuated"])[None]
-        err = np.asarray(out["error"])[None]
-        return jnp.asarray(pick_best(q, err)[0])
-
-    results: list[SolveResult] = []
-    for i, target_pose in enumerate(target_poses):
-        pose_mat = np.asarray(target_pose.as_matrix())
-        rng = np.random.default_rng(i + 1)
-        cfg = one(pose_mat, rng)
-        jax.block_until_ready(cfg)
-        pos_err, rot_err = _pose_errors(robot, cfg, target_link_index, target_pose)
-        times = []
-        for j in range(N_TIMED):
-            rng_j = np.random.default_rng(1000 * (i + 1) + j)
-            t0 = time.perf_counter()
-            out = one(pose_mat, rng_j)
-            jax.block_until_ready(out)
-            times.append(time.perf_counter() - t0)
-        results.append(SolveResult(np.array(cfg), pos_err, rot_err, float(np.median(times)) * 1e3))
-    return results
-
-
-def _run_quik_batch(
-    quik: "QuIKSolver",
-    robot: "pk.Robot",
-    target_link_index: int,
-    target_poses_stacked: jaxlie.SE3,
-    lo: np.ndarray,
-    hi: np.ndarray,
-    num_seeds: int,
-    algorithm: int = 0,
-    vamp_checker=None,
-) -> BatchResult:
-    """Run the QuIK CPU solver over all targets in one fused FFI call (wall-clock).
-
-    With ``vamp_checker`` the run is collision-aware (see
-    :func:`_run_quik_sequential`).
-    """
-    make_seeds, pick_best = _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker)
-    n_targets = len(target_poses_stacked.wxyz_xyz)
-    Ts = np.stack([
-        np.asarray(jaxlie.SE3(target_poses_stacked.wxyz_xyz[i]).as_matrix())
-        for i in range(n_targets)
-    ]).astype(np.float32)
-
-    def one(rng) -> np.ndarray:
-        seeds = make_seeds(rng, n_targets)
-        poses = np.repeat(Ts[:, None], num_seeds, axis=1)  # (n_targets, num_seeds, 4, 4)
-        out = quik.solve_to_actuated(
-            jnp.asarray(poses.reshape(-1, 4, 4)),
-            jnp.asarray(seeds.reshape(-1, quik.dof)),
-            algorithm=algorithm,
-        )
-        q = np.asarray(out["q_actuated"]).reshape(n_targets, num_seeds, -1)
-        err = np.asarray(out["error"]).reshape(n_targets, num_seeds)
-        return pick_best(q, err)
-
-    cfgs_np = one(np.random.default_rng(0))
-    pos_errs = np.empty(n_targets)
-    rot_errs = np.empty(n_targets)
-    for i in range(n_targets):
-        tp = jaxlie.SE3(target_poses_stacked.wxyz_xyz[i])
-        pos_errs[i], rot_errs[i] = _pose_errors(
-            robot, jnp.array(cfgs_np[i]), target_link_index, tp
-        )
-
-    times = []
-    for j in range(N_TIMED):
-        rng_j = np.random.default_rng(j + 1)
-        t0 = time.perf_counter()
-        out = one(rng_j)
-        jax.block_until_ready(jnp.asarray(out))
-        times.append(time.perf_counter() - t0)
-
-    effective_ms = float(np.median(times)) * 1e3 / n_targets
-    return BatchResult(cfgs_np, pos_errs, rot_errs, effective_ms)
-
-
 # ---------------------------------------------------------------------------
 # Collision environment helpers
 # ---------------------------------------------------------------------------
@@ -1486,19 +1295,14 @@ def _run_robot_benchmark(
     print(f"IK benchmark: {_title_solver}  (robot={robot_name}, "
           f"n_targets={N_TARGETS}, n_timed={N_TIMED})")
     gpu_mon_status = (
-        "disabled (--cpu-only)"
-        if _CPU_ONLY else
         "enabled (pynvml)"
         if _NVML_OK else
         "disabled (install nvidia-ml-py for GPU stats)"
     )
-    if _CPU_ONLY:
-        print("CPU-only mode: running only CPU-native solvers (QuIK); "
-              "skipping all CUDA and JAX solvers; JAX_PLATFORMS=cpu")
-    elif _NO_JAX:
+    if _NO_JAX:
         print("No-JAX mode: skipping all JAX-based solvers "
               "(HJCD/LS/SQP/MPPI-JAX, Learned-JAX, PyRoKi); "
-              "CUDA/FFI kernel solvers and QuIK still run")
+              "CUDA/FFI kernel solvers still run")
     print(f"GPU monitoring: {gpu_mon_status}")
     print("=" * 80)
 
@@ -1546,7 +1350,7 @@ def _run_robot_benchmark(
     if not (_want("PyRoKi-LS") or _want("PyRoKi-AnalyticJac")):
         pass  # not the selected solver; skip PyRoKi setup entirely
     elif _NO_JAX:
-        print("\nPyRoKi disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
+        print("\nPyRoKi disabled (--no-jax: JAX-based solvers are skipped).")
     elif _PYROKI_AVAILABLE:
         print("\nSetting up PyRoKi solvers (LS + AnalyticJac) ...")
         _pyroki_robot = _pyroki.Robot.from_urdf(urdf)
@@ -1584,38 +1388,11 @@ def _run_robot_benchmark(
         print("\nPyRoKi unavailable (pip install git+https://github.com/chungmin99/pyroki.git).")
 
     # ------------------------------------------------------------------
-    # QuIK CPU solver setup (optional)
-    # ------------------------------------------------------------------
-    _quik_solver = None
-    _quik_num_seeds = 32
-    if _QUIK_IMPORT_OK and _want("QuIK-CPU"):
-        print("\nSetting up QuIK CPU solver (POE->DH + cricket JIT) ...")
-        try:
-            _quik_solver = QuIKSolver(robot, target_link_name)
-            # Warm up (compile the FFI kernel; DH already extracted/validated).
-            _order = _quik_solver.model.actuated_order
-            _lo_c = np.where(np.isfinite(lo[_order]), lo[_order], -np.pi)
-            _hi_c = np.where(np.isfinite(hi[_order]), hi[_order], np.pi)
-            _seeds0 = np.random.default_rng(0).uniform(
-                _lo_c, _hi_c, (_quik_num_seeds, _quik_solver.dof)
-            ).astype(np.float32)
-            _p0 = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (_quik_num_seeds, 4, 4))
-            for _ in range(N_WARMUP):
-                jax.block_until_ready(_quik_solver.solve(_p0, jnp.asarray(_seeds0))["q"])
-            print(f"  QuIK ready (dof={_quik_solver.dof}, CPU).")
-        except Exception as e:  # noqa: BLE001
-            print(f"  QuIK unavailable for {robot_name}: {type(e).__name__}: {str(e)[:90]}")
-            _quik_solver = None
-    elif _want("QuIK-CPU"):
-        print("\nQuIK unavailable (needs cricket JIT; build external/cricket).")
-
-    # ------------------------------------------------------------------
     # Collision setup
     # ------------------------------------------------------------------
     robot_coll     = None
     _obs_geoms: list = []
     _collision_penalty = None
-    _quik_vamp_checker = None
     coll_kwargs_jax  = {}
     coll_kwargs_cuda = {}
     coll_kwargs_ls_cuda_kernel = {}
@@ -1698,33 +1475,6 @@ def _run_robot_benchmark(
         _check_coll_jit        = jax.jit(_min_coll_dist_single)
         _check_coll_batch_jit  = jax.jit(jax.vmap(_min_coll_dist_single))
 
-        # Collision-aware QuIK: VAMP CPU checker + MPPI seed projection.
-        if _quik_solver is not None and _VAMP_CPU_IMPORT_OK:
-            print("  Setting up collision-aware QuIK (VAMP MPPI seed projection) ...")
-            try:
-                _quik_vamp_checker = VAMPCPUCollisionChecker(
-                    ROBOT_URDFS[robot_name], srdf_path=srdf_path
-                )
-                if _quik_vamp_checker.dimension != n_act:
-                    raise RuntimeError(
-                        f"VAMP dimension {_quik_vamp_checker.dimension} != "
-                        f"robot actuated count {n_act}"
-                    )
-                _quik_vamp_checker.set_world_geoms(_obs_geoms)
-                # Warm up the projection + check kernels.
-                _warm = np.zeros((4, n_act), np.float32)
-                jax.block_until_ready(
-                    _quik_vamp_checker.project_collision_free(None, _warm)[0]
-                )
-                jax.block_until_ready(
-                    _quik_vamp_checker.check_collision_free(None, _warm)
-                )
-                print("  Collision-aware QuIK ready.")
-            except Exception as e:  # noqa: BLE001
-                print(f"  Collision-aware QuIK unavailable: "
-                      f"{type(e).__name__}: {str(e)[:90]}")
-                _quik_vamp_checker = None
-
         def _make_pyroki_coll_variant(variant, label):
             """Collision-aware build of one PyRoKi variant; None if the base
             variant is absent."""
@@ -1757,7 +1507,7 @@ def _run_robot_benchmark(
     if not _want("Learned-JAX"):
         pass  # not the selected solver; skip Learned-IK setup entirely
     elif _NO_JAX:
-        print("\nLearned-IK disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
+        print("\nLearned-IK disabled (--no-jax: JAX-based solvers are skipped).")
     elif _LEARNED_IK_IMPORT_OK:
         _model_path = get_default_model_path(robot_name)
         if _model_path.exists():
@@ -1930,17 +1680,16 @@ def _run_robot_benchmark(
         ("SQP-JAX",    jit_sqp,           {}),
         ("MPPI-JAX",   jit_mppi,          {}),
     ]
-    if not _CPU_ONLY:
-        warmup_seq += [
-            ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
-            ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED),
-            ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
-            ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED),
-            ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
-            ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED),
-            ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
-            ("MPPI-CUDA-Traced",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED),
-        ]
+    warmup_seq += [
+        ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
+        ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED),
+        ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
+        ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED),
+        ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
+        ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED),
+        ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
+        ("MPPI-CUDA-Traced",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED),
+    ]
     if _learned_ik_available:
         warmup_seq.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
     if COLLISION_FREE:
@@ -1951,17 +1700,16 @@ def _run_robot_benchmark(
                 ("SQP-JAX-COLL",   jit_sqp_coll,           coll_kwargs_jax),
                 ("MPPI-JAX-COLL",  jit_mppi_coll,          coll_kwargs_jax),
             ]
-        if not _CPU_ONLY:
-            warmup_seq += [
-                ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
-                ("HJCD-CUDA-Traced-COLL", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
-                ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}),
-                ("LS-CUDA-Traced-COLL", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
-                ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
-                ("SQP-CUDA-Traced-COLL", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
-                ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
-                ("MPPI-CUDA-Traced-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
-            ]
+        warmup_seq += [
+            ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("HJCD-CUDA-Traced-COLL", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}),
+            ("LS-CUDA-Traced-COLL", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
+            ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
+            ("SQP-CUDA-Traced-COLL", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-Traced-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
+        ]
 
     warmup_batch_jax = [] if _NO_JAX else [
         ("HJCD-JAX-BATCH",  jit_hjcd_batch,  {}),
@@ -1980,28 +1728,27 @@ def _run_robot_benchmark(
         ]
 
     warmup_batch_cuda = []
-    if not _CPU_ONLY:
+    warmup_batch_cuda += [
+        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
+        ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED),
+        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
+        ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED),
+        ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
+        ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED),
+        ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
+        ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED),
+    ]
+    if COLLISION_FREE:
         warmup_batch_cuda += [
-            ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
-            ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED),
-            ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
-            ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED),
-            ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
-            ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED),
-            ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
-            ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED),
+            ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}),
+            ("LS-CUDA-Traced-COLL-BATCH", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
+            ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("HJCD-CUDA-Traced-COLL-BATCH", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
+            ("SQP-CUDA-Traced-COLL-BATCH", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-Traced-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
         ]
-        if COLLISION_FREE:
-            warmup_batch_cuda += [
-                ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}),
-                ("LS-CUDA-Traced-COLL-BATCH", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
-                ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
-                ("HJCD-CUDA-Traced-COLL-BATCH", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
-                ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
-                ("SQP-CUDA-Traced-COLL-BATCH", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
-                ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
-                ("MPPI-CUDA-Traced-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
-            ]
 
     # Per-solver isolation: keep only the selected solver's warmups so that only
     # its timers are built (and only its kernels are JIT/compiled in this process).
@@ -2095,17 +1842,16 @@ def _run_robot_benchmark(
         ("SQP-JAX",   jit_sqp,          {},                seq_timers.get("SQP-JAX")),
         ("MPPI-JAX",  jit_mppi,         {},                seq_timers.get("MPPI-JAX")),
     ]
-    if not _CPU_ONLY:
-        seq_solvers += [
-            ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
-            ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED, seq_timers.get("HJCD-CUDA-Traced")),
-            ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
-            ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED, seq_timers.get("LS-CUDA-Traced")),
-            ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
-            ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED, seq_timers.get("SQP-CUDA-Traced")),
-            ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
-            ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED, seq_timers.get("MPPI-CUDA-Traced")),
-        ]
+    seq_solvers += [
+        ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
+        ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED, seq_timers.get("HJCD-CUDA-Traced")),
+        ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
+        ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED, seq_timers.get("LS-CUDA-Traced")),
+        ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
+        ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED, seq_timers.get("SQP-CUDA-Traced")),
+        ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
+        ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED, seq_timers.get("MPPI-CUDA-Traced")),
+    ]
     if _learned_ik_available:
         seq_solvers.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX,
                             seq_timers.get("Learned-JAX")))
@@ -2132,12 +1878,6 @@ def _run_robot_benchmark(
             target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
-    if _quik_solver is not None:
-        print("  Running QuIK-CPU ...")
-        seq_results["QuIK-CPU"] = _run_quik_sequential(
-            _quik_solver, robot, target_link_index, target_poses,
-            lo, hi, _quik_num_seeds,
-        )
 
     # ------------------------------------------------------------------
     # Sequential evaluation — collision-free IK
@@ -2155,17 +1895,16 @@ def _run_robot_benchmark(
             ("SQP-JAX",   jit_sqp_coll,       coll_kwargs_jax,                              seq_timers.get("SQP-JAX-COLL")),
             ("MPPI-JAX",  jit_mppi_coll,      coll_kwargs_jax,                              seq_timers.get("MPPI-JAX-COLL")),
         ]
-        if not _CPU_ONLY:
-            seq_coll_solvers += [
-                ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
-                ("HJCD-CUDA-Traced", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("HJCD-CUDA-Traced-COLL")),
-                ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
-                ("LS-CUDA-Traced", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-Traced-COLL")),
-                ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
-                ("SQP-CUDA-Traced", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("SQP-CUDA-Traced-COLL")),
-                ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
-                ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-Traced-COLL")),
-            ]
+        seq_coll_solvers += [
+            ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
+            ("HJCD-CUDA-Traced", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("HJCD-CUDA-Traced-COLL")),
+            ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
+            ("LS-CUDA-Traced", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-Traced-COLL")),
+            ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
+            ("SQP-CUDA-Traced", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("SQP-CUDA-Traced-COLL")),
+            ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
+            ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-Traced-COLL")),
+        ]
         seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0]) and _block_wanted("seq_coll")]
 
         for name, fn, kwargs, timer in seq_coll_solvers:
@@ -2187,12 +1926,6 @@ def _run_robot_benchmark(
                 target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
-        if _quik_vamp_checker is not None:
-            print("  Running QuIK-CPU-COLL ...")
-            seq_coll_results["QuIK-CPU"] = _run_quik_sequential(
-                _quik_solver, robot, target_link_index, target_poses,
-                lo, hi, _quik_num_seeds, vamp_checker=_quik_vamp_checker,
-            )
 
     # ------------------------------------------------------------------
     # Batch evaluation (JAX + CUDA batch solvers)
@@ -2207,17 +1940,16 @@ def _run_robot_benchmark(
         ("SQP-JAX-BATCH",   jit_sqp_batch,            {},                 rng_keys_batch, batch_timers.get("SQP-JAX-BATCH")),
         ("MPPI-JAX-BATCH",  jit_mppi_batch,           {},                 rng_keys_batch, batch_timers.get("MPPI-JAX-BATCH")),
     ]
-    if not _CPU_ONLY:
-        batch_solvers += [
-            ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
-            ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED, rng0, batch_timers.get("LS-CUDA-Traced-BATCH")),
-            ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
-            ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED, rng0, batch_timers.get("HJCD-CUDA-Traced-BATCH")),
-            ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
-            ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED, rng0, batch_timers.get("SQP-CUDA-Traced-BATCH")),
-            ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
-            ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED, rng0,         batch_timers.get("MPPI-CUDA-Traced-BATCH")),
-        ]
+    batch_solvers += [
+        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
+        ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED, rng0, batch_timers.get("LS-CUDA-Traced-BATCH")),
+        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
+        ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED, rng0, batch_timers.get("HJCD-CUDA-Traced-BATCH")),
+        ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
+        ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED, rng0, batch_timers.get("SQP-CUDA-Traced-BATCH")),
+        ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
+        ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED, rng0,         batch_timers.get("MPPI-CUDA-Traced-BATCH")),
+    ]
     if _learned_ik_available:
         batch_solvers.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}, rng_keys_batch,
                               batch_timers.get("Learned-JAX-BATCH")))
@@ -2245,12 +1977,6 @@ def _run_robot_benchmark(
             target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
-    if _quik_solver is not None:
-        print("  Running QuIK-CPU-BATCH ...")
-        batch_results["QuIK-CPU-BATCH"] = _run_quik_batch(
-            _quik_solver, robot, target_link_index, target_poses_stacked,
-            lo, hi, _quik_num_seeds,
-        )
 
     # ------------------------------------------------------------------
     # Batch evaluation — collision-free IK
@@ -2268,17 +1994,16 @@ def _run_robot_benchmark(
             ("SQP-JAX",   jit_sqp_coll_batch,     {},                                          rng_keys_batch, batch_timers.get("SQP-JAX-COLL-BATCH")),
             ("MPPI-JAX",  jit_mppi_coll_batch,    {},                                          rng_keys_batch, batch_timers.get("MPPI-JAX-COLL-BATCH")),
         ]
-        if not _CPU_ONLY:
-            batch_coll_solvers += [
-                ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
-                ("LS-CUDA-Traced", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-Traced-COLL-BATCH")),
-                ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
-                ("HJCD-CUDA-Traced", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-Traced-COLL-BATCH")),
-                ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
-                ("SQP-CUDA-Traced", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-Traced-COLL-BATCH")),
-                ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
-                ("MPPI-CUDA-Traced", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-Traced-COLL-BATCH")),
-            ]
+        batch_coll_solvers += [
+            ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
+            ("LS-CUDA-Traced", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-Traced-COLL-BATCH")),
+            ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
+            ("HJCD-CUDA-Traced", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-Traced-COLL-BATCH")),
+            ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
+            ("SQP-CUDA-Traced", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-Traced-COLL-BATCH")),
+            ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
+            ("MPPI-CUDA-Traced", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-Traced-COLL-BATCH")),
+        ]
         batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0]) and _block_wanted("batch_coll")]
 
         for name, fn, kwargs, rng, timer in batch_coll_solvers:
@@ -2301,12 +2026,6 @@ def _run_robot_benchmark(
                 target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
-        if _quik_vamp_checker is not None:
-            print("  Running QuIK-CPU-COLL-BATCH ...")
-            batch_coll_results["QuIK-CPU"] = _run_quik_batch(
-                _quik_solver, robot, target_link_index, target_poses_stacked,
-                lo, hi, _quik_num_seeds, vamp_checker=_quik_vamp_checker,
-            )
 
     # ------------------------------------------------------------------
     # Results tables
@@ -2334,10 +2053,8 @@ def _run_robot_benchmark(
         for jax_label, cuda_label in _method_pairs:
             if not _NO_JAX:
                 order.append(jax_label + jax_batch_suffix)
-            if not _CPU_ONLY:
-                order.append(cuda_label + jax_batch_suffix)
-        if not _CPU_ONLY:
-            order += [f"{m}-CUDA-Traced{jax_batch_suffix}" for m in _CORE_METHODS]
+            order.append(cuda_label + jax_batch_suffix)
+        order += [f"{m}-CUDA-Traced{jax_batch_suffix}" for m in _CORE_METHODS]
         return order
 
     seq_order = _method_order()
@@ -2347,8 +2064,6 @@ def _run_robot_benchmark(
         seq_order.append("PyRoKi-LS")
     if _pyroki_analytic is not None:
         seq_order.append("PyRoKi-AnalyticJac")
-    if "QuIK-CPU" in seq_results:
-        seq_order.append("QuIK-CPU")
 
     batch_order = _method_order("-BATCH")
     if _learned_ik_available:
@@ -2357,23 +2072,17 @@ def _run_robot_benchmark(
         batch_order.append("PyRoKi-LS-BATCH")
     if _pyroki_analytic is not None:
         batch_order.append("PyRoKi-AnalyticJac-BATCH")
-    if "QuIK-CPU-BATCH" in batch_results:
-        batch_order.append("QuIK-CPU-BATCH")
 
     coll_seq_order = _method_order()
     if _pyroki_ls_coll is not None:
         coll_seq_order.append("PyRoKi-LS")
     if _pyroki_analytic_coll is not None:
         coll_seq_order.append("PyRoKi-AnalyticJac")
-    if "QuIK-CPU" in seq_coll_results:
-        coll_seq_order.append("QuIK-CPU")
     coll_batch_order = _method_order()
     if _pyroki_ls_coll is not None:
         coll_batch_order.append("PyRoKi-LS")
     if _pyroki_analytic_coll is not None:
         coll_batch_order.append("PyRoKi-AnalyticJac")
-    if "QuIK-CPU" in batch_coll_results:
-        coll_batch_order.append("QuIK-CPU")
 
     # In the per-solver isolation path only one solver's results exist; keep the
     # canonical ordering but drop labels this process did not run.
@@ -2524,8 +2233,6 @@ def _run_solver_subprocess(
         cmd += ["--outdir", str(args.outdir)]
     if args.no_jax:
         cmd += ["--no-jax"]
-    if args.cpu_only:
-        cmd += ["--cpu-only"]
 
     env = os.environ.copy()
     if tier is not None:
@@ -2572,24 +2279,13 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--cpu-only",
-        action="store_true",
-        help=(
-            "Run only CPU-native IK solvers (QuIK and other non-JAX integrations): "
-            "skip all CUDA solvers AND all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, "
-            "Learned-JAX, PyRoKi), force JAX_PLATFORMS=cpu, and disable GPU (pynvml) "
-            "monitoring. This flag is parsed before jax is imported (see top of file)."
-        ),
-    )
-    parser.add_argument(
         "--no-jax",
         action="store_true",
         help=(
             "Skip all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, Learned-JAX, "
-            "PyRoKi) so only the CUDA/FFI kernel solvers (and QuIK) run, to "
-            "benchmark the FFI kernels in isolation. Unlike --cpu-only, CUDA "
-            "solvers and GPU (pynvml) monitoring stay enabled. This flag is "
-            "parsed before jax is imported (see top of file)."
+            "PyRoKi) so only the CUDA/FFI kernel solvers run, to benchmark the "
+            "FFI kernels in isolation. This flag is parsed before jax is imported "
+            "(see top of file)."
         ),
     )
     # Targeted runs. Set on the dispatcher; forwarded to every child.
@@ -2628,7 +2324,7 @@ def main() -> None:
         default=None,
         metavar="LABEL",
         help=(
-            "Benchmark exactly this one solver, e.g. HJCD-CUDA, LS-JAX, QuIK-CPU "
+            "Benchmark exactly this one solver, e.g. HJCD-CUDA, LS-JAX, cuRobo "
             "(per-solver child process; internal). Runs it in isolation and appends "
             "only its rows to the CSV."
         ),
@@ -2687,13 +2383,12 @@ def main() -> None:
     if not selected:
         raise SystemExit("No robots selected. Re-enable at least one robot.")
 
-    # --cpu-only implies --no-jax (mirrors _NO_JAX at the top of the file).
-    no_jax = args.no_jax or args.cpu_only
-    all_solvers = _candidate_solvers(args.cpu_only, no_jax) + ["cuRobo"]
+    no_jax = args.no_jax
+    all_solvers = _candidate_solvers(no_jax) + ["cuRobo"]
     wanted_solvers = _split_choice(args.solvers, all_solvers, "--solvers")
     print("Selected robots:", ", ".join(selected))
     for robot_name in selected:
-        solvers = [s for s in _candidate_solvers(args.cpu_only, no_jax, robot_name) if s in wanted_solvers]
+        solvers = [s for s in _candidate_solvers(no_jax, robot_name) if s in wanted_solvers]
         print(f"Solvers for {robot_name} (one isolated subprocess each):", ", ".join(solvers) or "none")
         for solver in solvers:
             _run_solver_subprocess(robot_name, solver, csv_file, args)

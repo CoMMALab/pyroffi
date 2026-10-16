@@ -248,6 +248,10 @@ def world_collision_native(robot, robot_coll, joint_var, world_geoms, margin: fl
     runtime data (uploaded per solve), so a new scene of the same size bucket does not compile."""
     import jax.numpy as jnp
     from ._problem import Cost
+    if robot.floating_base:
+        # ponytail: the device FK walks the joints from a fixed root; add the base pose to it
+        # when a floating-base planner needs native collision.
+        raise NotImplementedError("world_collision_native: fixed-base robots only")
     tag = hashlib.sha1(repr((float(margin),)).encode()).hexdigest()[:6]
     nat = world_collision_source(robot, robot_coll, world_geoms, margin, tag)
     tag = nat.digest[:10]

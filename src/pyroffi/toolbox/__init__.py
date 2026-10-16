@@ -1,7 +1,6 @@
 """Session/toolbox layer: pyroffi as a composable toolbox of motion primitives.
 
-This is the substance underneath the MCP adapter, and it is transport-agnostic
-by construction — nothing here imports ``mcp``. It owns exactly what a stateless
+It is transport-agnostic by construction. It owns exactly what a stateless
 library call cannot: the persistent scene, the warm jitted caches, the handle
 table, shape bucketing, time parameterisation, and honest reporting of what
 happened.

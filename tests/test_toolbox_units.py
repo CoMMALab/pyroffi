@@ -2,8 +2,7 @@
 
 Covers the pieces where a silent bug is most expensive: the padded scene's
 shape-staticness, the interop contract (joint ordering, quaternion convention),
-retiming feasibility, handle bookkeeping, path bucketing, and the MCP tool table
-(schemas and argument validation). All CPU, all fast.
+retiming feasibility, handle bookkeeping and path bucketing. All CPU, all fast.
 
 Run:
     pytest tests/test_toolbox_units.py -q
@@ -348,106 +347,3 @@ def test_default_acceleration_limits_scale_with_time_to_peak():
     v = np.array([2.0, 4.0])
     assert np.allclose(default_acceleration_limits(v, 0.5), [4.0, 8.0])
     assert np.allclose(default_acceleration_limits(v, 1.0), [2.0, 4.0])
-
-
-# ── MCP tool table ───────────────────────────────────────────────────────────
-
-
-def test_every_tool_has_a_valid_schema_and_a_real_handler():
-    from pyroffi.mcp import TOOLS
-    from pyroffi.toolbox import Toolbox
-
-    assert len(TOOLS) >= 20
-    for spec in TOOLS:
-        assert spec.description and len(spec.description) > 40, spec.name
-        assert spec.input_schema["type"] == "object", spec.name
-        for field in spec.input_schema.get("required", []):
-            assert field in spec.input_schema["properties"], (spec.name, field)
-        # Every tool must map to something that actually exists, or the failure
-        # only shows up when an agent calls it.
-        assert spec.method == "recreate_session" or hasattr(Toolbox, spec.method), spec.name
-
-
-def test_tool_names_are_unique():
-    from pyroffi.mcp import TOOLS
-
-    names = [t.name for t in TOOLS]
-    assert len(names) == len(set(names))
-
-
-def test_tool_payloads_are_json_serialisable_mcp_tools():
-    import json
-
-    import mcp.types as types
-
-    from pyroffi.mcp import list_tool_payloads
-
-    payloads = list_tool_payloads()
-    json.dumps(payloads)
-    for payload in payloads:
-        types.Tool(**payload)  # would raise if the schema shape is wrong
-
-
-def test_dispatch_validates_arguments_without_touching_a_session():
-    """Argument errors must be caught before any GPU work happens."""
-    from pyroffi.mcp import dispatch
-
-    class Spy:
-        def __init__(self):
-            self.calls = []
-
-        def check_collision(self, **kwargs):
-            self.calls.append(kwargs)
-            return {"ok": True}
-
-    spy = Spy()
-    assert dispatch(spy, "check_collision", {"config": "cfg_1"}) == {"ok": True}
-    assert spy.calls == [{"config": "cfg_1"}]
-
-    with pytest.raises(ValueError, match="unknown tool"):
-        dispatch(spy, "teleport", {})
-    with pytest.raises(ValueError, match="unexpected argument"):
-        dispatch(spy, "check_collision", {"config": "cfg_1", "speed": 3})
-    with pytest.raises(ValueError, match="missing required argument"):
-        dispatch(spy, "check_collision", {})
-
-
-def test_cost_hints_are_present_so_the_model_can_self_order():
-    """The cheap-before-expensive story is carried entirely by descriptions."""
-    from pyroffi.mcp import TOOLS_BY_NAME
-
-    for name in ("check_edge", "check_collision", "solve_ik", "validate_path"):
-        assert "ms" in TOOLS_BY_NAME[name].description
-    for name in ("list_objects", "add_object", "import_path"):
-        assert "FREE" in TOOLS_BY_NAME[name].description
-    # The two honesty-critical descriptions.
-    assert "compiled" in TOOLS_BY_NAME["optimize_path"].description
-    assert "not a planner" in TOOLS_BY_NAME["optimize_between"].description
-    assert "EXPENSIVE in context" in TOOLS_BY_NAME["export_path"].description
-
-
-def test_server_error_payloads_are_structured_not_exceptions():
-    """An agent can act on {"error": ...}; a crash just loses the warm session."""
-    from pyroffi.mcp._server import PyroffiServer
-
-    class Spy:
-        def check_collision(self, **kwargs):
-            raise RuntimeError("boom")
-
-    # No session needed for this path, so stand one in and mark the server ready
-    # rather than letting the first call build a real one.
-    server = PyroffiServer()
-    server.__dict__["_toolbox"] = Spy()
-    server.__dict__["_ready"] = True
-
-    # A bad argument is caught before the primitive runs.
-    bad_args = server.call("check_collision", {})
-    assert bad_args["success"] is False
-    assert bad_args["error"] == "ValueError"
-    assert bad_args["tool"] == "check_collision"
-
-    # A primitive that blows up is also reported rather than killing the server.
-    blew_up = server.call("check_collision", {"config": "cfg_1"})
-    assert blew_up["success"] is False
-    assert blew_up["error"] == "RuntimeError"
-    assert "boom" in blew_up["message"]

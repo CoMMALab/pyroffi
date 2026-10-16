@@ -37,8 +37,9 @@ def forward_kinematics(
         cfg: The configuration of the actuated joints, in the format `(*batch actuated_count)`.
         unroll_fk: If True, unroll the JAX fori_loop over joints (ignored when use_cuda=True).
         use_cuda: If True, dispatch to an external CUDA kernel via the JAX FFI instead of
-            the default JAX implementation.  Requires ``_fk_cuda.so`` to be compiled first
-            (see ``build_kernels/build_fk_cuda.sh``).
+            the default JAX implementation: GRiM's kinematics kernel, compiled for this
+            robot's URDF on first use. It reads the URDF's kinematics, not the ``Robot``
+            arrays, so a Robot whose joint parameters were modified needs the JAX path.
 
     Returns:
         The SE(3) transforms of the links, ordered by `robot.links.names`,
@@ -227,21 +228,18 @@ def _fk_cuda_differentiable(
     input.  Both ``jax.jvp`` and ``jax.grad`` work; differentiated calls evaluate
     the JAX FK (the FFI itself is not differentiable).
     """
-    from ..cuda_kernels.fk._fk_cuda import fk_cuda
+    from .. import _grim
 
-    return fk_cuda(
-        cfg=cfg,
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        fk_level_starts=robot.joints.fk_level_starts,
-        fk_level_joints=robot.joints.fk_level_joints,
-    )
+    _grim.ensure_importable()
+    from grim.motion.kinematics import kinematics
+
+    from .._floating_base import chart_rotation
+
+    batch = cfg.shape[:-1]
+    rot_joint, rot = chart_rotation(robot)
+    T, _r, _J = kinematics(_grim.motion_robot(robot), cfg.reshape(-1, cfg.shape[-1]),
+                           runtime_rot_joint=rot_joint, rot=rot)
+    return T.reshape(*batch, *T.shape[1:])
 
 
 @_fk_cuda_differentiable.defjvp

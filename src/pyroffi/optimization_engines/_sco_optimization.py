@@ -433,8 +433,8 @@ def sco_trajopt(
         robot_coll:  Robot collision model pytree.
         world_geoms: Tuple of stacked world collision geometry objects.
         opt_cfg:     Hyper-parameters (static — changes trigger recompilation).
-        use_cuda:    If True, run the CUDA kernel instead of JAX (requires
-                     the compiled ``_sco_trajopt_cuda_lib.so``).
+        use_cuda:    If True, run GRiM's CUDA kernel instead of JAX (compiled for
+                     this robot and scene on first use).
 
     Returns:
         best_traj:   Trajectory with lowest final nonlinear cost. [T, DOF].
@@ -447,9 +447,9 @@ def sco_trajopt(
         within each endpoint pair's own slice.
     """
     if use_cuda:
-        from ..cuda_kernels.trajopt._sco_trajopt_cuda import sco_trajopt_cuda
-        return sco_trajopt_cuda(
-            init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
+        from ._trajopt_cuda import trajopt_cuda
+        return trajopt_cuda(
+            "sco", init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
         )
     return _sco_trajopt_jax(
         init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg

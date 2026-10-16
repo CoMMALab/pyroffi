@@ -25,15 +25,11 @@ Collision follows the same three paths as the rest of the suite: self-collision
 alone (path 1), plus world obstacles (path 2), and arbitrary JAX constraints by
 null-space projection afterwards (path 3, see ``_nullspace``).
 
-REQUIRES ``jax_enable_x64``. This kernel is the one solver in the suite that
-takes float64 buffers -- the closed-form solve chains trigonometric branch
-selection where float32 loses the sign of a nearly-degenerate quantity, and the
-iterative solvers can absorb that error in another iteration while this one
-cannot. The other four cast to float32 at their FFI boundary and so run under
-either setting, which means the two CAN share a process, but only with x64 ON.
-With it off, the kernel rejects its own operands and the error names buffer
-indices rather than the cause, so `_require_x64` raises something readable
-first.
+Runs under either x64 setting. The closed-form solve chains trigonometric branch
+selection where float32 loses the sign of a nearly-degenerate quantity, so GRiM's kernel
+solves in double internally; only its inputs and outputs are float32. Target poses
+computed in float32 still cost accuracy: on 256 random panda targets, 97.7% land within
+1 mm with x64 off against 99.6% with it on (identical to the original float64 kernel).
 """
 
 from __future__ import annotations
@@ -49,13 +45,12 @@ from jax import Array
 from jaxtyping import Float
 
 from .._robot import Robot
-from ..cuda_kernels.ik._analytic_ik_cuda import (
+from ._analytic_ik_cuda import (
     _Coll,
     _analytic_ik_cuda_raw,
     _empty_collision_buffers,
-    _empty_world,
     analytic_ik_cuda,
-    pack_geometry,
+    build_target,
     world_arrays,
 )
 from ..kinematics._analytic_collision import CollisionData, build_collision_data
@@ -67,32 +62,14 @@ from ._implicit_diff import (
     differentiable_ik_solution_batch,
 )
 
-#: Geometry blobs keyed on (robot identity, end-effector link). Building one
-#: walks the URDF and packs 95 float64s; it depends only on the kinematic chain,
-#: so recomputing it per call would be pure overhead. Holds a reference to the
-#: robot so the id it keys on cannot be recycled onto a different object.
+#: (GRiM kernel target, geometry) keyed on (link names, end-effector link). Building one
+#: walks the URDF and compiles (or loads) the per-chain kernel; it depends only on the
+#: kinematic chain, so recomputing it per call would be pure overhead.
 _GEOM_CACHE: dict = {}
 
 
-def _require_x64() -> None:
-    """Fail readably when x64 is off, instead of at the FFI boundary.
-
-    Without this the kernel reports ``Failed to decode all FFI handler operands
-    (bad operands at: 1, 2, 5) ... expected F64 but got F32``, which names
-    buffer positions and not the one-line fix. JAX also only WARNS when a
-    float64 request is truncated, so nothing upstream stops it either.
-    """
-    if not bool(jax.config.read("jax_enable_x64")):
-        raise RuntimeError(
-            "analytic IK requires 64-bit JAX: set jax.config.update("
-            "'jax_enable_x64', True) or JAX_ENABLE_X64=1 before use. Its "
-            "closed-form branch selection is float64-only, unlike the "
-            "iterative CUDA solvers, which cast to float32 and run under "
-            "either setting.")
-
-
 def _geometry_for(robot: Robot, ee_link_index: int):
-    """Geometry blob for this chain, cached on a key that survives tracing.
+    """GRiM kernel target and geometry for this chain, cached on a key that survives tracing.
 
     Keyed on the LINK NAMES rather than ``id(robot)``. Under ``jax.grad`` with
     respect to robot parameters the model arrives as tracers, a fresh object per
@@ -101,7 +78,7 @@ def _geometry_for(robot: Robot, ee_link_index: int):
     structural classification (which axes are concurrent), on numpy arrays. It
     raises TracerArrayConversionError on a traced robot.
 
-    Reusing the blob under differentiation is CORRECT, not a shortcut. The
+    Reusing the build under differentiation is CORRECT, not a shortcut. The
     kernel only has to produce q*; the gradient comes from the implicit rule
     evaluated on the pure-JAX residual with the LIVE parameters. The solver's
     internal copy of the geometry never needs to track the perturbation -- the
@@ -125,7 +102,7 @@ def _geometry_for(robot: Robot, ee_link_index: int):
             "call the solver once outside the differentiated function with the "
             "same robot to warm it."
         ) from exc
-    entry = _GEOM_CACHE[key] = (pack_geometry(geom), geom)
+    entry = _GEOM_CACHE[key] = (build_target(robot, int(ee_link_index)), geom)
     return entry
 
 
@@ -159,16 +136,16 @@ def _analytic_collision(robot, checker):
 
 def _as_matrix(target_poses: jaxlie.SE3) -> Array:
     """``SE3`` -> the ``[B, 4, 4]`` homogeneous form the kernel expects."""
-    return jnp.asarray(target_poses.as_matrix(), dtype=jnp.float64)
+    return jnp.asarray(target_poses.as_matrix(), dtype=jnp.float32)
 
 
 def _solve(robot, ee, targets_se3, previous_cfgs, num_seeds, err_tol,
            collision, world, respect_limits):
     """Shared core: both entry points differ only in batch shape."""
-    geom_blob, geom = _geometry_for(robot, ee)
+    target, geom = _geometry_for(robot, ee)
     q7 = default_q7_samples(geom, int(num_seeds))
     q, err, found, clearance = analytic_ik_cuda(
-        geom_blob, _as_matrix(targets_se3), q7, previous_cfgs,
+        target, _as_matrix(targets_se3), q7, previous_cfgs,
         collision=_analytic_collision(robot, collision),
         world_spheres=world,
         respect_limits=bool(respect_limits),
@@ -195,7 +172,6 @@ def analytic_ik_solve_cuda(
     solve addresses ONE chain, and quietly ignoring the rest would return a
     confident answer to a different question.
     """
-    _require_x64()
     ee = _single_ee(target_link_indices)
     del rng_key                       # deterministic; see module docstring
 
@@ -252,7 +228,6 @@ def analytic_ik_solve_cuda_batch(
     """
     # Detached for the kernel; the live `robot` reaches the implicit rule,
     # which is what carries dq*/dtheta. See detached_robot.
-    _require_x64()
     ee = _single_ee(target_link_indices)
     del rng_key
 
@@ -283,7 +258,7 @@ def analytic_ik_solve_cuda_batch(
         # passing `robot` in as a broadcast argument makes it a tracer and that
         # walk dies with TracerArrayConversionError. Hoisting is also simply
         # correct -- there is nothing per-device about the kinematic chain.
-        geom_blob, geom = _geometry_for(robot, ee)
+        target, geom = _geometry_for(robot, ee)
         q7 = default_q7_samples(geom, int(num_seeds))
         tol = float(err_tol if err_tol is not None else default_err_tol())
 
@@ -295,18 +270,18 @@ def analytic_ik_solve_cuda_batch(
         sph_home, sph_joint, pairs = _collision_arrays(collision_checker)
         world = _world_arrays(collision_world)
 
-        def _body(_rng, prev_sh, target_wxyz, geom_b, q7_s,
+        def _body(_rng, prev_sh, target_wxyz, q7_s,
                   sph_h, sph_j, prs, w_sph, w_cap, w_box, w_hs):
             coll = _Coll(sph_h, sph_j, prs) if collision_checker is not None else None
             q_, _e, _f, _c = _analytic_ik_cuda_raw(
-                geom_b, jaxlie.SE3(target_wxyz).as_matrix(), q7_s, prev_sh,
+                target, jaxlie.SE3(target_wxyz).as_matrix(), q7_s, prev_sh,
                 coll, (w_sph, w_cap, w_box, w_hs),
                 respect_limits=bool(respect_limits), err_tol=tol)
             return q_
 
-        pmapped = make_sharded_pmap(_body, 9)
+        pmapped = make_sharded_pmap(_body, 8)
         q = run_sharded(pmapped, target_poses, jax.random.PRNGKey(0), prev,
-                        n_devices, geom_blob, q7, sph_home, sph_joint, pairs, *world)
+                        n_devices, q7, sph_home, sph_joint, pairs, *world)
     else:
         q, _err, _found, _clr = _solve(
             _robot_k, ee, _tgt_k, prev, num_seeds, err_tol,
@@ -320,7 +295,7 @@ def _collision_arrays(checker):
     """Raw self-collision buffers, or the cached empties when disabled."""
     if checker is None:
         return _empty_collision_buffers()
-    return (jnp.asarray(checker.spheres_home, jnp.float64),
+    return (jnp.asarray(checker.spheres_home, jnp.float32),
             jnp.asarray(checker.sphere_joint, jnp.int32),
             jnp.asarray(checker.self_pairs, jnp.int32).reshape(-1, 2))
 

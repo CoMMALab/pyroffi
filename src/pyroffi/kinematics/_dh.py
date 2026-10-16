@@ -15,7 +15,7 @@ algorithm on them.
 
 The extraction only makes sense for an **unbranched serial chain** of revolute /
 prismatic joints leading from the base to a single end-effector link — exactly
-the class of robot (UR5, Panda, KUKA, ...) that the QuIK CPU backend targets.
+the class of robot (UR5, Panda, KUKA, ...) that DH-based IK solvers such as QuIK target.
 The result is validated numerically against pyroffi FK across random
 configurations; if the chain is not DH-representable (branched, or a geometry
 DH cannot express) :func:`extract_dh` raises with a clear message so callers can
@@ -37,7 +37,7 @@ _EPS = 1e-9
 
 @dataclass(frozen=True)
 class DHModel:
-    """Standard-DH description of a serial chain, consumed by the QuIK backend.
+    """Standard-DH description of a serial chain (the form QuIK-style solvers consume).
 
     Attributes:
         dh:          ``[N, 4]`` float64 table of ``(a, alpha, d, theta)`` rows,

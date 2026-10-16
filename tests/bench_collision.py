@@ -17,7 +17,6 @@ Compares four backends across two operations and several batch sizes:
     Binary checkers (bool per config — for sampling-based planning / edges):
     CUDA-Binary        — CUDABinaryCollisionChecker (fused FK, GPU)
     CUDA-Binary-Coarse — CUDABinaryCollisionChecker with coarse-first guard
-    VAMP-CPU           — VAMPCPUCollisionChecker (JIT-compiled VAMP fkcc, CPU)
 
   Operations:
     compute_world_collision_distance(robot, cfg, world_geom)
@@ -75,11 +74,6 @@ from pyroffi.collision import (
 )
 
 try:
-    from pyroffi.collision import VAMPCPUCollisionChecker
-except Exception:  # cricket not built
-    VAMPCPUCollisionChecker = None
-
-try:
     from pyroffi.collision import RoboGPUCollisionChecker
 except Exception:
     RoboGPUCollisionChecker = None
@@ -133,8 +127,7 @@ N_TIMED  = 7          # timed repetitions; median is reported
 # Batch sizes to sweep
 BATCH_SIZES = [1, 64, 512, 2048, 4096, 8192, 16384]
 
-# Number of discretised points per edge for the *CUDA* binary edge check (VAMP
-# discretises internally at the robot resolution, so it only takes endpoints).
+# Number of discretised points per edge for the CUDA binary edge check.
 EDGE_GRANULARITY = 16
 
 # RoboGPU point-cloud scene parameters
@@ -382,9 +375,8 @@ def _bench_binary_backend(
 ) -> list[BenchResult]:
     """Benchmark a *binary* collision checker's ``check_collision_free``.
 
-    Binary checkers (CUDA-Binary, VAMP-CPU) return one bool per configuration
-    rather than a distance matrix.  ``robot`` is passed through for API parity
-    (VAMP ignores it — FK is baked into its JIT binary)."""
+    Binary checkers (CUDA-Binary, RoboGPU) return one bool per configuration
+    rather than a distance matrix."""
     results = []
     for B, cfgs in cfgs_by_batch.items():
         try:
@@ -413,8 +405,7 @@ def _bench_edges_backend(
     """Benchmark batch edge validation (``check_edges_collision_free``).
 
     ``edges_by_batch[B]`` is shaped for the checker's convention: ``[E, G, n]``
-    pre-discretised points for the CUDA checker, ``[E, 2, n]`` endpoints for
-    VAMP.  ``ms_cfg`` reports per-edge time."""
+    pre-discretised points.  ``ms_cfg`` reports per-edge time."""
     results = []
     for E, edges in edges_by_batch.items():
         try:
@@ -537,7 +528,7 @@ def main(args) -> None:
     # ── Robot (capsule model) ──────────────────────────────────────────────
     # The capsule model + distance backends pull in trimesh/scipy convex-hull
     # fitting; --binary-only skips all of that and benchmarks just the binary
-    # checkers (which only need sphere primitives / the JIT'd VAMP binary).
+    # checkers (which only need sphere primitives).
     print("\nLoading robot ...")
     urdf = robot_cap = None
     lo_cap = hi_cap = None
@@ -581,7 +572,7 @@ def main(args) -> None:
         coll_cap = RobotCollision.from_urdf(urdf)
         print(f"  RobotCollision          : {coll_cap.num_links} links")
 
-    # The same SRDF the VAMP checker gets, so every backend checks the same pair set.
+    # One SRDF for every backend, so they all check the same pair set.
     # Without it the sphere models count adjacent/rest-overlapping links as colliding.
     ignore = ()
     if args.srdf is not None and args.srdf.exists():
@@ -762,8 +753,7 @@ def main(args) -> None:
     # These are a different operation from the distance backends above: the
     # binary checkers return collision-free verdicts and are intended for
     # sampling-based planning / edge validation.  World is restricted to spheres
-    # (the VAMP backend has no half-space primitive and we keep the comparison
-    # apples-to-apples across backends).
+    # (kept apples-to-apples across backends).
     if not args.skip_binary:
         print("\n  Binary collision-check benchmarks (op=binary, world=Sphere) ...")
         bin_world = world_spheres
@@ -784,21 +774,6 @@ def main(args) -> None:
         except Exception as exc:
             print(f"    CUDABinaryCollisionChecker: SKIP ({exc})")
 
-        # VAMP CPU checker — JIT-compiled from the spherized URDF (its own DOF).
-        vamp_cfgs_by_batch = None
-        if VAMPCPUCollisionChecker is not None and not args.skip_vamp:
-            try:
-                t0 = time.perf_counter()
-                vamp = VAMPCPUCollisionChecker(args.spherized_urdf, srdf_path=args.srdf)
-                print(f"    VAMPCPUCollisionChecker: OK (dim={vamp.dimension}, "
-                      f"built/loaded in {time.perf_counter()-t0:.2f}s)")
-                nv = vamp.dimension
-                vamp_np = rng.uniform(-1.5, 1.5, (max_B, nv)).astype(np.float32)
-                vamp_cfgs_by_batch = {B: jnp.array(vamp_np[:B]) for B in BATCH_SIZES}
-                bin_checkers.append(("VAMP-CPU", vamp, None, vamp_cfgs_by_batch))
-            except Exception as exc:
-                print(f"    VAMPCPUCollisionChecker: SKIP ({exc})")
-
         for label, checker, robot_arg, cfgs_bb in bin_checkers:
             print(f"    {label} binary ...")
             all_results += _bench_binary_backend(
@@ -807,7 +782,7 @@ def main(args) -> None:
 
         # ── Edge validation ─────────────────────────────────────────────────
         print(f"\n  Edge-validation benchmarks (op=edges, G={EDGE_GRANULARITY} for "
-              f"CUDA; VAMP discretises internally) ...")
+              f"CUDA) ...")
         for label, checker, robot_arg, cfgs_bb in bin_checkers:
             # Build edges from consecutive config pairs in this checker's DOF.
             n_dof = cfgs_bb[max(BATCH_SIZES)].shape[-1]
@@ -817,27 +792,22 @@ def main(args) -> None:
             for E in BATCH_SIZES:
                 a = a_np[:E]
                 b = b_np[:E]
-                if label.startswith("VAMP"):
-                    edges_bb[E] = jnp.asarray(np.stack([a, b], axis=1))     # [E,2,n]
-                else:
-                    # CUDA-Binary and RoboGPU both take pre-discretised [E,G,n]
-                    ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
-                    edges_bb[E] = jnp.asarray(
-                        a[:, None, :] * (1 - ts)[None, :, None]
-                        + b[:, None, :] * ts[None, :, None]
-                    )                                                       # [E,G,n]
+                # CUDA-Binary and RoboGPU both take pre-discretised [E,G,n]
+                ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
+                edges_bb[E] = jnp.asarray(
+                    a[:, None, :] * (1 - ts)[None, :, None]
+                    + b[:, None, :] * ts[None, :, None]
+                )                                                           # [E,G,n]
             print(f"    {label} edges ...")
             all_results += _bench_edges_backend(
                 label, checker, robot_arg, bin_world, edges_bb
             )
 
-    # ── Isolated point-cloud comparison: RoboGPU (GPU) vs CAPT (CPU) ─────────
-    # Both backends process the SAME point cloud (RoboGPU via an OptiX BVH, CAPT
-    # via VAMP's Collision-Affording Point Tree), so this is the apples-to-apples
-    # head-to-head.  The regular world is empty (one far-away sphere) to isolate
-    # the cost of the point-cloud query.
+    # ── Point-cloud benchmark: RoboGPU ───────────────────────────────────────
+    # RoboGPU checks the point cloud through an OptiX BVH. The regular world is
+    # empty (one far-away sphere) to isolate the cost of the point-cloud query.
     if not args.skip_pointcloud:
-        print(f"\n  Point-cloud benchmarks: RoboGPU vs CAPT "
+        print(f"\n  Point-cloud benchmarks: RoboGPU "
               f"(Mp={args.pc_points}, r_env={args.pc_r_env}) ...")
         # Empty regular world so only the point-cloud path is exercised.
         empty_world = Sphere.from_center_and_radius(
@@ -859,26 +829,6 @@ def main(args) -> None:
             except Exception as exc:
                 print(f"    RoboGPU: SKIP ({exc})")
 
-        capt_cfgs_by_batch = None
-        if VAMPCPUCollisionChecker is not None and not args.skip_vamp:
-            try:
-                t0 = time.perf_counter()
-                capt = VAMPCPUCollisionChecker(args.spherized_urdf, srdf_path=args.srdf)
-                # CAPT: env points inflated by r_env; robot sphere radius range
-                # spans [0, pc_r_env*?] — VAMP uses its own internal spherization,
-                # so capt_r_max only bounds the broadphase, set generously.
-                capt.set_world(
-                    empty_world, point_cloud=pc_j,
-                    capt_r_min=0.0, capt_r_max=0.2, capt_r_point=args.pc_r_env)
-                nv = capt.dimension
-                capt_np = rng.uniform(-1.5, 1.5, (max_B, nv)).astype(np.float32)
-                capt_cfgs_by_batch = {B: jnp.array(capt_np[:B]) for B in BATCH_SIZES}
-                print(f"    CAPT: OK (dim={nv}, built/loaded in "
-                      f"{time.perf_counter()-t0:.2f}s)")
-                pc_checkers.append(("CAPT", capt, None, capt_cfgs_by_batch))
-            except Exception as exc:
-                print(f"    CAPT: SKIP ({exc})")
-
         # Binary check on the point cloud.
         for label, checker, robot_arg, cfgs_bb in pc_checkers:
             print(f"    {label} pc-binary ...")
@@ -887,7 +837,7 @@ def main(args) -> None:
 
         # Edge validation on the point cloud.
         print(f"\n  Point-cloud edge validation (G={EDGE_GRANULARITY} for RoboGPU; "
-              f"CAPT discretises internally) ...")
+              f"pre-discretised) ...")
         for label, checker, robot_arg, cfgs_bb in pc_checkers:
             n_dof = cfgs_bb[max(BATCH_SIZES)].shape[-1]
             a_np = rng.uniform(-1.2, 1.2, (max_B, n_dof)).astype(np.float32)
@@ -895,13 +845,10 @@ def main(args) -> None:
             edges_bb = {}
             for E in BATCH_SIZES:
                 a, b = a_np[:E], b_np[:E]
-                if label == "CAPT":
-                    edges_bb[E] = jnp.asarray(np.stack([a, b], axis=1))     # [E,2,n]
-                else:
-                    ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
-                    edges_bb[E] = jnp.asarray(
-                        a[:, None, :] * (1 - ts)[None, :, None]
-                        + b[:, None, :] * ts[None, :, None])                # [E,G,n]
+                ts = np.linspace(0.0, 1.0, EDGE_GRANULARITY, dtype=np.float32)
+                edges_bb[E] = jnp.asarray(
+                    a[:, None, :] * (1 - ts)[None, :, None]
+                    + b[:, None, :] * ts[None, :, None])                    # [E,G,n]
             print(f"    {label} pc-edges ...")
             all_results += _bench_edges_backend(
                 label, checker, robot_arg, empty_world, edges_bb, op_tag="pc-edges")
@@ -919,9 +866,9 @@ def main(args) -> None:
         _print_table("Edge validation  (bool/edge, world=Sphere)",
                      all_results, "edges")
     if not args.skip_pointcloud:
-        _print_table("Point-cloud collision check  (bool/config, RoboGPU vs CAPT)",
+        _print_table("Point-cloud collision check  (bool/config, RoboGPU)",
                      all_results, "pc-binary")
-        _print_table("Point-cloud edge validation  (bool/edge, RoboGPU vs CAPT)",
+        _print_table("Point-cloud edge validation  (bool/edge, RoboGPU)",
                      all_results, "pc-edges")
 
     # Speed-up tables
@@ -935,15 +882,10 @@ def main(args) -> None:
             _print_speedup_table(all_results, op_tag, baseline_label="JAX-Capsule")
         _print_speedup_table(all_results, "self",  baseline_label="JAX-Capsule")
     if not args.skip_binary:
-        # Binary checkers form their own family; compare against the CPU VAMP
-        # baseline (falls back to "—" if VAMP was skipped).
-        _print_speedup_table(all_results, "binary", baseline_label="VAMP-CPU")
-        _print_speedup_table(all_results, "edges",  baseline_label="VAMP-CPU")
-    if not args.skip_pointcloud:
-        # Isolated head-to-head: RoboGPU (GPU OptiX) vs CAPT (CPU VAMP) on the
-        # same point cloud.  Baseline is CAPT so >1× means RoboGPU is faster.
-        _print_speedup_table(all_results, "pc-binary", baseline_label="CAPT")
-        _print_speedup_table(all_results, "pc-edges",  baseline_label="CAPT")
+        # Binary checkers form their own family; compare against the plain CUDA
+        # binary checker.
+        _print_speedup_table(all_results, "binary", baseline_label="CUDA-Binary")
+        _print_speedup_table(all_results, "edges",  baseline_label="CUDA-Binary")
 
     # ── Numerical agreement check ──────────────────────────────────────────
     # Guarded: the prebuilt CUDA *distance* kernel may not match the local GPU
@@ -1076,17 +1018,15 @@ if __name__ == "__main__":
                              f"(default: {COARSE_SPHERIZED_URDF})")
     parser.add_argument("--srdf",            default=None,
                         type=pathlib.Path,
-                        help=f"SRDF for the VAMP CPU checker (default: {PANDA_SRDF})")
+                        help=f"SRDF with the disabled self-collision pairs (default: {PANDA_SRDF})")
     parser.add_argument("--skip-neural",     action="store_true",
                         help="Skip neural SDF training and benchmarking")
     parser.add_argument("--skip-binary",     action="store_true",
                         help="Skip binary collision-check + edge-validation benchmarks")
-    parser.add_argument("--skip-vamp",       action="store_true",
-                        help="Skip the VAMP CPU backend (still runs CUDA binary checkers)")
     parser.add_argument("--skip-robogpu",    action="store_true",
                         help="Skip the RoboGPU OptiX backend")
     parser.add_argument("--skip-pointcloud", action="store_true",
-                        help="Skip the isolated RoboGPU-vs-CAPT point-cloud benchmark")
+                        help="Skip the RoboGPU point-cloud benchmark")
     parser.add_argument("--pc-points",       type=int, default=N_POINT_CLOUD,
                         help=f"Number of random environment points in the RoboGPU "
                              f"point cloud (default: {N_POINT_CLOUD})")

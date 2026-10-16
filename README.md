@@ -18,7 +18,6 @@ PyRoFFI is a toolkit optimized with Jax JIT tracing for accelerated motion plann
 Additional Features:
 - SRDF parsing
 - Runtime Neural SDFs
-- VAMP Compatible Primitive Sets
 - Improved Jax performance
 
 ## Coming from PyRoki

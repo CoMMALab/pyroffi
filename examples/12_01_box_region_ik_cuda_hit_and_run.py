@@ -1,7 +1,6 @@
 """Sample Panda IK configurations with end-effector coverage inside a box region using hit-and-run sampling.
 
-Prerequisite:
-    bash build_kernels/build_hit_and_run_ik_cuda.sh
+The GRiM kernel compiles for the robot on first use.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""The CUDA task-Jacobian kernel and the implicit rule that consumes it.
+"""The CUDA task Jacobian (GRiM's kinematics kernel) and the implicit rule that consumes it.
 
 Two properties carry this feature, and both are easy to break silently:
 
@@ -29,7 +29,8 @@ from pyroffi.optimization_engines._ik_primitives import (
 
 RESOURCES = pathlib.Path(__file__).resolve().parents[1] / "resources"
 
-_ik_jacobian = pytest.importorskip("pyroffi.cuda_kernels.ik._ik_jacobian")
+if jax.default_backend() != "gpu":
+    pytest.skip("the task-Jacobian kernel needs a GPU", allow_module_level=True)
 
 
 @pytest.fixture(scope="module")
@@ -39,11 +40,16 @@ def panda():
     return robot, robot.links.names.index("panda_hand")
 
 
-def _buffers(robot):
-    j = robot.joints
-    return (j.twists, j.parent_transforms, j.parent_indices, j.actuated_indices,
-            j.mimic_multiplier, j.mimic_offset, j.mimic_act_indices,
-            j._topo_sort_inv)
+def _task_jacobian(robot, ee, q, targets):
+    """``(r, J)`` from the kernel the implicit rule uses."""
+    from pyroffi import _grim
+
+    _grim.ensure_importable()
+    from grim.motion.kinematics import kinematics
+
+    joint = int(robot._backends._parent_joint_indices[ee])
+    _T, r, J = kinematics(_grim.motion_robot(robot), q, targets[:, None, :], (joint,))
+    return r, J
 
 
 def _random_cfgs(robot, n, seed=0):
@@ -54,17 +60,13 @@ def _random_cfgs(robot, n, seed=0):
                        jnp.float32)
 
 
-@pytest.mark.skipif(not _ik_jacobian.library_available(),
-                    reason="_ik_jacobian_lib.so not built")
 def test_kernel_residual_matches_the_jax_convention(panda):
     robot, ee = panda
     q = _random_cfgs(robot, 32)
     targets = jax.vmap(lambda c: robot.forward_kinematics(c)[ee])(
         _random_cfgs(robot, 32, seed=1))
-    tj, am = _ik_jacobian.ancestor_tables(robot, (ee,))
 
-    r_cuda, _ = _ik_jacobian.task_jacobian(
-        q, _buffers(robot), tj, am, targets[:, None, :])
+    r_cuda, _ = _task_jacobian(robot, ee, q, targets)
     r_jax = jax.vmap(
         lambda c, t: _ik_residual_kernel_convention(c, robot, ee, jaxlie.SE3(t))
     )(q, targets)
@@ -72,18 +74,14 @@ def test_kernel_residual_matches_the_jax_convention(panda):
     assert float(jnp.max(jnp.abs(r_cuda - r_jax))) < 1e-2
 
 
-@pytest.mark.skipif(not _ik_jacobian.library_available(),
-                    reason="_ik_jacobian_lib.so not built")
 def test_position_rows_are_exact_everywhere(panda):
     """The position block is d(p_ee)/dq exactly, converged or not."""
     robot, ee = panda
     q = _random_cfgs(robot, 32)
     targets = jax.vmap(lambda c: robot.forward_kinematics(c)[ee])(
         _random_cfgs(robot, 32, seed=1))
-    tj, am = _ik_jacobian.ancestor_tables(robot, (ee,))
 
-    _, J_cuda = _ik_jacobian.task_jacobian(
-        q, _buffers(robot), tj, am, targets[:, None, :])
+    _, J_cuda = _task_jacobian(robot, ee, q, targets)
     J_jax = jax.vmap(
         lambda c, t: jax.jacobian(_ik_residual_kernel_convention)(
             c, robot, ee, jaxlie.SE3(t))
@@ -92,8 +90,6 @@ def test_position_rows_are_exact_everywhere(panda):
     assert float(jnp.max(jnp.abs(J_cuda[:, :3] - J_jax[:, :3]))) < 1e-2
 
 
-@pytest.mark.skipif(not _ik_jacobian.library_available(),
-                    reason="_ik_jacobian_lib.so not built")
 def test_full_jacobian_matches_only_at_a_converged_solution(panda):
     """Guards the assumption the implicit rule depends on.
 
@@ -108,11 +104,9 @@ def test_full_jacobian_matches_only_at_a_converged_solution(panda):
     n_act = robot.joints.num_actuated_joints
     targets = jax.vmap(lambda c: robot.forward_kinematics(c)[ee])(
         _random_cfgs(robot, 32, seed=1))
-    tj, am = _ik_jacobian.ancestor_tables(robot, (ee,))
 
     def jac_pair(q):
-        _, J_cuda = _ik_jacobian.task_jacobian(
-            q, _buffers(robot), tj, am, targets[:, None, :])
+        _, J_cuda = _task_jacobian(robot, ee, q, targets)
         J_jax = jax.vmap(
             lambda c, t: jax.jacobian(_ik_residual_kernel_convention)(
                 c, robot, ee, jaxlie.SE3(t))
@@ -136,8 +130,6 @@ def test_full_jacobian_matches_only_at_a_converged_solution(panda):
         "implicit rule's comments are stale")
 
 
-@pytest.mark.skipif(not _ik_jacobian.library_available(),
-                    reason="_ik_jacobian_lib.so not built")
 def test_gradient_agrees_with_the_pure_jax_rule(panda):
     """End to end: swapping J_q's source must not change the gradient."""
     import pyroffi.optimization_engines._implicit_diff as ID
@@ -199,8 +191,6 @@ def test_gradient_agrees_with_the_pure_jax_rule(panda):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _ik_jacobian.library_available(),
-                    reason="_ik_jacobian_lib.so not built")
 def test_hessian_is_not_trustworthy(panda):
     """`jax.hessian` through IK returns a plausible WRONG number.
 
@@ -249,8 +239,6 @@ def test_hessian_is_not_trustworthy(panda):
         "was implemented, drop this test and the first-order caveats")
 
 
-@pytest.mark.skipif(not _ik_jacobian.library_available(),
-                    reason="_ik_jacobian_lib.so not built")
 def test_vmap_over_grad_is_unsupported(panda):
     """`jax.vmap(jax.grad(...))` does not work through a CUDA IK solve.
 

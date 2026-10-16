@@ -1,14 +1,11 @@
 """Runtime code generation and compilation of GRiD dynamics kernels.
 
-Pipeline (mirrors the cricket/VAMP JIT flow in ``collision/_vamp_collision.py``,
-with nvcc in place of LLVM ORC):
+Pipeline:
 
-  1. ``grid_codegen.GRiDCodeGenerator`` emits a robot-specific ``grid.cuh``.
-  2. The static FFI translation unit ``cuda_kernels/dynamics/_grid_ffi_tu.cu``
-     is compiled against it by PyRoFFI's shared kernel builder
-     (``cuda_kernels._traced.build_shared_library``), which caches the ``.so``
-     on disk keyed by the generated header, the TU source and the flags, in the
-     same cache as the traced kernels (``$PYROFFI_TRACED_CACHE``).
+  1. GRiD's ``grid_codegen.GRiDCodeGenerator`` (GRiM's ``external/GRiD``) emits a robot-specific ``grid.cuh`` from
+     pyroffi's model of the URDF (:mod:`._grid_robot_adapter`).
+  2. GRiM compiles its any-batch JAX FFI handlers around that header
+     (:mod:`grim.motion.generated_dynamics`), cached on disk by content key.
 """
 
 from __future__ import annotations
@@ -20,9 +17,7 @@ import tempfile
 from pathlib import Path
 
 from ._grid_robot_adapter import GridRobotModel
-from ._vendor import ensure_grid_importable
-
-_TU_PATH = Path(__file__).parent.parent / "cuda_kernels" / "dynamics" / "_grid_ffi_tu.cu"
+from .._grim import ensure_importable
 
 
 def generate_grid_cuh(
@@ -36,12 +31,10 @@ def generate_grid_cuh(
     inertia change without regenerating kernels.  With the flag off, upstream
     emits nothing for it and the baked header is byte-identical to before.
     """
-    ensure_grid_importable()
+    ensure_importable()
     from grid_codegen import GRiDCodeGenerator
 
-    codegen = GRiDCodeGenerator(
-        grid_model.robot, False, False, FILE_NAMESPACE="grid"
-    )
+    codegen = GRiDCodeGenerator(grid_model.robot, False, False)
     # gen_all_code writes "<namespace>.cuh" into the *current directory*;
     # GRiD is used unmodified, so redirect cwd (and its prints) around it.
     with tempfile.TemporaryDirectory(prefix="pyroffi_grid_codegen_") as out_dir:
@@ -56,24 +49,16 @@ def generate_grid_cuh(
 
 
 def compile_grid_library(
-    grid_model: GridRobotModel,
-    arch: str | None = None,
-    *,
-    runtime_inertia: bool = False,
-) -> Path:
-    """Generate + compile the GRiD FFI library for this robot, with caching.
+    grid_model: GridRobotModel, *, runtime_inertia: bool = False
+) -> tuple[dict[str, str], Path]:
+    """Generate the header and build GRiM's handlers for this robot, with caching.
 
-    Returns the path to the compiled shared library.
+    Returns ``({op: FFI target name}, library path)``; the library path is what the runtime
+    inertia table (:mod:`._grid_runtime_inertia`) loads its setter from.
     """
-    from ..cuda_kernels._traced import build_shared_library
+    ensure_importable()
+    from grim.motion.generated_dynamics import build
 
-    arch_flag = arch or os.environ.get("PYROFFI_GRID_GPU_ARCH", "-arch=native")
-    flags = ["-O3", "-std=c++17", arch_flag, "--shared", "--compiler-options", "-fPIC"]
-    if runtime_inertia:
-        # Gates the set_inertia_params entry point in the TU; the generated
-        # header only declares it under the same codegen flag.
-        flags.append("-DPYROFFI_GRID_RUNTIME_INERTIA")
-    if grid_model.floating_base:
-        flags.append("-DPYROFFI_GRID_FLOATING_BASE")
-    grid_cuh = generate_grid_cuh(grid_model, runtime_inertia=runtime_inertia)
-    return build_shared_library("grid_ffi", _TU_PATH, {"grid.cuh": grid_cuh}, flags)
+    header = generate_grid_cuh(grid_model, runtime_inertia=runtime_inertia)
+    return build(header, floating_base=grid_model.floating_base,
+                 runtime_inertia=runtime_inertia)

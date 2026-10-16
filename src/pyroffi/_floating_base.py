@@ -83,7 +83,7 @@ def neutral_base() -> Array:
 
 def fixed_tree(robot: "Robot") -> "Robot":
     """``robot``'s joint tree as a fixed-base robot, i.e. seen from its own base frame (for
-    tools that model one chain relative to its root: DH extraction, QuIK, analytic IK)."""
+    tools that model one chain relative to its root: DH extraction, analytic IK)."""
     if not robot.floating_base:
         return robot
     import jax_dataclasses as jdc
@@ -149,6 +149,21 @@ def _chart_structure(robot: "Robot", k: int):
     chart_backends._chart_of = backends
     cache[k] = (parents, link_parents, topo, starts, chart_backends)
     return cache[k]
+
+
+def chart_rotation_joint(robot: "Robot") -> int:
+    """Index of the chart joint whose parent transform carries the reference rotation R_ref,
+    or -1 for a robot that is not a chart. GRiM bakes every other transform into its kernels
+    and takes this one per call, since R_ref follows the warm start."""
+    if robot._backends is None or getattr(robot._backends, "_chart_of", None) is None:
+        return -1
+    return list(robot.joints.names).index(CHART_JOINTS[_YAW_JOINT])
+
+
+def chart_rotation(robot: "Robot"):
+    """``(joint, wxyz)`` for GRiM's runtime rotation operand, or ``(-1, None)``."""
+    j = chart_rotation_joint(robot)
+    return (j, robot.joints.parent_transforms[j, :4]) if j >= 0 else (-1, None)
 
 
 def chart_robot(robot: "Robot", ref: Array, base_region=None, tangent: bool = False) -> "Robot":

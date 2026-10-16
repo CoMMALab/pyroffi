@@ -159,7 +159,7 @@ def test_cache_hit(setup):
     gd2 = GRiDDynamics.__new__(GRiDDynamics)  # noqa: F841 - just checking cache path
     from pyroffi.dynamics._grid_codegen import compile_grid_library
 
-    so = compile_grid_library(gd._grid_model)
+    _targets, so = compile_grid_library(gd._grid_model)
     assert so.is_file()
     assert time.monotonic() - t0 < 120.0
 

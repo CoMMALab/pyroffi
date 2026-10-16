@@ -169,38 +169,69 @@ _EMPTY_SELF_TABLES = (
 )
 
 
-def traced_ffi_target(kernel: str, stock_targets: tuple[str, ...], robot: Robot,
-                      target_link_indices: tuple[int, ...], traced: bool,
-                      robot_spheres, robot_sphere_joint, self_tables,
-                      world=()) -> tuple[str, ...]:
-    """FFI targets for an IK kernel's handlers: ``stock_targets``, or those of a build of
-    ``kernel`` compiled against cricket-traced kinematics and this call's collision tables
-    (see ``cuda_kernels/_traced.py``). Single end-effector only. ``world`` is the call's
-    (spheres, capsules, boxes, halfspaces) buffers; only their row counts are baked in."""
-    if not traced:
-        return stock_targets
+def _host(a):
+    """Collision tables as numpy. Empty ones may be traced ``jnp.zeros`` made inside a
+    caller's jit, where only their static shape matters."""
     import numpy as np
 
-    from ..cuda_kernels._traced import collision_tables_source
+    return np.zeros(a.shape, a.dtype) if a.size == 0 else np.asarray(a)
 
-    if len(target_link_indices) != 1:
-        raise NotImplementedError(
-            f"traced {kernel} supports a single end-effector; got {len(target_link_indices)}.")
-    if robot._backends is None:
-        raise RuntimeError(f"traced {kernel} needs a Robot built with Robot.from_urdf.")
 
-    # Empty buffers may be traced jnp.zeros (created inside a caller's jit); only their
-    # static shape matters. Populated ones are host-built constants.
-    def host(a):
-        return np.zeros(a.shape) if a.size == 0 else np.asarray(a)
+def grim_targets(kernels: tuple[str, ...], robot: Robot, target_link_indices: tuple[int, ...],
+                 traced: bool, robot_spheres, robot_sphere_joint, self_tables,
+                 world=()) -> tuple:
+    """GRiM IK kernels (``grim.motion.ik.KERNELS`` names) compiled for this robot, its
+    end-effectors and collision setup: one hashable target per kernel, for :func:`run_grim`.
 
-    has_collision = robot_sphere_joint.size > 0 or self_tables[3].size > 0
-    collision_src = collision_tables_source(
-        host(robot_spheres), host(robot_sphere_joint), [host(t) for t in self_tables],
-        tuple(w.shape[0] for w in world) or (0, 0, 0, 0))
-    return robot._backends.traced_target(
-        kernel, int(target_link_indices[0]), robot.links.names, robot.joints.actuated_names,
-        robot.joints.names, collision_src, has_collision)
+    Runs outside jit (the build needs concrete tables); the first call on a robot compiles,
+    later ones hit GRiM's disk cache. ``world`` is the call's (spheres, capsules, boxes,
+    halfspaces) buffers, of which only the row counts are baked in. ``traced`` compiles
+    against cricket-traced kinematics instead of baked tables.
+    """
+    from .. import _grim
+
+    _grim.ensure_importable()
+    from grim.motion import ik
+    from grim.motion._build import SelfCollision
+
+    from .._floating_base import chart_rotation_joint
+
+    mrobot = _grim.motion_robot(robot)
+    parent_joint = robot._backends._parent_joint_indices
+    ee_joints = tuple(int(parent_joint[i]) for i in target_link_indices)
+    sc = SelfCollision(*(_host(t) for t in self_tables))
+    collision = ik.CollisionModel(_host(robot_spheres), _host(robot_sphere_joint), sc)
+    counts = tuple(int(w.shape[0]) for w in world) or (0, 0, 0, 0)
+    # A floating base's chart takes its reference rotation per call (see run_grim).
+    rot_joint = chart_rotation_joint(robot)
+    return tuple(ik.build(k, mrobot, ee_joints, collision=collision, world_counts=counts,
+                          traced=traced, runtime_rot_joint=rot_joint) for k in kernels)
+
+
+def run_grim(target, seeds, targets, world, lower, upper, fixed_mask, noise=None, rng_seed=0,
+             robot=None, **settings):
+    """Launch a :func:`grim_targets` target with zero autodiff derivative (see
+    ``_batching.constant_wrt_autodiff``). ``world`` is (spheres, capsules, boxes,
+    halfspaces); ``noise`` is hjcd_lm's stall kicks and ``rng_seed`` mppi's seed (either may
+    be traced); ``robot`` supplies a chart's reference rotation; ``settings`` (static) go to
+    ``grim.motion.ik.run``."""
+    from grim.motion import ik
+
+    from ._batching import constant_wrt_autodiff
+
+    # Arrays are operands of the wrapped call, not captures: jax.custom_jvp binds only what
+    # it is passed, and a captured tracer fails with "No constant handler".
+    from .._floating_base import chart_rotation
+
+    rot = chart_rotation(robot)[1] if target.runtime_rot else None
+
+    def _run(seeds, targets, lower, upper, fixed_mask, noise, rng_seed, rot, *world):
+        return ik.run(target, seeds, targets, world=ik.World(*world), lower=lower,
+                      upper=upper, fixed_mask=fixed_mask, noise=noise, rng_seed=rng_seed,
+                      rot=rot, **settings)
+
+    return constant_wrt_autodiff(_run)(seeds, targets, lower, upper, fixed_mask, noise,
+                                       rng_seed, rot, *world)
 
 
 def self_collision_table_arrays(robot, collision_checker):
@@ -228,7 +259,7 @@ def self_collision_table_arrays(robot, collision_checker):
     rejected. That is a property of the model, not of this code path.
     """
     from ..collision._robot_collision import RobotCollisionSpherized
-    from ..cuda_kernels.collision._fused_self_collision_ffi import static_arrays
+    from ..collision._cuda_collision import static_arrays
 
     if robot is None or not isinstance(collision_checker, RobotCollisionSpherized):
         return _EMPTY_SELF_TABLES
