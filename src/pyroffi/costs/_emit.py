@@ -14,7 +14,7 @@ printed as the body of a ``template <Tier TIER>`` device function. Two value for
   reductions and contractions, and reuse of an expensive array.
 
 Materializations become loops written in GLASS's form, ``for (i = rank; i < n; i += size)``,
-followed by ``PYROFFI_COST_SYNC()``: sequential at ``Tier::Thread``, spread over a warp or
+followed by ``GRIM_COST_SYNC()``: sequential at ``Tier::Thread``, spread over a warp or
 block at the cooperative tiers. Scalarized code runs redundantly on every lane of a group;
 only the leader writes scalar outputs. Scratch buffers share one float array, with offsets
 reused once a buffer is dead.
@@ -27,6 +27,7 @@ which element lands where. Anything that cannot be resolved (a data-dependent
 
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import Any, Callable, Sequence
 
@@ -62,6 +63,28 @@ def _kind(dtype) -> str:
 
 
 _NP_DTYPE = {"f": np.float32, "i": np.int32, "b": np.bool_}
+_REAL = "float"
+"""C++ type of floating-point values (kind ``"f"``); set by :func:`precision`."""
+
+
+@contextlib.contextmanager
+def precision(real: str):
+    """Emit floating-point values as ``real`` (``"float"`` or ``"double"``), folding
+    constants at that precision. Wraps graph building and printing of one kernel."""
+    global _REAL
+    if real not in ("float", "double"):
+        raise ValueError(f"precision must be 'float' or 'double', got {real!r}")
+    old = _REAL, _NP_DTYPE["f"], _CTYPE["f"]
+    _REAL, _NP_DTYPE["f"], _CTYPE["f"] = real, (np.float64 if real == "double" else np.float32), real
+    try:
+        yield
+    finally:
+        _REAL, _NP_DTYPE["f"], _CTYPE["f"] = old
+
+
+def _fn(name: str) -> str:
+    """A float math function (``sqrtf``) at the current precision (``sqrt`` for double)."""
+    return name if _REAL == "float" else name[:-1]
 
 
 def _const(value, kind: str):
@@ -95,7 +118,7 @@ _COMMUTATIVE = {"add", "mul", "max", "min", "eq", "ne", "and", "or", "xor"}
 def _div(a, b):
     if np.issubdtype(np.asarray(a).dtype, np.integer):
         return np.int32(int(a / b)) if b != 0 else np.int32(0)
-    return np.float32(a) / np.float32(b)
+    return _NP_DTYPE["f"](a) / _NP_DTYPE["f"](b)
 
 
 def _rem(a, b):
@@ -104,7 +127,7 @@ def _rem(a, b):
     return np.fmod(a, b)
 
 
-# Constant evaluation of every elementwise op, in float32/int32 like the device.
+# Constant evaluation of every elementwise op, at the device's precision (see precision()).
 _FOLD: dict[str, Callable] = {
     "add": np.add, "sub": np.subtract, "mul": np.multiply, "div": _div,
     "neg": np.negative, "max": np.maximum, "min": np.minimum, "abs": np.abs,
@@ -113,10 +136,10 @@ _FOLD: dict[str, Callable] = {
     "atan": np.arctan, "atan2": np.arctan2, "sinh": np.sinh, "cosh": np.cosh,
     "tanh": np.tanh, "asinh": np.arcsinh, "acosh": np.arccosh, "atanh": np.arctanh,
     "exp": np.exp, "exp2": np.exp2, "log": np.log, "log1p": np.log1p, "expm1": np.expm1,
-    "sqrt": np.sqrt, "rsqrt": lambda a: np.float32(1) / np.sqrt(a), "cbrt": np.cbrt,
+    "sqrt": np.sqrt, "rsqrt": lambda a: _NP_DTYPE["f"](1) / np.sqrt(a), "cbrt": np.cbrt,
     "pow": np.power, "square": np.square, "rem": _rem,
-    "logistic": lambda a: np.float32(1) / (np.float32(1) + np.exp(-a)),
-    "erf": lambda a: np.float32(math.erf(float(a))),
+    "logistic": lambda a: _NP_DTYPE["f"](1) / (_NP_DTYPE["f"](1) + np.exp(-a)),
+    "erf": lambda a: _NP_DTYPE["f"](math.erf(float(a))),
     "is_finite": np.isfinite,
     "eq": np.equal, "ne": np.not_equal, "lt": np.less, "le": np.less_equal,
     "gt": np.greater, "ge": np.greater_equal,
@@ -423,10 +446,10 @@ class Graph:
                 max_extent = max(max_extent, n.extra["extent"])
             elif n.op == "pack":
                 off = offsets[n.idx]
-                stores = " ".join(f"scratch[{off + i}] = (float)({ctx.ref(v)});"
+                stores = " ".join(f"scratch[{off + i}] = ({_REAL})({ctx.ref(v)});"
                                   for i, v in enumerate(n.args))
                 lines.append(f"    if (rank == 0) {{ {stores} }}")
-                lines.append("    PYROFFI_COST_SYNC();")
+                lines.append("    GRIM_COST_SYNC();")
             else:
                 lines.append(f"    const {_CTYPE[n.kind]} v{n.idx} = {ctx.expr(n)};")
         if writes:
@@ -434,7 +457,7 @@ class Graph:
             lines += [f"        {lhs} = {ctx.ref(v)};" for lhs, v in writes]
             lines.append("    }")
         if sync:
-            lines.append("    PYROFFI_COST_SYNC();")
+            lines.append("    GRIM_COST_SYNC();")
         return "\n".join(lines), sch.scratch, max_extent
 
 
@@ -452,12 +475,18 @@ def _lit(v, kind: str) -> str:
         return "true" if bool(v) else "false"
     if kind == "i":
         return f"({int(v)})" if int(v) != -(2**31) else "(-2147483647 - 1)"
-    f = float(np.float32(v))
-    if math.isnan(f):
-        return "NAN"
+    f = float(_NP_DTYPE["f"](v))
+    if _REAL == "float":
+        if math.isnan(f):
+            return "NAN"
+        if math.isinf(f):
+            return "INFINITY" if f > 0 else "(-INFINITY)"
+        return f"{f!r}f"
+    if math.isnan(f):  # INFINITY / NAN are float macros
+        return "((double)NAN)"
     if math.isinf(f):
-        return "INFINITY" if f > 0 else "(-INFINITY)"
-    return f"{f!r}f"
+        return "((double)INFINITY)" if f > 0 else "(-(double)INFINITY)"
+    return repr(f)
 
 
 class _EmitCtx:
@@ -499,9 +528,9 @@ class _EmitCtx:
         else:
             val = self.ref(value)
         dst = n.extra["target"] or f"scratch + {self.offsets[n.idx]}"
-        out.append(f"        ({dst})[v{idx.idx}] = (float)({val});")
+        out.append(f"        ({dst})[v{idx.idx}] = ({_REAL})({val});")
         out.append("    }")
-        out.append("    PYROFFI_COST_SYNC();")
+        out.append("    GRIM_COST_SYNC();")
         return out
 
     def expr(self, n: Sym) -> str:
@@ -531,7 +560,8 @@ def _format(op: str, k: str, a: list[str]) -> str:
     if op == "sign":
         return f"(({a[0]} > 0) - ({a[0]} < 0))"
     if op == "logistic":
-        return f"(1.0f / (1.0f + expf(-({a[0]}))))"
+        one = _lit(1, "f")
+        return f"({one} / ({one} + {_fn('expf')}(-({a[0]}))))"
     if op == "is_finite":
         return f"isfinite({a[0]})"
     if op in _CPP_INFIX:
@@ -541,9 +571,9 @@ def _format(op: str, k: str, a: list[str]) -> str:
     if k == "i" and op == "rem":
         return f"({a[0]} % {a[1]})"
     if op in _CPP_UNARY_F:
-        return f"{_CPP_UNARY_F[op]}({a[0]})"
+        return f"{_fn(_CPP_UNARY_F[op])}({a[0]})"
     if op in _CPP_BINARY_F:
-        return f"{_CPP_BINARY_F[op]}({a[0]}, {a[1]})"
+        return f"{_fn(_CPP_BINARY_F[op])}({a[0]}, {a[1]})"
     raise EmitError(f"no C++ form for {op!r}")
 
 

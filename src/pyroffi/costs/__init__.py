@@ -46,3 +46,4 @@ five_point_jerk_cost = _Cost.factory(_r.five_point_jerk_residual)
 limit_constraint = _Cost.factory(kind="constraint_leq_zero")(_r.limit_residual)
 limit_velocity_constraint = _Cost.factory(kind="constraint_leq_zero")(_r.limit_velocity_residual)
 world_collision_constraint = _Cost.factory(kind="constraint_leq_zero")(_r.world_collision_residual)
+from ._native import world_collision_native as world_collision_native

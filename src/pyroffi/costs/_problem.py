@@ -42,6 +42,9 @@ class Var(Generic[T]):
                           tangent_dim: int | None = None,
                           retract_fn: Callable[[Any, jax.Array], Any] | None = None, **kwargs):
         super().__init_subclass__(**kwargs)
+        if retract_fn is None and getattr(cls, "retract_fn", None) is not None:
+            # A subclass of a Lie-group variable (e.g. a new default) keeps its manifold.
+            retract_fn, tangent_dim = cls.retract_fn, cls.tangent_dim
         if default_factory is not None:
             cls._default_factory = staticmethod(default_factory)
             if retract_fn is None:
@@ -185,6 +188,9 @@ class Cost:
     jac_custom_fn: Callable | None = None
     jac_custom_with_cache_fn: Callable | None = None
     name: str | None = None
+    # A NativeResidual (costs/_native.py): rows and Jacobian from device code; the traced
+    # residual only reserves the rows.
+    native: Any = None
 
     @staticmethod
     def factory(compute_residual: Callable | None = None, *, kind: CostKind = "l2_squared",
@@ -274,24 +280,29 @@ class SolveSummary:
 class LeastSquaresProblem:
     """Costs and the variables they are minimised over, as in jaxls."""
 
-    def __init__(self, costs: Iterable[Cost], variables: Iterable[Var]):
+    def __init__(self, costs: Iterable[Cost], variables: Iterable[Var], fixed: Iterable[Var] = ()):
+        """``fixed``: variables held at their initial value (e.g. a trajectory's endpoints);
+        a pyroffi extension, solved by the banded (trajectory) solver."""
         self.costs = list(costs)
         self.variables = list(variables)
+        self.fixed = list(fixed)
 
-    def analyze(self, use_onp: bool = False) -> "AnalyzedLeastSquaresProblem":
+    def analyze(self, use_onp: bool = False, structure: str = "auto") -> "AnalyzedLeastSquaresProblem":
         """Compile to a CUDA kernel (built once per problem structure, then cached).
 
-        Raises if there is no CUDA device or nvcc, or if the problem uses something the
-        compiler does not support.
+        ``structure``: ``"dense"`` (up to 128 tangent dimensions), ``"banded"`` (trajectories:
+        costs batched over knots, each touching a few neighbouring variables), or ``"auto"``
+        (banded above 128 variables or with fixed variables). Raises if there is no CUDA
+        device or nvcc, or if the problem uses something the compiler does not support.
         """
         del use_onp
         from ._compile import analyze
 
-        return analyze(self)
+        return analyze(self, structure)
 
 
-# Lie-group variables, as in jaxls. The compiled solver does not support them yet:
-# analyze() raises on a problem that uses one.
+# Lie-group variables, as in jaxls: stored as the group's parameters, solved in its tangent
+# space, stepped by right-multiplying exp(delta).
 def _lie_var(name: str, group):
     return type(name, (Var,), {}, default_factory=group.identity,
                 tangent_dim=group.tangent_dim,
