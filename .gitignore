@@ -37,3 +37,13 @@ statistics/
 temp/
 scratch/
 iosp/data/*
+# Local-only: logs, benchmark outputs, scratch notes/probes
+*.log
+resources/bench_logs/
+resources/bench_dynamics_processed/
+resources/bench_ik_targets_*.npz
+/notes
+docs/probe_*.cu
+docs/bench_reduce.cu
+docs/reduce_benchmark.txt
+docs/*_todo.md
