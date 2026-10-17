@@ -46,3 +46,7 @@ from ._topp_ra import (
     topp_ra as topp_ra,
     topp_ra_batched as topp_ra_batched,
 )
+from ._cuda import PairsResult as PairsResult
+from ._cuda import topp_ra_pairs as topp_ra_pairs
+from ._cuda import ReachResult as ReachResult
+from ._cuda import topp_ra_reach as topp_ra_reach
