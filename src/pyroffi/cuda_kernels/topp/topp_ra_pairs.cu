@@ -112,6 +112,108 @@ __device__ bool u_range(const Rows& R, real x, real u_cap, real delta, real r_lo
     return nonempty(lo, hi);
 }
 
+// Gridpoint i's rows, normalised once per block (Rows::row), split into u lower / upper bounds
+// u >=/<= p + q x (the box included) and the end-speed-independent part of x_range: the pure x
+// bounds and every (lower, upper) row pair. Only the reachability band depends on the end speed.
+struct Step {
+    real *au, *ax, *h;            // [m] the normalised rows
+    real *lp, *lq, *up, *uq;      // [m + 1] lower / upper u bounds
+    int nl, nu;
+    real xlo, xhi;                // pure x bounds and row-pair eliminations
+    int empty;
+    real wlo[32], whi[32];        // per-warp partials
+    int wempty[32];
+};
+
+__device__ void load_step(const Rows& R, real u_cap, Step& S) {   // block-collective
+    const int t = threadIdx.x;
+    __syncthreads();   // the previous step's readers are done
+    if (t == 0) { S.nl = 0; S.nu = 0; }
+    __syncthreads();
+    for (int k = t; k < R.m; k += blockDim.x) {
+        real au, ax, h;
+        R.row(k, &au, &ax, &h);
+        S.au[k] = au; S.ax[k] = ax; S.h[k] = h;
+        if (au < 0.0f) { const int j = atomicAdd(&S.nl, 1); S.lp[j] = h / au; S.lq[j] = -ax / au; }
+        else if (au > 0.0f) { const int j = atomicAdd(&S.nu, 1); S.up[j] = h / au; S.uq[j] = -ax / au; }
+    }
+    if (t == 0) {
+        const int j = atomicAdd(&S.nl, 1); S.lp[j] = -u_cap; S.lq[j] = 0.0f;
+        const int k = atomicAdd(&S.nu, 1); S.up[k] = u_cap; S.uq[k] = 0.0f;
+    }
+    __syncthreads();
+    real xlo = 0.0f, xhi = FLT_MAX;
+    int empty = 0;
+    for (int k = t; k < R.m; k += blockDim.x) {   // pure x bounds
+        if (S.au[k] != 0.0f) continue;
+        const real ax = S.ax[k], h = S.h[k];
+        if (fabs(ax) < 1e-20f) { if (h < -1e-9f) empty = 1; }
+        else if (ax > 0) xhi = fmin(xhi, h / ax);
+        else xlo = fmax(xlo, h / ax);
+    }
+    for (int q = t; q < S.nl * S.nu; q += blockDim.x) {   // (lower, upper) pairs: pl + ql x <= pk + qk x
+        const int l = q / S.nu, k = q % S.nu;
+        const real c = S.lq[l] - S.uq[k], d = S.up[k] - S.lp[l];
+        if (fabs(c) < kEps) { if (d < -1e-9f) empty = 1; }
+        else if (c > 0) xhi = fmin(xhi, d / c);
+        else xlo = fmax(xlo, d / c);
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        xlo = fmax(xlo, __shfl_xor_sync(0xffffffffu, xlo, o));
+        xhi = fmin(xhi, __shfl_xor_sync(0xffffffffu, xhi, o));
+        empty |= __shfl_xor_sync(0xffffffffu, empty, o);
+    }
+    if ((t & 31) == 0) { S.wlo[t >> 5] = xlo; S.whi[t >> 5] = xhi; S.wempty[t >> 5] = empty; }
+    __syncthreads();
+    if (t == 0) {
+        for (int w = 1; w < (int)(blockDim.x >> 5); ++w) {
+            xlo = fmax(xlo, S.wlo[w]); xhi = fmin(xhi, S.whi[w]); empty |= S.wempty[w];
+        }
+        S.xlo = xlo; S.xhi = xhi; S.empty = empty;
+    }
+    __syncthreads();
+}
+
+// x_range at the step with the band r_lo <= x + 2 delta u <= r_hi (delta > 0) -- one thread.
+__device__ bool x_range_step(const Step& S, real x_hi, real delta, real r_lo, real r_hi, real* lo_out, real* hi_out) {
+    real xlo = fmax(0.0f, S.xlo), xhi = fmin(x_hi, S.xhi);
+    bool empty = S.empty;
+    if (delta > 0) {
+        const real bl = r_lo / (2 * delta), bu = r_hi / (2 * delta), bq = -1.0f / (2 * delta);
+        auto pair = [&](real pl, real ql, real pk, real qk) {
+            const real c = ql - qk, d = pk - pl;
+            if (fabs(c) < kEps) { if (d < -1e-9f) empty = true; }
+            else if (c > 0) xhi = fmin(xhi, d / c);
+            else xlo = fmax(xlo, d / c);
+        };
+        for (int k = 0; k < S.nu; ++k) pair(bl, bq, S.up[k], S.uq[k]);   // band lower vs uppers
+        for (int l = 0; l < S.nl; ++l) pair(S.lp[l], S.lq[l], bu, bq);   // lowers vs band upper
+        pair(bl, bq, bu, bq);
+    }
+    *lo_out = xlo; *hi_out = xhi;
+    return !empty && nonempty(xlo, xhi);
+}
+
+// u_range at the step (identical arithmetic to u_range, the rows already normalised)
+__device__ bool u_range_step(const Step& S, int m, real x, real u_cap, real delta, real r_lo, real r_hi,
+                             real* lo_out, real* hi_out) {
+    real lo = -u_cap, hi = u_cap;
+    if (delta > 0) { lo = fmax(lo, (r_lo - x) / (2 * delta)); hi = fmin(hi, (r_hi - x) / (2 * delta)); }
+    for (int k = 0; k < m; ++k) {
+        const real au = S.au[k], ax = S.ax[k], h = S.h[k];
+        const real rhs = h - ax * x;
+        if (au == 0.0f) { if (rhs < -kRelTol * fmax(1.0f, fabs(h) + fabs(ax * x))) return false; continue; }
+        if (au > 0) hi = fmin(hi, rhs / au); else lo = fmax(lo, rhs / au);
+    }
+    *lo_out = lo; *hi_out = fmax(hi, lo);
+    return nonempty(lo, hi);
+}
+
+constexpr int kMaxPairsPerThread = 4;
+
+// Pairs kernel, gridpoint-synchronous: per gridpoint the block normalises the rows and eliminates
+// every row pair once; then each end speed (backward, a thread each) adds only its band, and each
+// (start, end) pair (forward, a thread each) runs the greedy step on the shared rows.
 __global__ void topp_pairs_kernel(const float* __restrict__ A, const float* __restrict__ H,
                                   const float* __restrict__ xu, const float* __restrict__ delta_in,
                                   const float* __restrict__ xs, const float* __restrict__ xe,
@@ -122,68 +224,91 @@ __global__ void topp_pairs_kernel(const float* __restrict__ A, const float* __re
     const float* He = H + (size_t)e * N * m;
     const float* XU = xu + (size_t)e * N;
     const real delta = delta_in[e];
+    extern __shared__ real sh[];
+    __shared__ Step S;
     __shared__ real x_cap_sh;
     if (t == 0) {   // pyroffi.topp._topp_ra._solver_scales
         real c = 0.0f;
         for (int i = 0; i < N; ++i) if (isfinite(XU[i])) c = fmax(c, (real)XU[i]);
         x_cap_sh = c > 0 ? c : kXCap;
+        S.au = sh; S.ax = sh + m; S.h = sh + 2 * m;
+        S.lp = sh + 3 * m; S.lq = S.lp + m + 1; S.up = S.lq + m + 1; S.uq = S.up + m + 1;
     }
     __syncthreads();
     const real x_cap = x_cap_sh;
     const real u_cap = delta > 0 ? fmin(fmax(x_cap / (2 * fmax(delta, 1e-12f)), 1e-6f), kUCap) : kUCap;
     auto xhi_at = [&](int i) { return fmin(isfinite(XU[i]) ? (real)XU[i] : kXCap, x_cap); };
+    auto rows = [&](int i) { return Rows{Ae + (size_t)i * m * 2, He + (size_t)i * m, m}; };
 
-    // backward: controllable sets for end speed b, one warp each
-    for (int b = t / 32; b < V; b += blockDim.x / 32) {
-        const int lane = t & 31;
-        float* lo = k_lo + ((size_t)e * V + b) * N;
-        float* hi = k_hi + ((size_t)e * V + b) * N;
-        const real xend = xe[(size_t)e * V + b];
-        real h_next = fmin(xend, xhi_at(N - 1)), l_next = fmin(xend, h_next);
-        if (lane == 0) { lo[N - 1] = l_next; hi[N - 1] = h_next; }
-        int ok = 1;
-        for (int i = N - 2; i >= 0; --i) {
-            Rows R{Ae + (size_t)i * m * 2, He + (size_t)i * m, m};
+    // backward: thread b holds end speed b's controllable set
+    real l_next = 0.0f, h_next = 0.0f;
+    int ok_b = 1;
+    float *lo_b = nullptr, *hi_b = nullptr;
+    if (t < V) {
+        lo_b = k_lo + ((size_t)e * V + t) * N; hi_b = k_hi + ((size_t)e * V + t) * N;
+        const real xend = xe[(size_t)e * V + t];
+        h_next = fmin(xend, xhi_at(N - 1)); l_next = fmin(xend, h_next);
+        lo_b[N - 1] = l_next; hi_b[N - 1] = h_next;
+    }
+    for (int i = N - 2; i >= 0; --i) {
+        load_step(rows(i), u_cap, S);
+        if (t < V) {
             real l, h;
-            const bool f = x_range(R, xhi_at(i), u_cap, delta, l_next, h_next, &l, &h);
-            if (!f) { l = 0.0f; h = 0.0f; ok = 0; }
+            const bool f = x_range_step(S, xhi_at(i), delta, l_next, h_next, &l, &h);
+            if (!f) { l = 0.0f; h = 0.0f; ok_b = 0; }
             l = fmin(fmax(l, 0.0f), xhi_at(i)); h = fmin(fmax(h, l), xhi_at(i));
-            if (lane == 0) { lo[i] = l; hi[i] = h; }
+            lo_b[i] = l; hi_b[i] = h;
             l_next = l; h_next = h;
         }
-        if (lane == 0) back_ok[(size_t)e * V + b] = ok;
     }
+    if (t < V) back_ok[(size_t)e * V + t] = ok_b;
     __syncthreads();
-    // forward: greedy from start speed a inside K^b
-    for (int p = t; p < V * V; p += blockDim.x) {
+    // forward: greedy from start speed a inside K^b, up to kMaxPairsPerThread pairs per thread
+    real x[kMaxPairsPerThread], T[kMaxPairsPerThread];
+    int ok[kMaxPairsPerThread];
+    bool stalled[kMaxPairsPerThread];
+    const int VV = V * V;
+    for (int r = 0; r < kMaxPairsPerThread; ++r) {
+        const int p = t + r * blockDim.x;
+        if (p >= VV) break;
         const int a = p / V, b = p % V;
         const float* lo = k_lo + ((size_t)e * V + b) * N;
         const float* hi = k_hi + ((size_t)e * V + b) * N;
         const real xst = xs[(size_t)e * V + a];
-        int ok = back_ok[(size_t)e * V + b] && xst <= hi[0] + 1e-6f && xst >= lo[0] - 1e-6f;
-        real x = fmin(fmax(xst, (real)lo[0]), (real)hi[0]), T = 0.0f;
-        bool stalled = false;
-        for (int i = 0; i + 1 < N; ++i) {
-            Rows R{Ae + (size_t)i * m * 2, He + (size_t)i * m, m};
+        ok[r] = back_ok[(size_t)e * V + b] && xst <= hi[0] + 1e-6f && xst >= lo[0] - 1e-6f;
+        x[r] = fmin(fmax(xst, (real)lo[0]), (real)hi[0]); T[r] = 0.0f; stalled[r] = false;
+    }
+    for (int i = 0; i + 1 < N; ++i) {
+        load_step(rows(i), u_cap, S);
+        for (int r = 0; r < kMaxPairsPerThread; ++r) {
+            const int p = t + r * blockDim.x;
+            if (p >= VV) break;
+            const int b = p % V;
+            const float* lo = k_lo + ((size_t)e * V + b) * N;
+            const float* hi = k_hi + ((size_t)e * V + b) * N;
             real ul, uh;
-            const bool f = u_range(R, x, u_cap, delta, lo[i + 1], hi[i + 1], &ul, &uh);
+            const bool f = u_range_step(S, m, x[r], u_cap, delta, lo[i + 1], hi[i + 1], &ul, &uh);
             const real u = f ? uh : 0.0f;
-            ok &= f;
-            real xn = fmin(fmax(x + 2 * delta * u, (real)lo[i + 1]), (real)hi[i + 1]);
+            ok[r] &= f;
+            real xn = fmin(fmax(x[r] + 2 * delta * u, (real)lo[i + 1]), (real)hi[i + 1]);
             xn = fmax(xn, 0.0f);
-            const real sum = sqrt(fmax(x, 0.0f) > 1e-12f ? x : 0.0f) + sqrt(xn > 1e-12f ? xn : 0.0f);
-            if (sum <= kMinSpeed) stalled = true;
-            T += 2 * delta / fmax(sum, kMinSpeed);
-            x = xn;
+            const real sum = sqrt(fmax(x[r], 0.0f) > 1e-12f ? x[r] : 0.0f) + sqrt(xn > 1e-12f ? xn : 0.0f);
+            if (sum <= kMinSpeed) stalled[r] = true;
+            T[r] += 2 * delta / fmax(sum, kMinSpeed);
+            x[r] = xn;
         }
-        // the terminal state must admit a control (delta = 0: no successor)
-        Rows Rl{Ae + (size_t)(N - 1) * m * 2, He + (size_t)(N - 1) * m, m};
+    }
+    load_step(rows(N - 1), u_cap, S);   // the terminal state must admit a control (delta = 0: no successor)
+    for (int r = 0; r < kMaxPairsPerThread; ++r) {
+        const int p = t + r * blockDim.x;
+        if (p >= VV) break;
+        const int a = p / V, b = p % V;
         real ul, uh;
-        ok &= u_range(Rl, x, u_cap, 0.0f, 0.0f, x_cap, &ul, &uh);
+        ok[r] &= u_range_step(S, m, x[r], u_cap, 0.0f, 0.0f, x_cap, &ul, &uh);
         const bool degenerate = delta <= 0.0f;
         const size_t o = ((size_t)e * V + a) * V + b;
-        feas[o] = degenerate ? 1 : (ok && !stalled);
-        dur[o] = degenerate ? 0.f : (float)T;
+        feas[o] = degenerate ? 1 : (ok[r] && !stalled[r]);
+        dur[o] = degenerate ? 0.f : (float)T[r];
     }
 }
 
@@ -195,8 +320,10 @@ ffi::Error ToppPairsImpl(cudaStream_t stream, ffi::Buffer<ffi::F32> A, ffi::Buff
     const auto d = A.dimensions();   // [E, N, m, 2]
     const int E = d[0], N = d[1], m = d[2], V = xs.dimensions()[1];
     if (E == 0) return ffi::Error::Success();
-    const int threads = std::min(1024, std::max(32 * V, ((V * V + 31) / 32) * 32));   // a warp per end speed
-    topp_pairs_kernel<<<E, threads, 0, stream>>>(A.typed_data(), H.typed_data(), xu.typed_data(), delta.typed_data(),
+    const int threads = std::min(1024, std::max(64, ((std::max(V, V * V) + 31) / 32) * 32));
+    if (V * V > kMaxPairsPerThread * threads) return ffi::Error(ffi::ErrorCode::kInvalidArgument, "topp_ra_pairs: V too large");
+    const size_t shmem = sizeof(real) * (3 * m + 4 * (m + 1));
+    topp_pairs_kernel<<<E, threads, shmem, stream>>>(A.typed_data(), H.typed_data(), xu.typed_data(), delta.typed_data(),
                                                   xs.typed_data(), xe.typed_data(), N, m, V, k_lo->typed_data(),
                                                   k_hi->typed_data(), back_ok->typed_data(), feas->typed_data(),
                                                   dur->typed_data());

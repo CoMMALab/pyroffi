@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install cricket2, the trace compiler GRiM uses for its traced builds (traced=True kinematics,
+# Install crocket, the trace compiler GRiM uses for its traced builds (traced=True kinematics,
 # and the traced dynamics tiers behind ContractDynamics); everything else in pyroffi runs
-# without it. cricket2 is pure Python and lives in GRiM at external/cricket2.
+# without it. crocket is pure Python and lives in GRiM at external/crocket.
 #
 # Run it inside the target env, e.g.:
 #
@@ -11,12 +11,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GRIM_DIR="${REPO_ROOT}/external/GRiM"
-CRICKET2_DIR="${GRIM_DIR}/external/cricket2"
-if [[ ! -f "${CRICKET2_DIR}/pyproject.toml" ]]; then
+CROCKET_DIR="${GRIM_DIR}/external/crocket"
+if [[ ! -f "${CROCKET_DIR}/pyproject.toml" ]]; then
   git -C "${REPO_ROOT}" submodule update --init --recursive external/GRiM
 fi
 
-pip install -e "${CRICKET2_DIR}"
+pip install -e "${CROCKET_DIR}"
 
 echo
 echo "Done. Verify with:"
