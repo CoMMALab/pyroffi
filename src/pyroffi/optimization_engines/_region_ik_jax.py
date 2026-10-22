@@ -42,7 +42,7 @@ from jaxtyping import Float
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS
 from ._region_ik import (
-    _compute_ancestor_mask,
+    _target_joint,
     _normalise_boxes,
     _run_region_sampler_loop,
     _seeds_per_launch_budget,
@@ -402,7 +402,7 @@ def direct_sample_box_region_jax(
         else fixed_joint_mask.astype(jnp.int32)
     )
 
-    _compute_ancestor_mask(robot, target_link_index)   # validate link index
+    _target_joint(robot, target_link_index)   # validate link index
     box_min, box_max, batched_input = _normalise_boxes(box_min, box_max)
 
     if restarts_per_target < 1:
@@ -546,7 +546,7 @@ def svgd_sample_box_region_jax(
         else fixed_joint_mask.astype(jnp.int32)
     )
 
-    _compute_ancestor_mask(robot, target_link_index)   # validate link index
+    _target_joint(robot, target_link_index)   # validate link index
     box_min, box_max, batched_input = _normalise_boxes(box_min, box_max)
 
     if restarts_per_target < 1:

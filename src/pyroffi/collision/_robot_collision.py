@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import jaxlie
+import numpy as onp
 import trimesh
 import yourdfpy
 from jaxtyping import Array, Bool, Float, Int
@@ -16,8 +17,9 @@ from loguru import logger
 if TYPE_CHECKING:
     from pyroffi._robot import Robot
 
+from .. import _registry
 from .._robot_urdf_parser import RobotURDFParser
-from ._collision import collide, pairwise_collide
+from ._collision import collide
 from ._geometry import Capsule, CollGeom, Sphere
 
 
@@ -34,6 +36,24 @@ class _AttachmentFieldsMixin:
         """Geometry entries that are actual robot links (excludes attachments)."""
         return self.num_links - len(self.attach_parent_link_indices)
 
+    def get_link_collision_meshes(self) -> dict[str, trimesh.Trimesh]:
+        """Collision geometry per link as a trimesh, in the link's own frame.
+
+        PyRoki-compatible. Padding spheres and empty links give an empty mesh.
+        """
+        radii = onp.asarray(self.coll.size[..., 0])
+        result: dict[str, trimesh.Trimesh] = {}
+        for i, name in enumerate(self.link_names):
+            # Capsule layout: one primitive per link (N,); sphere layout: (N, S).
+            idxs = [(i,)] if radii.ndim == 1 else [(i, j) for j in range(radii.shape[1])]
+            meshes = [self.coll._create_one_mesh(ix) for ix in idxs if radii[ix] > 0]
+            result[name] = (
+                cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+                if meshes
+                else trimesh.Trimesh()
+            )
+        return result
+
     def with_attachments(self, aset):
         """Return a copy extended with an :class:`~pyroffi.attachments.AttachmentSet`.
 
@@ -41,7 +61,7 @@ class _AttachmentFieldsMixin:
         """
         from ..attachments import compose_collision
 
-        return compose_collision(self, aset)
+        return _registry.register(compose_collision(self, aset))
 
     def entry_active(self) -> Bool[Array, " num_links"]:
         """Per-entry activity mask (robot links are always active)."""
@@ -175,12 +195,30 @@ class RobotCollision(_AttachmentFieldsMixin):
             f"{len(active_idx_i)} active self-collision pairs."
         )
 
-        return RobotCollision(
+        return _registry.register(RobotCollision(
             num_links=link_info.num_links,
             link_names=link_name_list,
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
             coll=capsules,
+        ))
+
+    @staticmethod
+    def from_sphere_decomposition(
+        sphere_decomposition: dict[str, dict[str, list]],
+        urdf: yourdfpy.URDF,
+        user_ignore_pairs: tuple[tuple[str, str], ...] = (),
+        ignore_immediate_adjacents: bool = True,
+    ) -> "RobotCollisionSpherized":
+        """PyRoki-compatible entry point; returns a :class:`RobotCollisionSpherized`.
+
+        See :meth:`RobotCollisionSpherized.from_sphere_decomposition`.
+        """
+        return RobotCollisionSpherized.from_sphere_decomposition(
+            sphere_decomposition,
+            urdf,
+            user_ignore_pairs=user_ignore_pairs,
+            ignore_immediate_adjacents=ignore_immediate_adjacents,
         )
 
     @staticmethod
@@ -423,22 +461,20 @@ class RobotCollision(_AttachmentFieldsMixin):
             Shape: (*batch, num_active_pairs).
             Positive distance means separation, negative means penetration.
         """
+
         batch_axes = cfg.shape[:-1]
 
         # 1. Get collision geometry at the current config
         coll = self.at_config(robot, cfg)
         assert coll.get_batch_axes() == (*batch_axes, self.num_links)
 
-        # 2. Compute all pairwise distances using the imported function
-        dist_matrix = pairwise_collide(coll, coll)
-        assert dist_matrix.shape == (
-            *batch_axes,
-            self.num_links,
-            self.num_links,
-        )
-        # 3. Extract distances for the precomputed active pairs
-        # Use advanced indexing with the stored indices
-        active_distances = dist_matrix[..., self.active_idx_i, self.active_idx_j]
+        # 2. Distances for the precomputed active pairs only: select each pair's two capsules
+        #    along the link axis, then collide them elementwise (not all N x N link pairs).
+        def links(idx):
+            lead = (slice(None),) * len(batch_axes)
+            return jax.tree.map(lambda x: x[(*lead, idx)], coll)
+
+        active_distances = collide(links(self.active_idx_i), links(self.active_idx_j))
 
         active_distances = self._mask_inactive_pairs(
             active_distances, self.active_idx_i, self.active_idx_j
@@ -493,18 +529,13 @@ class RobotCollision(_AttachmentFieldsMixin):
             M = world_axes[-1]
             batch_world_shape = world_axes[:-1]
 
-        # 3. Compute distances: map collide over robot links vs _world_geom (None).
-        # CollGeom batch axes are always LEADING (feature dims trail), and the
-        # number of trailing feature dims varies per leaf (e.g. a Sphere's
-        # `radius` has none, while `pose` has 7), so a single back-relative
-        # axis like -2 does NOT point at the link axis for every leaf. Since
-        # batch axes are leading, the link axis is at the same *front*-relative
-        # position for every leaf: use that instead.
-        link_axis = len(coll_robot_world.get_batch_axes()) - 1
-        _collide_links_vs_world = jax.vmap(
-            collide, in_axes=(link_axis, None), out_axes=(-2)
+        # 3. Compute distances: robot (*batch_cfg, N, 1) vs world (*batch_world, 1, M),
+        # which `collide` broadcasts to (*batch_combined, N, M). Mapping over the
+        # link axis instead lets a cfg batch collide with the world's M axis.
+        dist_matrix = collide(
+            coll_robot_world.reshape((*batch_cfg_shape, N, 1)),
+            _world_geom.reshape((*batch_world_shape, 1, M)),
         )
-        dist_matrix = _collide_links_vs_world(coll_robot_world, _world_geom)
         dist_matrix = self._mask_inactive_world(dist_matrix)
 
         # 4. Result shape check
@@ -522,6 +553,59 @@ class RobotCollision(_AttachmentFieldsMixin):
 
         # 5. Return the distance matrix
         return dist_matrix
+
+
+
+# --------------------------------------------------------------------------- #
+# Fused CUDA fast path
+# --------------------------------------------------------------------------- #
+# `RobotCollisionSpherized`'s distance methods route through a fused FK +
+# collision CUDA kernel when one is usable, falling back to the JAX
+# implementation below otherwise. The kernel computes FK inside the collision
+# kernel -- link transforms stay in shared memory and sphere positions are
+# formed in registers -- instead of materialising a padded [B, S, N, 3] tensor
+# to global memory between two XLA ops. Measured 2.7x (self) and 2.2x (world)
+# on 2048 Panda configurations, with identical verdicts.
+#
+# It is used only when ALL of the following hold, and silently falls back
+# otherwise, so behaviour never changes on a machine that cannot support it:
+#   * the kernel library is built and a GPU is present
+#   * the batch is at least MIN_BATCH (below that, launch overhead dominates
+#     and the JAX path is genuinely faster)
+#   * for world collision, the obstacles are spheres only (capsule/box/
+#     half-space are implemented in the kernel but unverified against this
+#     reference, so they take the JAX path rather than return unchecked numbers)
+#
+# Set PYROFFI_FUSED_COLLISION=0 to disable entirely.
+
+_FUSED_CACHE: dict = {}
+
+
+def _fused_checker(robot, model):
+    """Cached fused checker for a (robot, model) pair, or None if unusable."""
+    import os
+
+    if os.environ.get("PYROFFI_FUSED_COLLISION", "1") != "1":
+        return None
+    key = (id(robot), id(model))
+    if key not in _FUSED_CACHE:
+        try:
+            from ._cuda_collision import FusedCUDACollisionChecker
+
+            _FUSED_CACHE[key] = (FusedCUDACollisionChecker(robot, model)
+                                 if FusedCUDACollisionChecker.available()
+                                 else None)
+        except Exception:
+            _FUSED_CACHE[key] = None
+    return _FUSED_CACHE[key]
+
+
+def _fused_eligible(checker, cfg) -> bool:
+    """Batched, on-device configurations large enough to amortise the launch."""
+    if checker is None:
+        return False
+    cfg = jnp.asarray(cfg)
+    return cfg.ndim == 2 and cfg.shape[0] >= checker.MIN_BATCH
 
 
 @jdc.pytree_dataclass
@@ -599,6 +683,71 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
             ]
             sphere_list_per_link.append(per_link_spheres)
 
+        return RobotCollisionSpherized._from_sphere_lists(
+            urdf,
+            link_name_list,
+            sphere_list_per_link,
+            user_ignore_pairs=user_ignore_pairs,
+            srdf_path=srdf_path,
+            ignore_immediate_adjacents=ignore_immediate_adjacents,
+        )
+
+    @staticmethod
+    def from_sphere_decomposition(
+        sphere_decomposition: dict[str, dict[str, list]],
+        urdf: yourdfpy.URDF,
+        user_ignore_pairs: tuple[tuple[str, str], ...] = (),
+        ignore_immediate_adjacents: bool = True,
+        srdf_path: str | None = None,
+    ) -> "RobotCollisionSpherized":
+        """Build a sphere model from a precomputed decomposition (PyRoki format).
+
+        Args:
+            sphere_decomposition: ``{link_name: {"centers": [[x, y, z], ...],
+                "radii": [r, ...]}}`` in each link's frame. Links not listed get no
+                spheres.
+            urdf: URDF used for link names and adjacency.
+            user_ignore_pairs, ignore_immediate_adjacents, srdf_path: as in
+                :meth:`from_urdf`.
+
+        Distances stay per link (min over the link's spheres), not per sphere
+        as in PyRoki.
+        """
+        for link_name, d in sphere_decomposition.items():
+            assert d.keys() == {"centers", "radii"}, link_name
+            assert len(d["centers"]) == len(d["radii"]), link_name
+            assert all(len(c) == 3 for c in d["centers"]), link_name
+            assert all(r >= 0 for r in d["radii"]), link_name
+
+        _, link_info = RobotURDFParser.parse(urdf)
+        empty = {"centers": [], "radii": []}
+        sphere_list_per_link = [
+            [
+                Sphere.from_center_and_radius(jnp.asarray(c), jnp.asarray(r))
+                for c, r in zip(d["centers"], d["radii"])
+            ]
+            for d in (sphere_decomposition.get(n, empty) for n in link_info.names)
+        ]
+        assert any(sphere_list_per_link), "No spheres found in the provided decomposition."
+
+        return RobotCollisionSpherized._from_sphere_lists(
+            urdf,
+            link_info.names,
+            sphere_list_per_link,
+            user_ignore_pairs=user_ignore_pairs,
+            srdf_path=srdf_path,
+            ignore_immediate_adjacents=ignore_immediate_adjacents,
+        )
+
+    @staticmethod
+    def _from_sphere_lists(
+        urdf: yourdfpy.URDF,
+        link_name_list: tuple[str, ...],
+        sphere_list_per_link: list[list[Sphere]],
+        user_ignore_pairs: tuple[tuple[str, str], ...],
+        srdf_path: str | None,
+        ignore_immediate_adjacents: bool,
+    ) -> "RobotCollisionSpherized":
         # Pad each link's sphere list to max_spheres so we can stack into a
         # uniform [N, S] array. Padding uses a degenerate sphere (radius=-1e9)
         # which colldist_from_sdf will never activate.
@@ -645,18 +794,18 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
             )
 
         logger.info(
-            f"Created RobotCollision with {link_info.num_links} links "
+            f"Created RobotCollision with {len(link_name_list)} links "
             f"and {len(active_idx_i)} active self-collision pairs, "
             f"using spherical collision models."
         )
 
-        return RobotCollisionSpherized(
-            num_links=link_info.num_links,
+        return _registry.register(RobotCollisionSpherized(
+            num_links=len(link_name_list),
             link_names=link_name_list,
             active_idx_i=active_idx_i,
             active_idx_j=active_idx_j,
             coll=spheres_2d,  # Sphere pytree with batch_axes (N, S)
-        )
+        ))
 
     @staticmethod
     def _get_trimesh_collision_spheres_for_link(
@@ -950,6 +1099,12 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
         Author: Sai Coumar
         """
 
+        # Fused CUDA fast path; falls back to the JAX implementation below when
+        # unavailable or when the batch is too small to amortise the launch.
+        _fused = _fused_checker(robot, self)
+        if _fused_eligible(_fused, cfg):
+            return _fused.compute_self_collision_distance(robot, cfg)
+
         # 1. Transform all spheres to world frame.
         coll = self.at_config(robot, cfg)  # CollGeom batch axes: (*batch, S, N)
 
@@ -984,8 +1139,12 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
 
     @staticmethod
     def collide_link_vs_world(link_geom, world_geom):
-        # Map collide over spheres in this link (S)
-        # link_geom: (S, ...)
+        """Collide one link's ``S`` spheres against ``M`` world objects → ``(M,)``.
+
+        Strictly single-configuration: ``link_geom`` must have batch axes
+        ``(S,)`` exactly. Batched configurations are handled by the caller
+        (see :meth:`compute_world_collision_distance`), not here.
+        """
         collide_spheres_vs_world = jax.vmap(collide, in_axes=(0, None), out_axes=0)
         dist_spheres = collide_spheres_vs_world(link_geom, world_geom)  # (S, M)
         return dist_spheres.min(axis=0)  # reduce over spheres → (M,)
@@ -1004,8 +1163,10 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
         The maximum distance over all primitives in each link is used as the link’s
         representative distance to each world object.
         """
-        # 1. Get robot collision geometry at configuration
-        # Shape: (*batch_cfg, S, N, ...)
+        # 1. Get robot collision geometry at configuration.
+        # Shape: (*batch_cfg, S, N, ...). A single batched FK call — batching it
+        # is the whole point of accepting a batched cfg, so the fix below must
+        # not undo it.
         coll_robot_world = self.at_config(robot, cfg)
         batch_cfg_shape = coll_robot_world.get_batch_axes()[:-2]
         S, N = coll_robot_world.get_batch_axes()[-2:]
@@ -1021,25 +1182,31 @@ class RobotCollisionSpherized(_AttachmentFieldsMixin):
             M = world_axes[-1]
             batch_world_shape = world_axes[:-1]
 
-        # 3. Define how to collide a single link (with S primitives) against the world
-        # Each link_geom has shape (S, ...). We map over the S primitives, then take min.
+        # 3. Collide, mapping the (S, N) -> (N, M) core over any cfg batch axes.
+        #
+        # The core assumes geometry whose batch axes are *exactly* (S, N), so the
+        # link axis is 1 and the sphere axis is 0. Running it directly on
+        # (*batch_cfg, S, N) is what used to break: the link vmap left axis 0
+        # pointing at a *batch* axis rather than the sphere axis, so
+        # `collide_link_vs_world` reduced over configurations instead of spheres,
+        # and `collide` was additionally asked to broadcast the cfg batch against
+        # the world-object axis — two unrelated dimensions. Depending on the
+        # sizes that produced either a silently scrambled distance matrix or a
+        # "Cannot broadcast geometry shapes" error.
+        #
+        # One vmap per cfg batch axis fixes the axis bookkeeping without giving
+        # up the batched FK above: vmap fuses these into the same parallel
+        # execution, rather than falling back to a per-config loop.
+        def _core(coll_sn):
+            return jax.vmap(
+                self.collide_link_vs_world, in_axes=(1, None), out_axes=-2
+            )(coll_sn, _world_geom)  # (N, M)
 
-        # 4. Now map that over links (N)
-        # coll_robot_world: (*batch_cfg, S, N, ...)
-        # CollGeom batch axes are always LEADING (feature dims trail) and the
-        # trailing feature-dim count varies per leaf (e.g. Sphere.radius has
-        # none, Sphere.pose has 7), so a back-relative axis like -2 does not
-        # consistently point at the link (N) axis across leaves. Compute the
-        # link axis from the front instead, where it's leaf-independent.
-        link_axis = len(coll_robot_world.get_batch_axes()) - 1
-        _collide_links_vs_world = jax.vmap(
-            self.collide_link_vs_world, in_axes=(link_axis, None), out_axes=-2
-        )
+        _mapped = _core
+        for _ in batch_cfg_shape:
+            _mapped = jax.vmap(_mapped)
 
-        # # 5. Compute final distance matrix
-        dist_matrix = _collide_links_vs_world(
-            coll_robot_world, _world_geom
-        )  # (*batch, N, M)
+        dist_matrix = _mapped(coll_robot_world)  # (*batch_cfg, N, M)
         dist_matrix = self._mask_inactive_world(dist_matrix)
 
         # 6. Verify shape consistency

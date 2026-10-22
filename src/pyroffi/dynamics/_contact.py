@@ -473,6 +473,39 @@ def grasp_closure_residual(
 
 
 # ---------------------------------------------------------------------------
+# Manipulator dynamics feasibility (torque limits)
+# ---------------------------------------------------------------------------
+
+def dynamics_feasibility_residual(
+    grid: "GRiDDynamics",
+    q: Float[Array, "T ndof"],
+    dt: float,
+    tau_max: float,
+    f_ext: Float[Array, "T ndof 6"] | None = None,
+) -> Float[Array, "T ndof"]:
+    """Torque-limit infeasibility ``relu(|tau| - tau_max)`` over a trajectory.
+
+    Wraps ``grid.inverse_dynamics(q, qd, qdd, f_ext)`` (vmap-fused, differentiable
+    via GRiD's analytic ``custom_jvp`` — no float64 twin needed) with joint
+    velocities/accelerations from central finite differences at timestep ``dt``.
+    Returns the per-``(timestep, joint)`` amount by which the required torque
+    exceeds ``tau_max`` (zero where feasible), shaped like ``q``.
+
+    This is the shared residual behind tier 1's optional dynamics-feasibility term
+    and tier 3's torque-limit AL term, mirroring
+    :func:`object_dynamics_residual`'s shape/naming so both can enter a generic
+    :class:`~pyroffi.optimization_engines._trajopt_core.AugmentedLagrangianTerm`
+    (``kind="ineq"``) with one implementation. Feed it a ``robot.with_attachments``
+    GRiD to include a carried payload's transport torque.
+    """
+    from ..optimization_engines._contact_trajopt import _fd_vel_acc
+
+    qd, qdd = _fd_vel_acc(q, dt)
+    tau = grid.inverse_dynamics(q, qd, qdd, f_ext=f_ext)
+    return jnp.maximum(0.0, jnp.abs(tau) - tau_max)
+
+
+# ---------------------------------------------------------------------------
 # Object Newton-Euler balance
 # ---------------------------------------------------------------------------
 

@@ -12,9 +12,8 @@ compared by value** — do not give it ``__eq__``/``__hash__`` overrides, and do
 not store traced arrays on it.  Two value-equal ``Robot`` objects with distinct
 backend holders simply don't share cached wrappers, which is harmless.
 
-The stateless CUDA paths (FK, IK) do not appear here: they derive their buffers
-directly from ``robot.joints.*`` arrays and load a process-global FFI ``.so``
-singleton, so they need no per-robot object.
+The GRiM kernels (FK, IK, trajopt, robot-side collision) build from the URDF this holder
+keeps (:meth:`CudaBackends.urdf_xml`) and cache per robot on GRiM's side.
 """
 
 from __future__ import annotations
@@ -45,6 +44,54 @@ def _eager():
         return contextlib.nullcontext()
 
 
+def _urdf_xml(urdf: "yourdfpy.URDF") -> str:
+    """The URDF as XML text, mimic tags included.
+
+    yourdfpy's writer drops ``<mimic>`` (its ``_write_joint`` never calls ``_write_mimic``), and
+    cricket would then trace each mimic joint as an independent coordinate.
+    """
+    xml = urdf.write_xml_string()
+    mimics = {j.name: j.mimic for j in urdf.robot.joints if j.mimic is not None}
+    if not mimics:
+        return xml.decode()
+    from lxml import etree
+
+    root = etree.fromstring(xml)
+    for joint in root.findall("joint"):  # direct children: transmissions also have <joint>
+        m = mimics.get(joint.get("name"))
+        if m is not None:
+            etree.SubElement(joint, "mimic", joint=m.joint, multiplier=str(m.multiplier),
+                             offset=str(m.offset))
+    return etree.tostring(root, xml_declaration=True, encoding="utf-8").decode()
+
+
+def _chart_urdf_xml(xml: str, root: str, joint_names: tuple[str, ...]) -> str:
+    """The URDF of a floating robot's chart (see :mod:`pyroffi._floating_base`): its tree
+    hung off the chart's virtual joints, which follow the real ones in ``joint_names``. The
+    chart's reference rotation is baked as the identity."""
+    from lxml import etree
+
+    from ._floating_base import CHART_JOINTS, TANGENT_JOINTS, _CHART_TWISTS, _TANGENT_TWISTS
+
+    twist = dict(zip(CHART_JOINTS + TANGENT_JOINTS, _CHART_TWISTS + _TANGENT_TWISTS))
+    virtual = [n for n in joint_names if n in twist]
+    tree = etree.fromstring(xml.encode())
+    links = ["__chart_world"] + [f"__chart_link_{i}" for i in range(len(virtual) - 1)] + [root]
+    for name in links[:-1]:
+        etree.SubElement(tree, "link", name=name)
+    for i, name in enumerate(virtual):
+        tw = twist[name]
+        kind = "prismatic" if any(tw[:3]) else "revolute"
+        axis = tw[:3] if kind == "prismatic" else tw[3:]
+        j = etree.SubElement(tree, "joint", name=name, type=kind)
+        etree.SubElement(j, "parent", link=links[i])
+        etree.SubElement(j, "child", link=links[i + 1])
+        etree.SubElement(j, "origin", xyz="0 0 0", rpy="0 0 0")
+        etree.SubElement(j, "axis", xyz=" ".join(str(float(a)) for a in axis))
+        etree.SubElement(j, "limit", lower="-1e4", upper="1e4", effort="0", velocity="1e4")
+    return etree.tostring(tree, xml_declaration=True, encoding="utf-8").decode()
+
+
 class CudaBackends:
     """Per-robot holder that lazily builds URDF-dependent backends.
 
@@ -65,8 +112,10 @@ class CudaBackends:
         parent_indices=None,
         parent_joint_indices=None,
         num_joints: int | None = None,
+        floating_base: bool = False,
     ) -> None:
         self._urdf = urdf
+        self.floating_base = floating_base
         # Lazily-populated caches (built on first use).
         self._robot_collision: Any = None            # pure-JAX RobotCollision
         self._robot_collision_spherized: Any = None  # pure-JAX RobotCollisionSpherized
@@ -84,50 +133,17 @@ class CudaBackends:
             else onp.asarray(parent_joint_indices, dtype=onp.int32)
         )
         self._num_joints = num_joints
-        # CUDA IK ancestor masks, cached per target-link-index tuple.
-        self._ik_masks: dict[tuple[int, ...], tuple] = {}
 
     @property
     def urdf(self) -> "yourdfpy.URDF":
         return self._urdf
 
-    # ── CUDA IK structural precompute ──────────────────────────────────────
-
-    def ik_ancestor_masks(self, target_link_indices: tuple[int, ...]):
-        """Return ``(target_jnts, ancestor_masks)`` as JAX arrays for the given
-        end-effector link indices.
-
-        Computed purely from the *concrete* kinematic structure cached at
-        construction, so it is safe to call while the owning ``Robot`` is a JAX
-        tracer — the CUDA IK solvers can then run inside ``jax.jit``.  Results
-        are constant per ``target_link_indices`` and memoised.
-        """
-        from jax import numpy as jnp
-
-        if self._parent_indices is None or self._parent_joint_indices is None:
-            raise RuntimeError(
-                "CUDA IK ancestor masks require the concrete kinematic structure; "
-                "this Robot was not created via Robot.from_urdf."
-            )
-
-        key = tuple(int(i) for i in target_link_indices)
-        cached = self._ik_masks.get(key)
-        if cached is not None:
-            return cached
-
-        n_ee = len(key)
-        target_joints = onp.zeros(n_ee, dtype=onp.int32)
-        ancestor_masks = onp.zeros((n_ee, self._num_joints), dtype=onp.int32)
-        for i, link_idx in enumerate(key):
-            j = int(self._parent_joint_indices[link_idx])
-            target_joints[i] = j
-            while j >= 0:
-                ancestor_masks[i, j] = 1
-                j = int(self._parent_indices[j])
-
-        out = (jnp.asarray(target_joints), jnp.asarray(ancestor_masks))
-        self._ik_masks[key] = out
-        return out
+    def urdf_xml(self, joint_names: tuple[str, ...]) -> str:
+        """The URDF GRiM compiles kernels from: a floating robot's is its chart's."""
+        xml = _urdf_xml(self._urdf)
+        if getattr(self, "_chart_of", None) is not None:
+            xml = _chart_urdf_xml(xml, self._urdf.base_link, joint_names)
+        return xml
 
     # ── Collision backends ─────────────────────────────────────────────────
 
@@ -194,6 +210,6 @@ class CudaBackends:
             from .dynamics import GRiDDynamics
 
             with _eager():
-                gd = GRiDDynamics(self._urdf, gravity=key)
+                gd = GRiDDynamics(self._urdf, gravity=key, floating_base=self.floating_base)
             self._grid[key] = gd
         return gd

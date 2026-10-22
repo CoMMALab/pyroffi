@@ -190,6 +190,12 @@ class DynamicsInfo:
     expressed in the joint (= child link) frame."""
     damping: Float[Array, " n_dof"]
     """Viscous joint damping coefficients from ``<dynamics damping=...>``."""
+    floating_base: jdc.Static[bool] = False
+    """True when the root body is free in SE(3) (a 6-DOF free-flyer ahead of the ``num_dof``
+    joints; see :mod:`pyroffi._floating_base` for the conventions)."""
+    I_base: Float[Array, "6 6"] | None = None
+    """Spatial inertia of the floating root body (root link + fixed descendants) in the root
+    link frame; ``None`` for a fixed base, whose root carries no dynamics."""
 
 
 def _skew(v: onp.ndarray) -> onp.ndarray:
@@ -216,6 +222,34 @@ def _motion_transform_from_T(T_ab: onp.ndarray) -> onp.ndarray:
     return X
 
 
+def _mimic_locked_origin(urdf: yourdfpy.URDF, joint: yourdfpy.Joint) -> onp.ndarray:
+    """Parent<-child transform of a mimic joint held rigid for dynamics.
+
+    Locked at ``multiplier * q_mid + offset`` with ``q_mid`` the source joint's
+    mid-range (``Robot.from_urdf``'s default configuration). Dynamics has no
+    coupled DOF for the mimic joint, so the error is the mimic body's inertia
+    placed at that fixed value: for the Panda's 15 g finger over a 4 cm stroke,
+    about 3e-3 N*m on the arm joints and 0.15 N on the finger joint.
+    """
+    src = urdf.joint_map[joint.mimic.joint]
+    lim = src.limit
+    has_range = lim is not None and lim.lower is not None and lim.upper is not None
+    q_mid = 0.5 * (lim.lower + lim.upper) if has_range else 0.0
+    mult = joint.mimic.multiplier if joint.mimic.multiplier is not None else 1.0
+    offset = joint.mimic.offset if joint.mimic.offset is not None else 0.0
+    q = mult * q_mid + offset
+
+    motion = onp.eye(4)
+    axis = onp.asarray(joint.axis, dtype=onp.float64)
+    axis = axis / onp.linalg.norm(axis)
+    if joint.type == "prismatic":
+        motion[:3, 3] = axis * q
+    elif joint.type in ("revolute", "continuous"):
+        motion[:3, :3] = onp.asarray(jaxlie.SO3.exp(jnp.asarray(axis * q)).as_matrix())
+    origin = onp.asarray(joint.origin) if joint.origin is not None else onp.eye(4)
+    return origin @ motion
+
+
 def _spatial_inertia_from_urdf(inertial) -> onp.ndarray:
     """6x6 spatial inertia in the link frame from a yourdfpy ``Inertial``."""
     if inertial is None or inertial.mass is None:
@@ -239,17 +273,18 @@ class RobotURDFParser:
     """Parser for creating Robot instances from URDF files."""
 
     @staticmethod
-    def parse_dynamics(urdf: yourdfpy.URDF) -> DynamicsInfo:
+    def parse_dynamics(urdf: yourdfpy.URDF, floating_base: bool = False) -> DynamicsInfo:
         """Build :class:`DynamicsInfo` from a URDF.
 
         Non-actuated joints are treated as rigidly fixed at their zero
         configuration; their subtree link inertias are merged into the
-        nearest actuated ancestor body.  Mimic joints are unsupported.
+        nearest actuated ancestor body.  Mimic joints are held rigid at their
+        source joint's mid-range (see :func:`_mimic_locked_origin`).
+        With ``floating_base`` the root link (plus its fixed descendants) is a free body.
         """
-        if any(j.mimic is not None for j in urdf.joint_map.values()):
-            raise NotImplementedError(
-                "Dynamics does not support URDFs with mimic joints."
-            )
+        mimics = [j.name for j in urdf.joint_map.values() if j.mimic is not None]
+        if mimics:
+            logger.info(f"Dynamics: mimic joints {mimics} held rigid at mid-range.")
         dof_joints = list(urdf.actuated_joints)
         for j in dof_joints:
             if j.type not in ("revolute", "continuous", "prismatic"):
@@ -266,7 +301,26 @@ class RobotURDFParser:
             joints_by_parent_link.setdefault(j.parent, []).append(j)
 
         def joint_origin(j: yourdfpy.Joint) -> onp.ndarray:
+            if j.mimic is not None:
+                return _mimic_locked_origin(urdf, j)
             return onp.asarray(j.origin) if j.origin is not None else onp.eye(4)
+
+        def body_inertia(link: str) -> onp.ndarray:
+            """Inertia of ``link`` plus every descendant reachable through non-actuated
+            joints, in ``link``'s frame."""
+            I_body = _spatial_inertia_from_urdf(urdf.link_map[link].inertial)
+            stack = [(link, onp.eye(4))]  # (link, T from body frame to link)
+            while stack:
+                link_name, T_body_link = stack.pop()
+                for cj in joints_by_parent_link.get(link_name, []):
+                    if cj.name in dof_index:
+                        continue
+                    T_body_child = T_body_link @ joint_origin(cj)
+                    X = _motion_transform_from_T(T_body_child)
+                    I_child = _spatial_inertia_from_urdf(urdf.link_map[cj.child].inertial)
+                    I_body = I_body + X.T @ I_child @ X
+                    stack.append((cj.child, T_body_child))
+            return I_body
 
         parent_dof_list = list[int]()
         X_tree_list = list[onp.ndarray]()
@@ -307,21 +361,7 @@ class RobotURDFParser:
 
             # Body inertia: child link plus all descendants reachable through
             # non-actuated joints, transformed into this joint's frame.
-            I_body = _spatial_inertia_from_urdf(urdf.link_map[j.child].inertial)
-            stack = [(j.child, onp.eye(4))]  # (link, T from body frame to link)
-            while stack:
-                link_name, T_body_link = stack.pop()
-                for cj in joints_by_parent_link.get(link_name, []):
-                    if cj.name in dof_index:
-                        continue
-                    T_body_child = T_body_link @ joint_origin(cj)
-                    X = _motion_transform_from_T(T_body_child)
-                    I_child = _spatial_inertia_from_urdf(
-                        urdf.link_map[cj.child].inertial
-                    )
-                    I_body = I_body + X.T @ I_child @ X
-                    stack.append((cj.child, T_body_child))
-            I_body_list.append(I_body)
+            I_body_list.append(body_inertia(j.child))
 
         if all(I[5, 5] == 0.0 for I in I_body_list):
             raise NotImplementedError(
@@ -338,6 +378,8 @@ class RobotURDFParser:
             joint_is_prismatic=jnp.array(prismatic_list),
             I_body=jnp.array(onp.stack(I_body_list)),
             damping=jnp.array(damping_list),
+            floating_base=floating_base,
+            I_base=jnp.array(body_inertia(urdf.base_link)) if floating_base else None,
         )
 
     @staticmethod

@@ -5,8 +5,7 @@ Usage:
 
 Prerequisites:
     1. A CUDA-capable GPU must be available.
-    2. The CUDA FK library must be compiled:
-           bash build_kernels/build_fk_cuda.sh
+    2. The external/GRiM checkout (its kinematics kernel compiles per robot on first use).
     3. Local spherized URDFs must be present under ``resources/``.
 """
 

@@ -44,21 +44,84 @@ def _resolve_solver(solver: str, use_cuda: bool):
         from ..optimization_engines._ls_ik import ls_ik_solve
 
         return ls_ik_solve, False
-    if solver == "quik":
-        # QuIK is a CPU C++ (Halley's-method) serial-chain backend; it ignores
-        # use_cuda and takes no differentiable constraints.
-        from ..optimization_engines._quik_ik import quik_ik_solve
+    if solver == "analytic":
+        # Closed-form subproblem decomposition. Unlike the iterative solvers it
+        # takes no seeds and no differentiable constraints; `use_cuda` selects
+        # the kernel explicitly, while the `analytic_ik_solve_batched` entry
+        # point dispatches on batch size instead. See _analytic_ik.py.
+        from ._analytic_ik import analytic_ik_solve
 
-        return quik_ik_solve, False
-    if solver == "halley":
-        # Pure-JAX reimplementation of QuIK's third-order Halley update; runs on
-        # whatever JAX platform is active (use JAX_PLATFORMS=cpu for CPU-only).
-        from ..optimization_engines._halley_ik import halley_ik_solve
+        return analytic_ik_solve, False
 
-        return halley_ik_solve, False
     raise ValueError(
-        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls', 'quik' or 'halley'."
+        f"Unknown IK solver {solver!r}; expected 'hjcd', 'ls' "
+        f"or 'analytic'."
     )
+
+
+_CHART_CONSTRAINTS: dict = {}
+
+
+def _chart_constraint(fn, q_chart, chart, args):
+    """A floating robot's constraint ``fn(cfg, robot, args)`` evaluated at a chart point."""
+    from .._floating_base import from_chart
+
+    robot, ref, user_args = args
+    return fn(from_chart(robot, q_chart, ref), robot, user_args)
+
+
+def _solve_on_chart(robot, target_link_name, target_pose, rng_key, previous_cfg, solver,
+                    num_seeds, continuity_weight, fixed_joint_mask, constraints,
+                    constraint_args, constraint_weights, use_cuda, base_region, solver_kwargs):
+    import functools
+
+    from .._floating_base import chart_robot, from_chart, to_chart
+
+    ref = previous_cfg[..., :7]
+    if ref.ndim > 1:
+        # ponytail: batched warm starts share the first problem's chart centre.
+        ref = ref.reshape(-1, 7)[0]
+    if solver_kwargs.get("traced"):
+        # ponytail: traced kernels bake the chart's reference rotation as the identity, so
+        # the chart is world-aligned (singular where the base pitches 90 deg in the world).
+        ref = ref.at[:4].set(jnp.array([1.0, 0.0, 0.0, 0.0], ref.dtype))
+    chart = chart_robot(robot, ref, base_region)
+    if fixed_joint_mask is not None:
+        fixed_joint_mask = jnp.concatenate(
+            [jnp.asarray(fixed_joint_mask, bool), jnp.zeros(6, bool)])
+    wrapped = []
+    for fn in constraints:  # cached so a static constraint tuple stays hash-stable
+        wrapped.append(_CHART_CONSTRAINTS.setdefault(fn, functools.partial(_chart_constraint, fn)))
+    args = tuple((robot, ref, a) for a in constraint_args)
+    q = inverse_kinematics(
+        chart, target_link_name, target_pose, rng_key=rng_key,
+        previous_cfg=to_chart(robot, previous_cfg, ref), solver=solver, num_seeds=num_seeds,
+        continuity_weight=continuity_weight, fixed_joint_mask=fixed_joint_mask,
+        constraints=tuple(wrapped), constraint_args=args, constraint_weights=constraint_weights,
+        use_cuda=use_cuda, **solver_kwargs)
+    return from_chart(robot, q, ref)
+
+
+def _solve_analytic(robot, target_link_name, target_pose, previous_cfg, solver_kwargs):
+    """Closed-form 7-DOF arm IK (the first seven actuated joints; the rest ride along from
+    ``previous_cfg``). A floating base stays where ``previous_cfg`` puts it and the arm is
+    solved for the target expressed in the base frame: exact whenever the base is given."""
+    from .._floating_base import fixed_tree
+    from ._analytic_ik import analytic_ik_solve
+
+    if not isinstance(target_link_name, str):
+        raise ValueError("solver='analytic' takes a single target link.")
+    if previous_cfg is None:
+        previous_cfg = robot.default_cfg
+    base = None
+    if robot.floating_base:
+        base, previous_cfg = previous_cfg[:7], previous_cfg[7:]
+        target_pose = jaxlie.SE3(base).inverse() @ target_pose
+        robot = fixed_tree(robot)
+    q7, _ = analytic_ik_solve(robot, target_link_name, target_pose,
+                              previous_cfg=previous_cfg, **solver_kwargs)
+    q = jnp.asarray(previous_cfg).at[:7].set(q7)
+    return q if base is None else jnp.concatenate([base, q])
 
 
 def inverse_kinematics(
@@ -75,6 +138,7 @@ def inverse_kinematics(
     constraint_args: Sequence = (),
     constraint_weights=None,
     use_cuda: bool = False,
+    base_region=None,
     **solver_kwargs,
 ) -> Float[Array, "n_actuated_joints"]:
     """Solve inverse kinematics, dispatching over solver and backend.
@@ -83,17 +147,9 @@ def inverse_kinematics(
 
     Args:
         solver:            ``"hjcd"`` (two-phase coordinate-descent + LM),
-                           ``"ls"`` (Levenberg-Marquardt least-squares),
-                           ``"quik"`` (QuIK C++ Halley's-method CPU backend, a
-                           fast serial-chain solver for ``JAX_PLATFORMS=cpu``
-                           planning), or ``"halley"`` (a pure-JAX reimplementation
-                           of QuIK's third-order update — same algorithm, any JAX
-                           platform).  ``quik``/``halley`` are single-end-effector
-                           serial-chain solvers and ignore differentiable
-                           constraints.
+                           or ``"ls"`` (Levenberg-Marquardt least-squares).
         use_cuda:          Select the CUDA FFI backend for the chosen solver
-                           instead of the pure-JAX implementation (ignored by
-                           ``quik``/``halley``).
+                           instead of the pure-JAX implementation.
         target_link_name:  A single link name, or a sequence of names for a
                            multi-end-effector (e.g. bimanual) solve.
         target_pose:       A matching single ``SE3`` or sequence of poses.
@@ -110,6 +166,18 @@ def inverse_kinematics(
     """
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
+    if solver == "analytic":
+        return _solve_analytic(robot, target_link_name, target_pose, previous_cfg, solver_kwargs)
+    if robot.floating_base:
+        if previous_cfg is None:
+            previous_cfg = robot.default_cfg
+        if solver != "ls" or use_cuda or base_region is not None:
+            # Every other solver runs on the fixed-base chart centred on the warm start's
+            # base (JAX LS works in the base's tangent space directly).
+            return _solve_on_chart(
+                robot, target_link_name, target_pose, rng_key, previous_cfg, solver,
+                num_seeds, continuity_weight, fixed_joint_mask, constraints, constraint_args,
+                constraint_weights, use_cuda, base_region, solver_kwargs)
     if previous_cfg is None:
         previous_cfg = (robot.joints.lower_limits + robot.joints.upper_limits) / 2
 
@@ -135,17 +203,6 @@ def inverse_kinematics(
             constraint_args=tuple(constraint_args) or None,
             constraint_weights=constraint_weights,
         )
-        # Hoist the CUDA solvers' host-side ancestor-mask precompute out of the
-        # trace by deriving it from the robot's *concrete* kinematic structure
-        # (cached on the backends holder).  Passing these lets the whole CUDA
-        # IK call run inside a caller's jax.jit.  Falls back to the solver's own
-        # in-trace-incompatible precompute if no backends holder is present.
-        if robot._backends is not None:
-            target_jnts, ancestor_masks = robot._backends.ik_ancestor_masks(
-                target_link_indices
-            )
-            constraint_kwargs["ancestor_masks"] = ancestor_masks
-            constraint_kwargs["target_jnts"] = target_jnts
     else:
         constraint_kwargs = dict(
             constraint_fns=tuple(constraints),

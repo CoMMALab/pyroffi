@@ -58,37 +58,18 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
+from .. import _grim
 from .._robot import Robot
+from ._ik_primitives import _EMPTY_SELF_TABLES, grim_targets, run_grim
 from ._ls_ik import _prepare_ls_collision_buffers
 
-# Measured (not derived) against a MAX_JOINTS=64, MAX_ACT=16 build: shared-memory use
-# scales with BOTH limits, so this ceiling does not transfer to a --max-act/--max-joints
-# rebuild. _assert_region_ik_build() ties it to the .so's self-reported limits so a
-# rebuild fails loudly here instead of silently capping occupancy (limits shrunk) or
-# failing the launch with a bare cudaErrorInvalidValue (limits grown).
-_REGION_IK_BUILD = (64, 24)  # (MAX_JOINTS, MAX_ACT) this bound was measured on
-# Re-measured after MAX_ACT's default moved 16 -> 24 (panda_allegro):
-# `cuobjdump -res-usage _svgd_region_ik_cuda_lib.so` reports SHARED=12580 B/block,
-# REG=48/thread. Both are per-BLOCK / per-thread constants that do not scale with
-# threads_per_block here, so 12580 B stays far inside the 48KB static budget and 48
-# regs allows 1024 threads; the 384 ceiling below is unchanged (and conservative).
+# Measured on the original runtime-table build (SHARED=12580 B/block, REG=48/thread); a
+# per-robot GRiM build sizes its arrays to the robot, so this ceiling is conservative.
 _REGION_IK_MAX_TPB_BY_SMEM = 384
 
 
-def _assert_region_ik_build() -> None:
-    """Verify the region-IK .so matches the build _REGION_IK_MAX_TPB_BY_SMEM assumes."""
-    from ..cuda_kernels._build_params import assert_built_for
-    from ..cuda_kernels import region_ik as _rik
-
-    lib = pathlib.Path(_rik.__file__).parent / "_svgd_region_ik_cuda_lib.so"
-    if lib.exists():
-        assert_built_for(str(lib), lib.name,
-                         max_joints=_REGION_IK_BUILD[0], max_act=_REGION_IK_BUILD[1],
-                         what="_REGION_IK_MAX_TPB_BY_SMEM")
-
-
 def _validate_threads_per_block(threads_per_block: int, max_tpb: int = _REGION_IK_MAX_TPB_BY_SMEM) -> None:
-    _assert_region_ik_build()
     if threads_per_block < 32 or threads_per_block > 1024 or threads_per_block % 32 != 0:
         raise ValueError("threads_per_block must be a multiple of 32 in [32, 1024].")
     if threads_per_block > max_tpb:
@@ -139,7 +120,7 @@ def _generate_seeds(
         carry_cfg[None, :] + jax.random.normal(key_warm, (n_warm, n_act)) * 0.05,
         lower, upper,
     )
-    rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+    rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, carry_cfg[None, :])
     seeds_flat = jnp.concatenate([warm, rand], axis=0)
     seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
     return seeds_flat.reshape(-1, n_restarts, n_act)
@@ -334,6 +315,7 @@ def _run_region_sampler_loop(
 @functools.partial(
     jax.jit,
     static_argnames=(
+        "mrobot",
         "target_jnt",
         "max_iter",
         "pos_weight",
@@ -349,15 +331,6 @@ def _run_region_sampler_loop(
 def _brownian_motion_batch_select_jit(
     seeds: Array,
     init_points: Array,
-    twists: Array,
-    parent_tf: Array,
-    parent_idx: Array,
-    act_idx: Array,
-    mimic_mul: Array,
-    mimic_off: Array,
-    mimic_act_idx: Array,
-    topo_inv: Array,
-    ancestor_mask: Array,
     box_mins: Array,   # (n_problems, 3) — per-problem box mins
     box_maxs: Array,   # (n_problems, 3) — per-problem box maxs
     lower: Array,
@@ -365,6 +338,7 @@ def _brownian_motion_batch_select_jit(
     fixed_mask: Array,
     rng_seed: Array,
     *,
+    mrobot,
     target_jnt: int,
     max_iter: int,
     pos_weight: float,
@@ -377,28 +351,15 @@ def _brownian_motion_batch_select_jit(
     threads_per_block: int = 128,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """JIT-compiled CUDA batch solve + per-target restart winner selection."""
-    from ..cuda_kernels.region_ik._brownian_motion_ik_cuda import brownian_motion_ik_cuda
+    from grim.motion.region_ik import brownian_ik
 
-    cfgs, errs, ee_points, target_points = brownian_motion_ik_cuda(
-        seeds=seeds,
-        init_points=init_points,
-        twists=twists,
-        parent_tf=parent_tf,
-        parent_idx=parent_idx,
-        act_idx=act_idx,
-        mimic_mul=mimic_mul,
-        mimic_off=mimic_off,
-        mimic_act_idx=mimic_act_idx,
-        topo_inv=topo_inv,
-        ancestor_mask=ancestor_mask,
-        target_quat=jnp.array([1.0, 0.0, 0.0, 0.0], dtype=jnp.float32),
-        box_mins=box_mins,
-        box_maxs=box_maxs,
+    cfgs, errs, ee_points, target_points = brownian_ik(
+        mrobot, seeds, init_points, jnp.array([1.0, 0.0, 0.0, 0.0], dtype=jnp.float32),
+        box_mins, box_maxs, target_jnt,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_mask,
         rng_seed=rng_seed,
-        target_jnt=target_jnt,
         max_iter=max_iter,
         pos_weight=pos_weight,
         ori_weight=ori_weight,
@@ -424,6 +385,7 @@ def _brownian_motion_batch_select_jit(
 @functools.partial(
     jax.jit,
     static_argnames=(
+        "mrobot",
         "target_jnt",
         "n_iters",
         "bandwidth",
@@ -434,15 +396,6 @@ def _brownian_motion_batch_select_jit(
 def _svgd_region_batch_select_jit(
     seeds: Array,
     init_points: Array,
-    twists: Array,
-    parent_tf: Array,
-    parent_idx: Array,
-    act_idx: Array,
-    mimic_mul: Array,
-    mimic_off: Array,
-    mimic_act_idx: Array,
-    topo_inv: Array,
-    ancestor_mask: Array,
     box_mins: Array,   # (n_problems, 3) — per-problem box mins
     box_maxs: Array,   # (n_problems, 3) — per-problem box maxs
     lower: Array,
@@ -450,6 +403,7 @@ def _svgd_region_batch_select_jit(
     fixed_mask: Array,
     rng_seed: Array,
     *,
+    mrobot,
     target_jnt: int,
     n_iters: int,
     bandwidth: float,
@@ -457,21 +411,13 @@ def _svgd_region_batch_select_jit(
     threads_per_block: int = 128,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """JIT-compiled SVGD CUDA batch solve + per-target restart winner selection."""
-    from ..cuda_kernels.region_ik._svgd_region_ik_cuda import svgd_region_ik_cuda
+    from grim.motion.region_ik import svgd_ik
 
-    cfgs, errs, ee_points, target_points = svgd_region_ik_cuda(
-        seeds=seeds,
-        init_points=init_points,
-        twists=twists,
-        parent_tf=parent_tf,
-        parent_idx=parent_idx,
-        act_idx=act_idx,
-        mimic_mul=mimic_mul,
-        mimic_off=mimic_off,
-        mimic_act_idx=mimic_act_idx,
-        topo_inv=topo_inv,
-        target_jnts=jnp.array([target_jnt], dtype=jnp.int32),
-        ancestor_masks=ancestor_mask[None, :],
+    # SVGD drives every particle of a problem toward one point; the kernel takes it as an
+    # identity-orientation pose.
+    quat = jnp.broadcast_to(jnp.array([1.0, 0.0, 0.0, 0.0], jnp.float32), (seeds.shape[0], 4))
+    cfgs, errs, ee_points, target_points = svgd_ik(
+        mrobot, seeds, jnp.concatenate([quat, init_points[:, 0, :]], axis=1), target_jnt,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_mask,
@@ -493,24 +439,14 @@ def _svgd_region_batch_select_jit(
     return best_cfgs, best_ee, best_targets, best_errs, inside
 
 
-def _compute_ancestor_mask(robot: Robot, target_link_index: int) -> tuple[int, Array]:
-    parent_joint_indices = np.asarray(robot.links.parent_joint_indices, dtype=np.int32)
-    parent_idx = np.asarray(robot.joints.parent_indices, dtype=np.int32)
-    n_joints = int(robot.joints.num_joints)
-
-    target_jnt = int(parent_joint_indices[target_link_index])
+def _target_joint(robot: Robot, target_link_index: int) -> int:
+    """The joint frame the kernels drive: the target link's parent joint."""
+    target_jnt = int(np.asarray(robot.links.parent_joint_indices)[target_link_index])
     if target_jnt < 0:
         raise ValueError(
             f"Target link index {target_link_index} maps to root/base (no parent joint)."
         )
-
-    mask = np.zeros((n_joints,), dtype=np.int32)
-    j = target_jnt
-    while j >= 0:
-        mask[j] = 1
-        j = int(parent_idx[j])
-
-    return target_jnt, jnp.array(mask, dtype=jnp.int32)
+    return target_jnt
 
 
 def _seeds_per_launch_budget(
@@ -636,7 +572,8 @@ def brownian_motion_sample_box_region_cuda(
     else:
         fixed_mask = fixed_joint_mask.astype(jnp.int32)
 
-    target_jnt, ancestor_mask = _compute_ancestor_mask(robot, target_link_index)
+    target_jnt = _target_joint(robot, target_link_index)
+    mrobot = _grim.motion_robot(robot)
 
     # Normalise box inputs to (n_boxes, 3); track whether the call was single-box.
     box_min = jnp.asarray(box_min, dtype=jnp.float32)
@@ -702,7 +639,7 @@ def brownian_motion_sample_box_region_cuda(
             lower,
             upper,
         )
-        rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+        rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         seeds_flat = jnp.concatenate([warm, rand], axis=0)
         seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
         seeds = seeds_flat.reshape(n_batch, restarts_per_target, n_act)
@@ -728,15 +665,7 @@ def brownian_motion_sample_box_region_cuda(
             best_cfgs, best_ee, best_targets, best_errs, inside = _brownian_motion_batch_select_jit(
                 seeds=seeds,
                 init_points=init_points,
-                twists=robot.joints.twists,
-                parent_tf=robot.joints.parent_transforms,
-                parent_idx=robot.joints.parent_indices,
-                act_idx=robot.joints.actuated_indices,
-                mimic_mul=robot.joints.mimic_multiplier,
-                mimic_off=robot.joints.mimic_offset,
-                mimic_act_idx=robot.joints.mimic_act_indices,
-                topo_inv=robot.joints._topo_sort_inv,
-                ancestor_mask=ancestor_mask,
+                mrobot=mrobot,
                 box_mins=box_mins_pp,
                 box_maxs=box_maxs_pp,
                 lower=lower,
@@ -918,7 +847,8 @@ def svgd_sample_box_region_cuda(
     else:
         fixed_mask = fixed_joint_mask.astype(jnp.int32)
 
-    target_jnt, ancestor_mask = _compute_ancestor_mask(robot, target_link_index)
+    target_jnt = _target_joint(robot, target_link_index)
+    mrobot = _grim.motion_robot(robot)
 
     # Normalise box inputs to (n_boxes, 3).
     box_min = jnp.asarray(box_min, dtype=jnp.float32)
@@ -984,7 +914,7 @@ def svgd_sample_box_region_cuda(
             lower,
             upper,
         )
-        rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+        rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         seeds_flat = jnp.concatenate([warm, rand], axis=0)
         seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
         seeds = seeds_flat.reshape(n_batch, restarts_per_target, n_act)
@@ -1013,15 +943,7 @@ def svgd_sample_box_region_cuda(
                 _svgd_region_batch_select_jit(
                     seeds=seeds,
                     init_points=init_points,
-                    twists=robot.joints.twists,
-                    parent_tf=robot.joints.parent_transforms,
-                    parent_idx=robot.joints.parent_indices,
-                    act_idx=robot.joints.actuated_indices,
-                    mimic_mul=robot.joints.mimic_multiplier,
-                    mimic_off=robot.joints.mimic_offset,
-                    mimic_act_idx=robot.joints.mimic_act_indices,
-                    topo_inv=robot.joints._topo_sort_inv,
-                    ancestor_mask=ancestor_mask,
+                    mrobot=mrobot,
                     box_mins=box_mins_pp,
                     box_maxs=box_maxs_pp,
                     lower=lower,
@@ -1109,14 +1031,14 @@ def svgd_sample_box_region_cuda(
 
 # ── Hit-and-run sampler ───────────────────────────────────────────────────────
 
-# Same measured-not-derived caveat as _REGION_IK_MAX_TPB_BY_SMEM above; validated by
-# _assert_region_ik_build() against the .so's self-reported limits.
+# Same measured-not-derived caveat as _REGION_IK_MAX_TPB_BY_SMEM above.
 _HIT_AND_RUN_MAX_TPB_BY_SMEM = 384
 
 
 @functools.partial(
     jax.jit,
     static_argnames=(
+        "mrobot",
         "target_jnt",
         "max_iter",
         "n_iterations",
@@ -1131,15 +1053,6 @@ _HIT_AND_RUN_MAX_TPB_BY_SMEM = 384
 )
 def _hit_and_run_batch_select_jit(
     seeds: Array,
-    twists: Array,
-    parent_tf: Array,
-    parent_idx: Array,
-    act_idx: Array,
-    mimic_mul: Array,
-    mimic_off: Array,
-    mimic_act_idx: Array,
-    topo_inv: Array,
-    ancestor_mask: Array,
     box_mins: Array,   # (n_problems, 3) — per-problem box mins
     box_maxs: Array,   # (n_problems, 3) — per-problem box maxs
     lower: Array,
@@ -1147,6 +1060,7 @@ def _hit_and_run_batch_select_jit(
     fixed_mask: Array,
     rng_seed: Array,
     *,
+    mrobot,
     target_jnt: int,
     max_iter: int,
     n_iterations: int,
@@ -1158,26 +1072,14 @@ def _hit_and_run_batch_select_jit(
     noise_std: float,
     threads_per_block: int = 128,
 ) -> tuple[Array, Array, Array, Array, Array]:
-    from ..cuda_kernels.region_ik._hit_and_run_ik_cuda import hit_and_run_ik_cuda
+    from grim.motion.region_ik import hit_and_run_ik
 
-    cfgs, errs, ee_points, target_points = hit_and_run_ik_cuda(
-        seeds=seeds,
-        twists=twists,
-        parent_tf=parent_tf,
-        parent_idx=parent_idx,
-        act_idx=act_idx,
-        mimic_mul=mimic_mul,
-        mimic_off=mimic_off,
-        mimic_act_idx=mimic_act_idx,
-        topo_inv=topo_inv,
-        ancestor_mask=ancestor_mask,
-        box_mins=box_mins,
-        box_maxs=box_maxs,
+    cfgs, errs, ee_points, target_points = hit_and_run_ik(
+        mrobot, seeds, box_mins, box_maxs, target_jnt,
         lower=lower,
         upper=upper,
         fixed_mask=fixed_mask,
         rng_seed=rng_seed,
-        target_jnt=target_jnt,
         max_iter=max_iter,
         n_iterations=n_iterations,
         pos_weight=pos_weight,
@@ -1186,7 +1088,6 @@ def _hit_and_run_batch_select_jit(
         eps_pos=eps_pos,
         eps_ori=eps_ori,
         noise_std=noise_std,
-        threads_per_block=threads_per_block,
     )
 
     best_idx = jnp.argmin(errs, axis=1)
@@ -1281,7 +1182,8 @@ def hit_and_run_sample_box_region_cuda(
     else:
         fixed_mask = fixed_joint_mask.astype(jnp.int32)
 
-    target_jnt, ancestor_mask = _compute_ancestor_mask(robot, target_link_index)
+    target_jnt = _target_joint(robot, target_link_index)
+    mrobot = _grim.motion_robot(robot)
 
     box_min = jnp.asarray(box_min, dtype=jnp.float32)
     box_max = jnp.asarray(box_max, dtype=jnp.float32)
@@ -1344,7 +1246,7 @@ def hit_and_run_sample_box_region_cuda(
             lower,
             upper,
         )
-        rand = jax.random.uniform(key_rand, (n_rand, n_act), minval=lower, maxval=upper)
+        rand = sample_in_limits(key_rand, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         seeds_flat = jnp.concatenate([warm, rand], axis=0)
         seeds_flat = jnp.where(fixed_mask[None, :], carry_cfg[None, :], seeds_flat)
         seeds = seeds_flat.reshape(n_batch, restarts_per_target, n_act)
@@ -1359,15 +1261,7 @@ def hit_and_run_sample_box_region_cuda(
         try:
             best_cfgs, best_ee, best_targets, best_errs, inside = _hit_and_run_batch_select_jit(
                 seeds=seeds,
-                twists=robot.joints.twists,
-                parent_tf=robot.joints.parent_transforms,
-                parent_idx=robot.joints.parent_indices,
-                act_idx=robot.joints.actuated_indices,
-                mimic_mul=robot.joints.mimic_multiplier,
-                mimic_off=robot.joints.mimic_offset,
-                mimic_act_idx=robot.joints.mimic_act_indices,
-                topo_inv=robot.joints._topo_sort_inv,
-                ancestor_mask=ancestor_mask,
+                mrobot=mrobot,
                 box_mins=box_mins_pp,
                 box_maxs=box_maxs_pp,
                 lower=lower,
@@ -1461,6 +1355,7 @@ def hit_and_run_sample_box_region_cuda(
 @functools.partial(
     jax.jit,
     static_argnames=(
+        "ls_target",
         "target_jnt",
         "target_link_index",
         "max_iter",
@@ -1477,17 +1372,15 @@ def _direct_region_batch_select_jit(
     robot: Robot,
     seeds: Array,
     init_points: Array,         # (n_problems, n_restarts, 3) — same target per restart
-    ancestor_mask: Array,
     box_mins: Array,
     box_maxs: Array,
     fixed_mask: Array,
-    robot_spheres_local: Array,
-    robot_sphere_joint_idx: Array,
     world_spheres: Array,
     world_capsules: Array,
     world_boxes: Array,
     world_halfspaces: Array,
     *,
+    ls_target,
     target_jnt: int,
     target_link_index: int,
     max_iter: int,
@@ -1501,7 +1394,7 @@ def _direct_region_batch_select_jit(
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Sample-then-solve: each problem solves IK to a fixed cartesian target.
 
-    Reuses ``ls_ik_cuda`` (the same kernel used by ``ls_ik_solve_cuda``)
+    Reuses GRiM's LS-IK kernel (the one ``ls_ik_solve_cuda`` uses)
     with one EE and identity target orientation.  EE positions are recovered
     with a JAX FK pass on the per-problem winners.
 
@@ -1512,8 +1405,6 @@ def _direct_region_batch_select_jit(
     convergence; even ``1e-3`` is enough to recover sub-millimetre position
     accuracy.
     """
-    from ..cuda_kernels.ik._ls_ik_cuda import ls_ik_cuda
-
     n_problems = seeds.shape[0]
     targets_per_problem = init_points[:, 0, :]  # (n_problems, 3)
 
@@ -1522,28 +1413,10 @@ def _direct_region_batch_select_jit(
     )
     target_T = jnp.concatenate([quat, targets_per_problem], axis=1)[:, None, :]  # (n_problems, 1, 7)
 
-    cfgs, errs = ls_ik_cuda(
-        seeds=seeds,
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        target_jnts=jnp.array([target_jnt], dtype=jnp.int32),
-        ancestor_masks=ancestor_mask[None, :],
-        target_T=target_T,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        lower=robot.joints.lower_limits,
-        upper=robot.joints.upper_limits,
-        fixed_mask=fixed_mask,
+    cfgs, errs = run_grim(
+        ls_target, seeds, target_T,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        robot.joints.lower_limits, robot.joints.upper_limits, fixed_mask,
         max_iter=max_iter,
         pos_weight=pos_weight,
         ori_weight=ori_weight,
@@ -1553,6 +1426,7 @@ def _direct_region_batch_select_jit(
         enable_collision=enable_collision,
         collision_weight=collision_weight,
         collision_margin=collision_margin,
+        robot=robot,
     )
 
     best_idx = jnp.argmin(errs, axis=1)
@@ -1613,7 +1487,7 @@ def direct_sample_box_region_cuda(
 
     For each problem in a launch the loop draws a single cartesian target
     point uniformly inside the assigned box, then runs ``restarts_per_target``
-    seeds through the standard ``ls_ik_cuda`` Levenberg-Marquardt kernel.  The
+    seeds through GRiM's LS-IK (Levenberg-Marquardt) kernel.  The
     per-problem winner is the seed with the smallest weighted residual, and EE
     positions are recovered via a JAX FK pass on the winners.
 
@@ -1642,7 +1516,7 @@ def direct_sample_box_region_cuda(
         pos_weight: Weight on the position residual.
         ori_weight: Weight on the orientation residual.  Keep this small but
             non-zero (default 0.1).  ``ori_weight = 0`` triggers a degenerate
-            update path in ``ls_ik_cuda`` that prevents convergence; ``0.1``
+            update path in the LS-IK kernel that prevents convergence; ``0.1``
             with ``pos_weight=50`` lets position dominate by 500x while still
             keeping the kernel's trust region well-conditioned.
         lambda_init: Initial LM damping.
@@ -1663,7 +1537,7 @@ def direct_sample_box_region_cuda(
         else fixed_joint_mask.astype(jnp.int32)
     )
 
-    target_jnt, ancestor_mask = _compute_ancestor_mask(robot, target_link_index)
+    target_jnt = _target_joint(robot, target_link_index)
     box_min, box_max, batched_input = _normalise_boxes(box_min, box_max)
 
     if restarts_per_target < 1:
@@ -1682,23 +1556,25 @@ def direct_sample_box_region_cuda(
         kernel_collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
     enable_collision = bool(collision_free and kernel_collision_enabled)
+    (ls_target,) = grim_targets(
+        ("ls",), robot, (int(target_link_index),), False, robot_spheres_local,
+        robot_sphere_joint_idx, _EMPTY_SELF_TABLES,
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
     def step_fn(*, seeds, init_points, box_mins_pp, box_maxs_pp, rng_seed):
-        del rng_seed  # ls_ik_cuda is deterministic given seeds.
+        del rng_seed  # LS-IK is deterministic given seeds.
         return _direct_region_batch_select_jit(
             robot=robot,
             seeds=seeds,
             init_points=init_points,
-            ancestor_mask=ancestor_mask,
             box_mins=box_mins_pp,
             box_maxs=box_maxs_pp,
             fixed_mask=fixed_mask,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
             world_halfspaces=world_halfspaces,
+            ls_target=ls_target,
             target_jnt=target_jnt,
             target_link_index=int(target_link_index),
             max_iter=max_iter,

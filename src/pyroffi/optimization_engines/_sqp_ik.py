@@ -32,6 +32,7 @@ Shared with LS-IK:
 from __future__ import annotations
 
 import functools
+import inspect
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -42,9 +43,21 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
-from ._implicit_diff import differentiable_ik_solution
+from ._ik_primitives import grim_targets, run_grim, self_collision_table_arrays
+from ._batching import (
+    dispatch_vmap_to_batched,
+    make_sharded_pmap,
+    run_sharded,
+    sharding_enabled,
+)
+from ._implicit_diff import (
+    detached_robot,
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ._ls_ik import _prepare_ls_collision_buffers
 
 
@@ -353,9 +366,7 @@ def sqp_ik_solve(
         )
     warm_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask[None, :], previous_cfg[None, :], random_seeds
     )
@@ -414,6 +425,7 @@ def sqp_ik_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _sqp_ik_solve_cuda_jit(
@@ -431,14 +443,14 @@ def _sqp_ik_solve_cuda_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -446,8 +458,8 @@ def _sqp_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target=None,
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -467,9 +479,7 @@ def _sqp_ik_solve_cuda_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, :], previous_cfg[None, :], random_seeds
     )
@@ -477,41 +487,25 @@ def _sqp_ik_solve_cuda_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
 
     # ── CUDA SQP kernel (all EEs simultaneously) ──────────────────────────
-    cfgs, errors = sqp_ik_cuda(
-        seeds          = seeds[None],           # (1, n_seeds, n_act)
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_Ts[None],       # (1, n_ee, 7)
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        max_iter       = max_iter,
-        n_inner_iters  = n_inner_iters,
-        pos_weight     = pos_weight,
-        ori_weight     = ori_weight,
-        lambda_init    = lambda_init,
-        eps_pos        = eps_pos,
-        eps_ori        = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
+    cfgs, errors, feasible = run_grim(
+        ffi_target, seeds[None], target_Ts[None],
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        max_iter=max_iter,
+        n_inner_iters=n_inner_iters,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
-    cfgs   = cfgs[0]    # (n_seeds, n_act)
-    errors = errors[0]  # (n_seeds,)
+    cfgs     = cfgs[0]      # (n_seeds, n_act)
+    errors   = errors[0]    # (n_seeds,)
+    feasible = feasible[0]  # (n_seeds,)
 
     if len(constraint_fns) > 0:
         def constraint_penalty(cfg):
@@ -531,10 +525,32 @@ def _sqp_ik_solve_cuda_jit(
             + continuity_weight * jnp.sum((cfgs - previous_cfg) ** 2, axis=-1)
         )
 
-    best_idx = jnp.argmin(final_errors)
+    best_idx = _feasible_first_argmin(final_errors, feasible)
     if len(constraint_fns) > 0:
         return cfgs[best_idx], constraint_errors[best_idx]
     return cfgs[best_idx], jnp.zeros(())
+
+
+
+def _feasible_first_argmin(errors, feasible, axis=-1):
+    """Argmin over `errors` in which every feasible seed beats every infeasible one.
+
+    This is the host half of the hard constraint. The kernel can return a
+    feasible configuration and still have it discarded here if selection goes on
+    pose error alone, so feasibility has to dominate on this side too.
+
+    Masks with ``inf`` rather than a large finite sentinel: a finite constant has
+    to be chosen larger than any legitimate error, which is a guess that silently
+    fails for a badly scaled problem, and it corrupts the metric a caller may be
+    thresholding on. If NO seed is feasible the fallback returns the lowest-error
+    seed -- best effort, with `feasible` reported as 0 so the caller can tell --
+    rather than an arbitrary pick from an all-inf array.
+    """
+    feasible = feasible.astype(bool)
+    masked = jnp.where(feasible, errors, jnp.inf)
+    return jnp.where(jnp.any(feasible, axis=axis),
+                     jnp.argmin(masked, axis=axis),
+                     jnp.argmin(errors, axis=axis))
 
 
 def sqp_ik_solve_cuda(
@@ -563,6 +579,7 @@ def sqp_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`sqp_ik_solve`.
 
@@ -572,8 +589,7 @@ def sqp_ik_solve_cuda(
     ``n_inner_iters`` projected gradient steps (float32) to enforce joint
     limits as hard QP constraints.
 
-    Requires ``_sqp_ik_cuda_lib.so`` compiled from ``_sqp_ik_cuda_kernel.cu``:
-        bash build_kernels/build_sqp_ik_cuda.sh
+    GRiM's kernel (``external/GRiM``, ``kernels/ik/sqp_ik.cu``) compiles for the robot on first use.
 
     Multi-EE support
         Pass multiple end-effectors via ``target_link_indices`` (tuple) and
@@ -605,10 +621,16 @@ def sqp_ik_solve_cuda(
         constraints:             List of constraint callables.
         constraint_weights:      Scalar weight per constraint.
         constraint_refine_iters: Post-CUDA JAX SQP iterations on winner.
+        traced:                  Use the kernel compiled against cricket-traced
+                                 kinematics for this robot (single EE; built once
+                                 and cached on disk).
 
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
     if isinstance(target_poses, jaxlie.SE3):
@@ -642,25 +664,6 @@ def sqp_ik_solve_cuda(
         collision_free=collision_free,
     )
 
-    # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    parent_idx_np           = np.array(robot.joints.parent_indices)
-    n_joints                = robot.joints.num_joints
-    n_ee_count              = len(target_link_indices)
-
-    target_joints_np  = np.zeros(n_ee_count, dtype=np.int32)
-    ancestor_masks_np = np.zeros((n_ee_count, n_joints), dtype=np.int32)
-    for _i, _link_idx in enumerate(target_link_indices):
-        _tgt_jnt = int(parent_joint_indices_np[_link_idx])
-        target_joints_np[_i] = _tgt_jnt
-        _j = _tgt_jnt
-        while _j >= 0:
-            ancestor_masks_np[_i, _j] = 1
-            _j = int(parent_idx_np[_j])
-
-    target_jnts    = jnp.array(target_joints_np)
-    ancestor_masks = jnp.array(ancestor_masks_np)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -670,38 +673,91 @@ def sqp_ik_solve_cuda(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = grim_targets(
+        ("sqp",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
-    winner, winner_coll_cost = _sqp_ik_solve_cuda_jit(
-        robot=robot,
-        target_poses=target_poses_t,
-        rng_key=rng_key,
-        previous_cfg=previous_cfg,
-        num_seeds=num_seeds,
-        max_iter=max_iter,
-        n_inner_iters=n_inner_iters,
-        pos_weight=pos_weight,
-        ori_weight=ori_weight,
-        lambda_init=lambda_init,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        continuity_weight=continuity_weight,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
-    )
+        # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
+    # launch, rather than serialising a kernel that already batches.
+    def _single(tgt, prev):
+        return _sqp_ik_solve_cuda_jit(
+
+            robot=_robot_k,
+                target_poses=tuple(jaxlie.SE3(w) for w in tgt),
+            rng_key=rng_key,
+                previous_cfg=prev,
+            num_seeds=num_seeds,
+            max_iter=max_iter,
+            n_inner_iters=n_inner_iters,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            lambda_init=lambda_init,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
+        )
+
+    def _batched(tgt, prev):
+        # The batched kernel handles ONE end-effector, so the multi-EE form
+        # cannot fold into it. Falling back to a mapped single solve would
+        # silently reintroduce the serialisation this exists to avoid.
+        if len(target_link_indices) != 1:
+            raise NotImplementedError(
+                "vmap over this solver is only supported for a single "
+                f"end-effector; got {len(target_link_indices)}. Call the "
+                "*_solve_cuda_batch entry point with a batched target instead.")
+        winners = _sqp_ik_solve_cuda_batch_jit(
+
+            robot=_robot_k,
+                target_poses_batch=jaxlie.SE3(tgt[:, 0]),
+            rng_key=rng_key,
+                previous_cfgs=prev,
+            num_seeds=num_seeds,
+            max_iter=max_iter,
+            n_inner_iters=n_inner_iters,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            lambda_init=lambda_init,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
+        )
+        return winners, jnp.zeros((winners.shape[0],))
+
+    winner, winner_coll_cost = dispatch_vmap_to_batched(_single, _batched)(
+        jnp.stack([t.wxyz_xyz for t in target_poses_t]), previous_cfg)
 
     # ── Post-CUDA JAX refinement with constraints only ────────────────────
     if bool(post_constraint_fns) and constraint_refine_iters > 0:
@@ -752,24 +808,6 @@ from functools import lru_cache as _lru_cache
 _PMAP_MIN_PROBLEMS_DEFAULT = 256
 
 
-def _sharding_enabled(n_problems: int, n_devices: int) -> bool:
-    """Shard only when it actually helps: >1 GPU and a compute-bound batch.
-
-    For small batches the per-call dispatch overhead dominates and pmap is a net
-    loss, so we require ``n_problems`` above a threshold (tunable via env).  Set
-    ``PYROFFI_SQP_IK_NO_PMAP=1`` to force the single-GPU path regardless.
-    """
-    if _os.environ.get("PYROFFI_SQP_IK_NO_PMAP", "").lower() in ("1", "true", "yes"):
-        return False
-    if n_devices <= 1:
-        return False
-    try:
-        min_problems = int(_os.environ.get("PYROFFI_SQP_IK_PMAP_MIN", _PMAP_MIN_PROBLEMS_DEFAULT))
-    except ValueError:
-        min_problems = _PMAP_MIN_PROBLEMS_DEFAULT
-    return n_problems >= max(n_devices, min_problems)
-
-
 @_lru_cache(maxsize=None)
 def _make_pmapped_batch(
     num_seeds:           int,
@@ -786,6 +824,7 @@ def _make_pmapped_batch(
     collision_margin:    float,
     target_link_indices: tuple,
     constraint_fns:      tuple,
+    ffi_target=None,
 ) -> Callable:
     """Build (once per static signature) a pmapped per-device batched solver.
 
@@ -798,8 +837,7 @@ def _make_pmapped_batch(
     """
     def _body(
         rng_key, previous_cfgs, target_wxyz,
-        robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
-        robot_spheres_local, robot_sphere_joint_idx,
+        robot, fixed_joint_mask_int,
         world_spheres, world_capsules, world_boxes, world_halfspaces,
         constraint_weights, constraint_args,
     ):
@@ -818,10 +856,6 @@ def _make_pmapped_batch(
             eps_ori=eps_ori,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
@@ -833,55 +867,18 @@ def _make_pmapped_batch(
             constraint_fns=constraint_fns,
             constraint_args=constraint_args,
             constraint_weights=constraint_weights,
+            ffi_target=ffi_target,
         )
 
     # Mapped: rng_key, previous_cfgs, target_wxyz.  Broadcast (None): everything else
     # (including constraint_args — array data, so a runtime broadcast arg rather
     # than part of the lru_cache compilation key, which must stay hashable).
-    return jax.pmap(
-        _body,
-        in_axes=(0, 0, 0, None, None, None, None, None, None, None, None, None, None, None, None),
-    )
+    # Mapped: rng_key, previous_cfgs, target_wxyz. Broadcast: the remaining
+    # 8 -- robot model, fixed mask, world buffers, constraint weights and args.
+    # Those describe the robot and the world rather than the problem, so
+    # replicating them is correct and splitting them would be a bug.
+    return make_sharded_pmap(_body, 8)
 
-
-def _run_batch_sharded(
-    pmapped: Callable,
-    target_poses_batch: jaxlie.SE3,
-    rng_key: Array,
-    previous_cfgs: Float[Array, "n_problems n_act"],
-    n_devices: int,
-    *broadcast_args,
-) -> Float[Array, "n_problems n_act"]:
-    """Split the problem axis across ``n_devices`` GPUs via a cached pmap.
-
-    Pads the problem axis up to a multiple of ``n_devices`` (repeating the last
-    target — winners for the padding are discarded), reshapes the per-problem
-    arrays to ``(n_devices, per_device, ...)``, runs the cached pmapped solver,
-    then flattens and trims the result back to ``n_problems``.
-    """
-    n_problems, n_act = previous_cfgs.shape
-    pad = (-n_problems) % n_devices
-
-    wxyz_xyz = target_poses_batch.wxyz_xyz  # (n_problems, 7)
-    if pad:
-        prev_pad = jnp.broadcast_to(previous_cfgs[-1:], (pad, n_act))
-        wxyz_pad = jnp.broadcast_to(wxyz_xyz[-1:], (pad, wxyz_xyz.shape[-1]))
-        previous_cfgs = jnp.concatenate([previous_cfgs, prev_pad], axis=0)
-        wxyz_xyz = jnp.concatenate([wxyz_xyz, wxyz_pad], axis=0)
-
-    per_device = (n_problems + pad) // n_devices
-    prev_sh = previous_cfgs.reshape(n_devices, per_device, n_act)
-    wxyz_sh = wxyz_xyz.reshape(n_devices, per_device, wxyz_xyz.shape[-1])
-    keys = jax.random.split(rng_key, n_devices)  # (n_devices, 2)
-
-    winners = pmapped(keys, prev_sh, wxyz_sh, *broadcast_args)  # (n_devices, per_device, n_act)
-    winners = winners.reshape(n_devices * per_device, n_act)
-    return winners[:n_problems]
-
-
-# ---------------------------------------------------------------------------
-# Public entry point — CUDA batched
-# ---------------------------------------------------------------------------
 
 @functools.partial(
     jax.jit,
@@ -899,6 +896,7 @@ def _run_batch_sharded(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _sqp_ik_solve_cuda_batch_jit(
@@ -916,14 +914,14 @@ def _sqp_ik_solve_cuda_batch_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -931,8 +929,8 @@ def _sqp_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target=None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels.ik._sqp_ik_cuda import sqp_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits
@@ -952,47 +950,28 @@ def _sqp_ik_solve_cuda_batch_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_problems, n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_problems, n_random, n_act), lower, upper, previous_cfgs[:, None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], random_seeds
     )
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, n_seeds, n_act)
 
-    cfgs, errors = sqp_ik_cuda(
-        seeds          = seeds,
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_T_batch,
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        max_iter       = max_iter,
-        n_inner_iters  = n_inner_iters,
-        pos_weight     = pos_weight,
-        ori_weight     = ori_weight,
-        lambda_init    = lambda_init,
-        eps_pos        = eps_pos,
-        eps_ori        = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
+    cfgs, errors, feasible = run_grim(
+        ffi_target, seeds, target_T_batch,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        max_iter=max_iter,
+        n_inner_iters=n_inner_iters,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
 
     if len(constraint_fns) > 0:
@@ -1015,62 +994,32 @@ def _sqp_ik_solve_cuda_batch_jit(
             + continuity_weight * jnp.sum((cfgs - previous_cfgs[:, None, :]) ** 2, axis=-1)
         )
 
-    best_idxs = jnp.argmin(final_errors, axis=1)
+    best_idxs = _feasible_first_argmin(final_errors, feasible, axis=1)
     return cfgs[jnp.arange(n_problems), best_idxs]
 
 
-def sqp_ik_solve_cuda_batch(
-    robot:               Robot,
-    target_link_indices: int | tuple[int, ...],
-    target_poses:        jaxlie.SE3,
-    rng_key:             Array,
-    previous_cfgs:       Float[Array, "n_problems n_act"],
-    num_seeds:           int   = 32,
-    max_iter:            int   = 60,
-    n_inner_iters:       int   = 2,
-    pos_weight:          float = 50.0,
-    ori_weight:          float = 10.0,
-    lambda_init:         float = 5e-3,
-    eps_pos:             float = 1e-8,
-    eps_ori:             float = 1e-8,
-    continuity_weight:   float = 0.0,
-    fixed_joint_mask:    Float[Array, "n_act"] | None = None,
-    constraints:         Sequence[Callable] | None = None,
-    constraint_args:     Sequence | None = None,
-    constraint_weights:  Sequence[float] | None = None,
-    collision_constraint_indices: Sequence[int] | None = None,
-    collision_free:      bool = False,
-    collision_checker:   Any | None = None,
-    collision_world:     Any | None = None,
-    collision_weight:    float = 1e4,
-    collision_margin:    float = 0.02,
-    constraint_refine_iters: int = 12,
-) -> Float[Array, "n_problems n_act"]:
-    """Batched CUDA SQP-IK: solve n_problems targets in a single kernel launch.
+def _sqp_ik_batch_prep(
+    robot, target_link_indices, fixed_joint_mask, constraints, constraint_args,
+    constraint_weights, collision_constraint_indices, collision_free,
+    collision_checker, collision_world,
+):
+    """Everything the batched solve needs that does NOT depend on the problems.
 
-    Args:
-        robot:                   The robot model.
-        target_link_indices:     Index (or tuple of indices) of target link(s).
-        target_poses:            Batch of SE(3) targets, shape ``(n_problems,)``.
-        rng_key:                 JAX PRNG key.
-        previous_cfgs:           Previous configurations, shape ``(n_problems, n_act)``.
-        num_seeds:               Parallel seeds per problem.
-        max_iter:                Outer SQP iterations per seed.
-        n_inner_iters:           Inner projected-gradient iterations.
-        pos_weight:              Weight on position residual.
-        ori_weight:              Weight on orientation residual.
-        lambda_init:             Initial damping factor.
-        eps_pos:                 Position convergence threshold [m].
-        eps_ori:                 Orientation convergence threshold [rad].
-        continuity_weight:       Weight on ‖q − prev‖² in winner selection.
-        fixed_joint_mask:        Boolean mask; True = joint must not move.
-        constraints:             List of constraint callables.
-        constraint_weights:      Scalar weight per constraint.
-        constraint_refine_iters: Post-CUDA JAX iterations on each winner.
+    Chain walks, SRDF pair tables and collision-buffer assembly are HOST work --
+    numpy loops and ``int()`` conversions -- so they cannot run inside a trace.
+    They also do not depend on the targets, the seeds or the key: they describe
+    the robot and the world. Hoisting them into their own function lets
+    :func:`sqp_ik_solve_cuda_batch` run them ONCE, outside its batching trace,
+    and hand the result back in. Left inline, that wrapper's trace of the solve
+    reached ``_prepare_ls_collision_buffers`` with tracers and died with
+    ``TracerArrayConversionError`` the moment a collision checker was supplied.
 
-    Returns:
-        Best joint configurations, shape ``(n_problems, n_act)``.
+    Pure code motion out of :func:`_sqp_ik_solve_cuda_batch_impl`, which still
+    calls it when given no prepared bundle -- so the plain path is unchanged.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
 
@@ -1096,18 +1045,6 @@ def sqp_ik_solve_cuda_batch(
         collision_free=collision_free,
     )
 
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
-    parent_idx_np    = np.array(robot.joints.parent_indices)
-    n_joints         = robot.joints.num_joints
-    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1117,12 +1054,103 @@ def sqp_ik_solve_cuda_batch(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
 
     enable_collision = bool(collision_free and collision_enabled)
+    return (
+        _robot_k, target_link_indices, n_act, fixed_joint_mask_int,
+        cuda_constraint_fns, cuda_constraint_args, cuda_constraint_weights,
+        post_constraint_fns, post_constraint_args, post_constraint_weights,
+        robot_spheres_local, robot_sphere_joint_idx, world_spheres,
+        world_capsules, world_boxes, world_halfspaces,
+        self_sph_local, self_link_start, self_link_joint,
+        self_pair_i, self_pair_j, enable_collision,
+    )
+
+
+def _sqp_ik_solve_cuda_batch_impl(
+    robot:               Robot,
+    target_link_indices: int | tuple[int, ...],
+    target_poses:        jaxlie.SE3,
+    rng_key:             Array,
+    previous_cfgs:       Float[Array, "n_problems n_act"],
+    num_seeds:           int   = 32,
+    max_iter:            int   = 60,
+    n_inner_iters:       int   = 2,
+    pos_weight:          float = 50.0,
+    ori_weight:          float = 10.0,
+    lambda_init:         float = 5e-3,
+    eps_pos:             float = 1e-8,
+    eps_ori:             float = 1e-8,
+    continuity_weight:   float = 0.0,
+    fixed_joint_mask:    Float[Array, "n_act"] | None = None,
+    constraints:         Sequence[Callable] | None = None,
+    constraint_args:     Sequence | None = None,
+    constraint_weights:  Sequence[float] | None = None,
+    collision_constraint_indices: Sequence[int] | None = None,
+    collision_free:      bool = False,
+    collision_checker:   Any | None = None,
+    collision_world:     Any | None = None,
+    collision_weight:    float = 1e4,
+    collision_margin:    float = 0.02,
+    constraint_refine_iters: int = 12,
+    traced:              bool = False,
+    *,
+    _prep=None,
+) -> Float[Array, "n_problems n_act"]:
+    """Batched CUDA SQP-IK: solve n_problems targets in a single kernel launch.
+
+    Args:
+        robot:                   The robot model.
+        target_link_indices:     Index (or tuple of indices) of target link(s).
+        target_poses:            Batch of SE(3) targets, shape ``(n_problems,)``.
+        rng_key:                 JAX PRNG key.
+        previous_cfgs:           Previous configurations, shape ``(n_problems, n_act)``.
+        num_seeds:               Parallel seeds per problem.
+        max_iter:                Outer SQP iterations per seed.
+        n_inner_iters:           Inner projected-gradient iterations.
+        pos_weight:              Weight on position residual.
+        ori_weight:              Weight on orientation residual.
+        lambda_init:             Initial damping factor.
+        eps_pos:                 Position convergence threshold [m].
+        eps_ori:                 Orientation convergence threshold [rad].
+        continuity_weight:       Weight on ‖q − prev‖² in winner selection.
+        fixed_joint_mask:        Boolean mask; True = joint must not move.
+        constraints:             List of constraint callables.
+        constraint_weights:      Scalar weight per constraint.
+        constraint_refine_iters: Post-CUDA JAX iterations on each winner.
+        traced:                  Use the cricket-traced kernel (see :func:`sqp_ik_solve_cuda`).
+
+    Returns:
+        Best joint configurations, shape ``(n_problems, n_act)``.
+    """
+    if _prep is None:
+        _prep = _sqp_ik_batch_prep(
+            robot, target_link_indices, fixed_joint_mask, constraints,
+            constraint_args, constraint_weights, collision_constraint_indices,
+            collision_free, collision_checker, collision_world)
+    (
+        _robot_k, target_link_indices, n_act, fixed_joint_mask_int,
+        cuda_constraint_fns, cuda_constraint_args, cuda_constraint_weights,
+        post_constraint_fns, post_constraint_args, post_constraint_weights,
+        robot_spheres_local, robot_sphere_joint_idx, world_spheres,
+        world_capsules, world_boxes, world_halfspaces,
+        self_sph_local, self_link_start, self_link_joint,
+        self_pair_i, self_pair_j, enable_collision,
+    ) = _prep
+    (ffi_target,) = grim_targets(
+        ("sqp",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
+
     n_problems = previous_cfgs.shape[0]
     n_devices = jax.local_device_count()
 
-    if _sharding_enabled(n_problems, n_devices):
+    if sharding_enabled(n_problems, n_devices, 'PYROFFI_SQP_IK_PMAP_MIN'):
         # Split the problem axis across all local GPUs (embarrassingly parallel).
         # The pmapped executable is cached per static signature so the per-waypoint
         # solve loop reuses one compilation instead of re-tracing every call.
@@ -1131,17 +1159,17 @@ def sqp_ik_solve_cuda_batch(
             lambda_init, eps_pos, eps_ori, continuity_weight,
             enable_collision, collision_weight, collision_margin,
             tuple(target_link_indices), tuple(cuda_constraint_fns),
+            ffi_target,
         )
-        winners = _run_batch_sharded(
+        winners = run_sharded(
             pmapped, target_poses, rng_key, previous_cfgs, n_devices,
-            robot, fixed_joint_mask_int, ancestor_masks, target_jnts,
-            robot_spheres_local, robot_sphere_joint_idx,
+            robot, fixed_joint_mask_int,
             world_spheres, world_capsules, world_boxes, world_halfspaces,
             cuda_constraint_weights, tuple(cuda_constraint_args),
         )
     else:
         winners = _sqp_ik_solve_cuda_batch_jit(
-            robot=robot,
+            robot=_robot_k,
             target_poses_batch=target_poses,
             rng_key=rng_key,
             previous_cfgs=previous_cfgs,
@@ -1155,10 +1183,6 @@ def sqp_ik_solve_cuda_batch(
             eps_ori=eps_ori,
             continuity_weight=continuity_weight,
             fixed_joint_mask_int=fixed_joint_mask_int,
-            ancestor_masks=ancestor_masks,
-            target_jnts=target_jnts,
-            robot_spheres_local=robot_spheres_local,
-            robot_sphere_joint_idx=robot_sphere_joint_idx,
             world_spheres=world_spheres,
             world_capsules=world_capsules,
             world_boxes=world_boxes,
@@ -1170,6 +1194,7 @@ def sqp_ik_solve_cuda_batch(
             constraint_fns=cuda_constraint_fns,
             constraint_args=cuda_constraint_args,
             constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
         )
 
     if post_constraint_fns and constraint_refine_iters > 0:
@@ -1194,7 +1219,160 @@ def sqp_ik_solve_cuda_batch(
             )
         )(winners, target_poses.wxyz_xyz)
 
-    return winners
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs,
+        # The SAME buffers the solve kernel enforced -- canonicalisation walks
+        # the task null space, which preserves pose but NOT clearance.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, self_sph_local, self_link_start,
+                           self_link_joint, self_pair_i, self_pair_j),
+        # The caller's requested standoff, not a hardcoded one: canonicalisation
+        # walked to 1 mm clearance under a requested 0.02 m margin, respecting
+        # its own guard while silently breaking the solver's contract.
+        canonical_margin=collision_margin,
+    )
+
+
+def _is_batched(*operands) -> bool:
+    """Whether any operand is a ``vmap`` batch tracer.
+
+    ``custom_vmap`` gives no way to ask this -- it decides for itself once
+    entered, and entering is precisely what must be avoided on the plain path
+    (see :func:`sqp_ik_solve_cuda_batch`). So the check is made here instead.
+
+    ``BatchTracer`` is a private symbol, hence the guarded import. If it ever
+    moves, this degrades to "never batched": every call takes the direct path,
+    ``vmap`` goes back to raising the ffi_call error it raised before this rule
+    existed, and NOTHING silently changes its answer. That is the right way for
+    this to fail.
+    """
+    try:
+        from jax._src.interpreters.batching import BatchTracer
+    except ImportError:  # pragma: no cover - version guard
+        return False
+    return any(isinstance(o, BatchTracer) for o in operands)
+
+
+def sqp_ik_solve_cuda_batch(*args, **kwargs):
+    """Batched CUDA SQP-IK, with a ``vmap`` rule over its problem axis.
+
+    Identical to :func:`_sqp_ik_solve_cuda_batch_impl` when called normally --
+    same signature, same result, same single launch. The only addition is a
+    batching rule, so ``jax.vmap`` over THIS already-batched entry point works
+    instead of falling through to the raw ``ffi_call`` and raising
+    ``vmap_method=None``.
+
+    The kernel's problem axis does not care where its rows came from, so a
+    mapped axis of size V over a batch of B is one launch of V*B problems: the
+    rule folds ``(V, B, ...) -> (V*B, ...)``, calls the implementation once, and
+    restores the shape on the way out. ``target_poses`` and ``previous_cfgs``
+    may each be mapped or closed over independently; everything else describes
+    the robot and the world rather than the problem, and is closed over.
+
+    Note the folded solve is not row-for-row identical to V separate calls: the
+    kernel derives each problem's seeds from ``rng_key`` and its POSITION in the
+    batch, so rows past the first block get a different (equally valid) seeding
+    and may land in a different IK branch. It matches a hand-flattened
+    ``V*B`` call exactly, which is the operation it actually performs.
+
+    Host-side setup -- chain walks, SRDF tables, collision buffers -- runs in
+    :func:`_sqp_ik_batch_prep` BEFORE the batching trace and is passed in. That
+    is required, not tidiness: that work uses numpy and cannot be traced.
+
+    WHY THE EXPLICIT ``_is_batched`` CHECK, rather than simply always calling
+    through ``custom_vmap``: because ``custom_vmap`` is NOT transparent to
+    autodiff, and the IK stack depends on autodiff being able to see through
+    it. ``custom_vmap_jvp`` differentiates the STAGED JAXPR
+    (``ad.jvp_jaxpr(call, [True] * n, True)`` in ``jax/_src/custom_batching``),
+    which instantiates every symbolic-zero tangent and, worse, runs long after
+    the ``try/except`` inside ``canonicalize_batch`` that lets a
+    non-differentiable kernel fall back to the pure-JAX walk. Routing the plain
+    path through it therefore turned ``jax.grad`` through this solver into
+    ``ValueError: The FFI call to 'canonical_ik_cuda' cannot be
+    differentiated`` -- measured, eager and jitted, and invisible to the test
+    suite because nothing in ``tests/`` differentiates this path.
+
+    So the unmapped call must not enter ``custom_vmap`` at all. It does not:
+    it is a direct call to the implementation, byte-identical to having no
+    wrapper, and that is the path ``jax.grad`` and the whole ``iosp/`` pipeline
+    take.
+
+    The mapped path stays differentiable, which is worth stating because the
+    reasoning above does not obviously predict it: under ``grad(vmap(f))`` the
+    batching rule fires FIRST and hands the implementation ordinary JVP
+    tracers, so the differentiable code is never staged into a jaxpr and
+    ``custom_vmap_jvp`` is never reached. Measured to work, not assumed. It is
+    only the UNMAPPED call through ``custom_vmap`` -- where no rule fires and
+    JAX falls back to differentiating the staged jaxpr -- that breaks, and the
+    check above is what stops that from ever happening.
+
+    ONE level of ``vmap`` only. ``vmap(vmap(f))`` still raises: the rule hands
+    flattened arguments to the implementation, which under an enclosing vmap
+    are themselves tracers, so the bare ``ffi_call`` is reached again. For two
+    axes, fold one into the problem batch by hand and vmap the other.
+
+    ``rng_key`` may not be mapped: one launch means one seeding stream.
+    """
+    bound = _SQP_BATCH_SIG.bind(*args, **kwargs)
+    bound.apply_defaults()
+    ba = bound.arguments
+    ba.pop('_prep', None)
+    target_poses = ba.pop('target_poses')
+    previous_cfgs = ba.pop('previous_cfgs')
+    rng_key = ba.pop('rng_key')
+
+    # THE load-bearing line. Not an optimisation -- see the docstring: entering
+    # custom_vmap costs differentiability, so an unmapped call must not.
+    if not _is_batched(target_poses.wxyz_xyz, previous_cfgs):
+        return _sqp_ik_solve_cuda_batch_impl(*args, **kwargs)
+
+    prep = _sqp_ik_batch_prep(
+        ba['robot'], ba['target_link_indices'], ba['fixed_joint_mask'],
+        ba['constraints'], ba['constraint_args'], ba['constraint_weights'],
+        ba['collision_constraint_indices'], ba['collision_free'],
+        ba['collision_checker'], ba['collision_world'])
+
+    def _call(t_wxyz_xyz, prev):
+        return _sqp_ik_solve_cuda_batch_impl(
+            target_poses=jaxlie.SE3(t_wxyz_xyz), previous_cfgs=prev,
+            rng_key=rng_key, _prep=prep, **ba)
+
+    @jax.custom_batching.custom_vmap
+    def solve(t_wxyz_xyz, prev):
+        return _call(t_wxyz_xyz, prev)
+
+    @solve.def_vmap
+    def _rule(axis_size, in_batched, t_wxyz_xyz, prev):
+        t_b, p_b = in_batched
+        # Either argument may be closed over rather than mapped -- sweeping
+        # candidate targets from one fixed batch of seeds is a normal thing to
+        # want. Broadcast the unmapped one so the fold sees a full axis.
+        if not t_b:
+            t_wxyz_xyz = jnp.broadcast_to(
+                t_wxyz_xyz, (axis_size, *jnp.shape(t_wxyz_xyz)))
+        if not p_b:
+            prev = jnp.broadcast_to(prev, (axis_size, *jnp.shape(prev)))
+
+        n_problems = t_wxyz_xyz.shape[1]
+        flat_t = t_wxyz_xyz.reshape(-1, *t_wxyz_xyz.shape[2:])
+        flat_p = prev.reshape(-1, *prev.shape[2:])
+        out = _call(flat_t, flat_p)
+        out = jax.tree.map(
+            lambda a: a.reshape(axis_size, n_problems, *a.shape[1:]), out)
+        return out, jax.tree.map(lambda _: True, out)
+
+    return solve(target_poses.wxyz_xyz, previous_cfgs)
+
+
+#: Bound once: the wrapper re-dispatches every call through this signature, so
+#: positional and keyword callers alike keep working unchanged.
+_SQP_BATCH_SIG = inspect.signature(_sqp_ik_solve_cuda_batch_impl)
+
+#: Keep the implementation's full argument documentation reachable from the
+#: public name; the wrapper's own docstring covers only what it adds.
+sqp_ik_solve_cuda_batch.__doc__ += (
+    "\n\n" + (_sqp_ik_solve_cuda_batch_impl.__doc__ or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -1304,19 +1482,6 @@ def sqp_ik_solve_cuda_sequential(
             "use the per-waypoint sqp_ik_solve_cuda_batch loop for those."
         )
 
-    # ── Per-EE ancestor masks (single-EE convention, mirrors the batch path) ──
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
-    parent_idx_np    = np.array(robot.joints.parent_indices)
-    n_joints         = robot.joints.num_joints
-    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1326,7 +1491,15 @@ def sqp_ik_solve_cuda_sequential(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    self_tables = self_collision_table_arrays(robot, collision_checker)
     enable_collision = bool(collision_free and collision_enabled)
+    (ffi_target,) = grim_targets(
+        ("sqp",), robot, target_link_indices, False, robot_spheres_local,
+        robot_sphere_joint_idx, self_tables,
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
     lower = robot.joints.lower_limits
     upper = robot.joints.upper_limits
@@ -1334,9 +1507,7 @@ def sqp_ik_solve_cuda_sequential(
     # ── Initial warm-start pool for waypoint 0 ────────────────────────────────
     if initial_prev_cfgs is None:
         rng_key, k0 = jax.random.split(rng_key)
-        init_prev = jax.random.uniform(
-            k0, (K, n_act), minval=lower, maxval=upper, dtype=jnp.float32
-        )
+        init_prev = sample_in_limits(k0, (K, n_act), lower, upper, jnp.zeros_like(lower)[None, :])
     else:
         init_prev = jnp.asarray(initial_prev_cfgs, dtype=jnp.float32)
         init_prev = jnp.broadcast_to(init_prev, (K, n_act))
@@ -1372,10 +1543,6 @@ def sqp_ik_solve_cuda_sequential(
                 eps_ori=eps_ori,
                 continuity_weight=cont_i,
                 fixed_joint_mask_int=fixed_joint_mask_int,
-                ancestor_masks=ancestor_masks,
-                target_jnts=target_jnts,
-                robot_spheres_local=robot_spheres_local,
-                robot_sphere_joint_idx=robot_sphere_joint_idx,
                 world_spheres=world_spheres,
                 world_capsules=world_capsules,
                 world_boxes=world_boxes,
@@ -1387,6 +1554,7 @@ def sqp_ik_solve_cuda_sequential(
                 constraint_fns=cuda_constraint_fns,
                 constraint_args=cuda_constraint_args,
                 constraint_weights=cuda_constraint_weights,
+                ffi_target=ffi_target,
             )   # (k_local, n_act) — one winner per thread
             return winners, winners
 

@@ -1,61 +1,74 @@
-"""Benchmark and correctness evaluation: HJCD-IK, LS-IK, SQP-IK, MPPI-IK, and Learned-IK.
+"""Benchmark and correctness evaluation of IK solvers: pyroffi (this work) vs baselines.
 
-Sequential (per-problem) timing
-    JAX solvers are evaluated one pose at a time to measure single-problem
-    latency.  CUDA solvers are also timed sequentially for a like-for-like
-    comparison.
+Methods
+    pyroffi:    HJCD/LS/SQP/MPPI/Analytic-IK, each with a JAX backend and a CUDA/FFI
+                kernel backend. Learned-IK (Flax MLP warm-start + LM refinement, JAX only).
+    Baselines:  cuRobo (own conda env, see below), PyRoKi-LS / PyRoKi-AnalyticJac
+                (jaxls LM; "AnalyticJac" swaps in the analytic task-space Jacobian).
 
-Batch timing
-    JAX and CUDA batch solvers are timed over all N_TARGETS at once to measure
-    throughput.  The effective per-problem time is batch_wall_time / N_TARGETS.
+Timing
+    Sequential: one pose at a time, for single-problem latency. pyroffi solvers use
+    JIT device timers inside a fixed-count lax.scan (no Python dispatch in the timed
+    loop); cuRobo uses CUDA events; PyRoKi uses wall clocks.
+    Batch: N_TARGETS_BATCH targets at once, for throughput; effective per-problem
+    time = total_time / N_TARGETS_BATCH.
 
 Correctness
-    For each solver the median position / rotation errors across all target
-    poses are reported.  JAX vs CUDA agreement is checked at batch level.
+    Median position/rotation error is reported per solver; success is scored
+    against one shared threshold (POS_THR_M / ROT_THR_RAD) for every method, even
+    though cuRobo's own solver targets a looser native 5 mm tolerance internally.
 
 Collision-free IK
-    When COLLISION_FREE=True a static obstacle scene is created (or loaded from
-    ENV_FILE) and each solver is re-run with a differentiable collision penalty.
-    Results include a coll_free column showing how many solutions are actually
-    collision-free (min signed distance > 0).
-
-    The scene is saved to ENV_FILE as JSON with a ``curobo_world_model`` key
-    that can be fed directly into a CuRobo WorldConfig for fair comparison.
+    When COLLISION_FREE=True, each differentiable solver is re-run with a soft
+    collision penalty in its objective against a scene loaded from/saved to
+    ENV_FILE (JSON, with a ``curobo_world_model`` key cuRobo can load directly).
+    coll_free_n counts solutions with min signed distance > 0; cuRobo instead
+    reports its own world-collision-aware feasibility check. Analytic-IK is
+    excluded from these rows: its CUDA path does candidate *selection* over
+    closed-form branches, not the differentiable penalty the other rows use.
 
 Learned-IK
-    The Learned-IK solver requires a pre-trained Flax model.  Train one with:
-        python train_learned_ik.py --robot panda
-    The model is saved to resources/learned_ik/panda.pkl and loaded
-    automatically.  If no model is found the learned-IK rows are skipped.
+    Needs a pre-trained Flax model: `python train_learned_ik.py --robot panda`
+    (saved to resources/learned_ik/panda.pkl). Rows are skipped if none is found.
 
-Usage:
+Usage
     python tests/bench_ik.py
 
-    Every solver is benchmarked in its OWN subprocess (one per robot x solver), so
-    no solver's JAX preallocation, GLASS-tier cache, JIT/kernel compilation or
-    allocator state can perturb another's timings. The top-level process is a thin
-    dispatcher that never touches the GPU; the ``--robot``/``--solver`` flags mark
-    the isolated child invocations and are not meant to be passed by hand.
+    Every solver runs in its OWN subprocess (one per robot x solver) so JAX
+    preallocation, GLASS-tier caching, JIT/kernel compilation, and allocator state
+    from one solver can't perturb another's timing. The top-level process is a
+    thin dispatcher that never touches the GPU; --robot/--solver mark the isolated
+    child invocations and aren't meant to be passed by hand.
 
-Prerequisites:
+    Fairness / reproducibility notes:
+      * Targets: fixed seed-0 RNG, identical across every method. cuRobo's child
+        (separate conda env) reads them from an .npz sidecar instead of resampling.
+      * num_seeds = 32 for every method, including cuRobo (its own benchmark ships
+        with 2/8 by default).
+      * Analytic-IK children set JAX_ENABLE_X64=1 pre-import (the closed-form
+        solve + its CUDA FFI need float64); every other child stays float32.
+      * cuRobo runs in its own conda env (``curobo``, editable install of
+        baselines/curobo), located via CUROBO_PYTHON, a sibling "curobo" env, or
+        `conda run -n curobo`. It only ships configs for panda/g1; fetch/baxter
+        rows are skipped with a logged note. Its tool frame is narrowed in-memory
+        to match pyroffi's EE link (panda_hand / right_hand_palm_link) before the
+        solver is built, so goals and errors compare in the same frame.
+      * GPU monitoring (NVML) tracks the physical GPU named by
+        CUDA_VISIBLE_DEVICES, so util/VRAM rows match the GPU the child ran on.
+      * MPPI's L-BFGS refinement budget (25 iters) is identical on JAX and CUDA.
+
+Prerequisites
     1. A CUDA-capable GPU.
-    2. CUDA libraries compiled:
-           bash build_kernels/build_hjcd_ik_cuda.sh
-           bash build_kernels/build_ls_ik_cuda.sh
-           bash build_kernels/build_sqp_ik_cuda.sh
-           bash build_kernels/build_mppi_ik_cuda.sh
-    3. robot_descriptions installed:
-           pip install robot_descriptions
-    4. (Optional) Flax model for Learned-IK:
-           pip install flax optax
-           python train_learned_ik.py --robot panda
+    2. Built CUDA kernels: bash build_kernels/build_{hjcd,ls,sqp,mppi}_ik_cuda.sh
+    3. pip install robot_descriptions
+    4. (Optional, Learned-IK) pip install flax optax; then train_learned_ik.py
+    5. (Optional, cuRobo) a `curobo` conda env with baselines/curobo installed,
+       or CUROBO_PYTHON pointing at its python.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
-import csv
 import datetime
 import functools
 import json
@@ -63,20 +76,13 @@ import os
 import pathlib
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 
-# JAX reads platform selection during import/initialization.  Parse this flag
-# before importing jax so ``--cpu-only`` can prevent GPU backend setup.
-_CPU_ONLY = "--cpu-only" in sys.argv[1:]
-if _CPU_ONLY:
-    os.environ["JAX_PLATFORMS"] = "cpu"
-
 # ``--no-jax`` skips all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, Learned-JAX,
 # PyRoKi) but keeps CUDA/FFI kernel solvers and GPU monitoring enabled, so the
-# FFI kernels can be benchmarked in isolation.  ``--cpu-only`` implies it.
-_NO_JAX = _CPU_ONLY or "--no-jax" in sys.argv[1:]
+# FFI kernels can be benchmarked in isolation.
+_NO_JAX = "--no-jax" in sys.argv[1:]
 
 # Isolation model (see main() / _run_solver_subprocess): each solver is
 # benchmarked in its OWN subprocess, invoked with ``--solver LABEL``. A process
@@ -87,66 +93,70 @@ _NO_JAX = _CPU_ONLY or "--no-jax" in sys.argv[1:]
 # one at a time and each get the full card with the default (preallocating)
 # allocator, so their timings are not perturbed by any co-resident solver.
 _IS_SOLVER_CHILD = "--solver" in sys.argv[1:]
-if not _CPU_ONLY and not _IS_SOLVER_CHILD:
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-import jax
-import jax.numpy as jnp
-import jaxlie
+# cuRobo is the one solver whose child runs in a SEPARATE conda env (see
+# _curobo_python_cmd / _run_solver_subprocess) that has neither JAX nor
+# pyroffi installed. Its child re-invokes this SAME file (for a single CSV
+# schema / constants), so every JAX- and pyroffi-dependent import below (and
+# the VRAM/x64 preamble, which only makes sense for a JAX process) must be
+# skipped for that child — see _run_curobo_child, which does its own
+# (deferred, function-local) torch/curobo imports instead.
+_IS_CUROBO_CHILD = (
+    _IS_SOLVER_CHILD
+    and sys.argv[sys.argv.index("--solver") + 1] == "cuRobo"
+)
+
 import numpy as np
-import pyroffi as pk
-import yourdfpy
 
-from pyroffi.collision import Box, RobotCollisionSpherized, Sphere, collide
-from pyroffi._robot_srdf_parser import read_disabled_collisions_from_srdf
+from bench_ik_utils import (
+    POS_THR_M,
+    ROT_THR_RAD,
+    _batch_row,
+    _batch_row_coll,
+    _CSV_FIELDS,
+    _curobo_python_cmd,
+    _CUROBO_ROBOT_FILES,
+    _gpu_monitor,
+    _NVML_OK,
+    _run_curobo_child,
+    _seq_row,
+    _seq_row_coll,
+    _table_header,
+    _table_row,
+    _table_sep,
+    _write_csv,
+)
 
-# Optional NVML for GPU monitoring (nvidia-ml-py / pynvml).
-try:
-    if _CPU_ONLY:
-        raise RuntimeError("CPU-only mode")
-    import pynvml as _pynvml
-    _pynvml.nvmlInit()
-    _NVML_HANDLE: object | None = _pynvml.nvmlDeviceGetHandleByIndex(0)
-    _NVML_OK = True
-except Exception:
-    _NVML_HANDLE = None
-    _NVML_OK = False
+if not _IS_CUROBO_CHILD:
+    if not _IS_SOLVER_CHILD:
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+    # Analytic-IK (closed-form) children run in float64: the 7-DOF branch solve
+    # and its CUDA FFI kernel both require x64, while every other child keeps
+    # the default dtype so JAX/CUDA agreement is measured under the same
+    # precision. JAX reads JAX_ENABLE_X64 at import, so this must land before
+    # ``import jax``.
+    if "--solver" in sys.argv[1:]:
+        _solver_idx = sys.argv.index("--solver")
+        if _solver_idx + 1 < len(sys.argv) and sys.argv[_solver_idx + 1] in (
+            "Analytic-JAX", "Analytic-CUDA",
+        ):
+            os.environ["JAX_ENABLE_X64"] = "1"
 
-@contextlib.contextmanager
-def _gpu_monitor(interval_s: float = 0.02):
-    """Sample GPU utilisation and VRAM in a background thread.
+    import jax
+    import jax.numpy as jnp
+    import jaxlie
+    import pyroffi as pk
+    import yourdfpy
 
-    Yields a dict; on exit the dict contains:
-        ``gpu_util``  – list of utilisation % samples
-        ``vram_mb``   – list of used VRAM (MiB) samples
-    """
-    samples: dict[str, list[float]] = {"gpu_util": [], "vram_mb": []}
-    stop_evt = threading.Event()
+    from pyroffi.collision import Box, RobotCollisionSpherized, Sphere, collide
+    from pyroffi._robot_srdf_parser import read_disabled_collisions_from_srdf
 
-    def _sample() -> None:
-        while not stop_evt.is_set():
-            if _NVML_OK and _NVML_HANDLE is not None:
-                util = _pynvml.nvmlDeviceGetUtilizationRates(_NVML_HANDLE)
-                mem  = _pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
-                samples["gpu_util"].append(float(util.gpu))
-                samples["vram_mb"].append(float(mem.used) / 1024 ** 2)
-            stop_evt.wait(interval_s)
+    from pyroffi.optimization_engines._hjcd_ik import hjcd_solve
+    from pyroffi.optimization_engines._ls_ik import ls_ik_solve
+    from pyroffi.optimization_engines._sqp_ik import sqp_ik_solve
+    from pyroffi.optimization_engines._mppi_ik import mppi_ik_solve
 
-    t = threading.Thread(target=_sample, daemon=True)
-    t.start()
-    try:
-        yield samples
-    finally:
-        stop_evt.set()
-        t.join(timeout=1.0)
-
-from pyroffi.optimization_engines._hjcd_ik import hjcd_solve
-from pyroffi.optimization_engines._ls_ik import ls_ik_solve
-from pyroffi.optimization_engines._sqp_ik import sqp_ik_solve
-from pyroffi.optimization_engines._mppi_ik import mppi_ik_solve
-
-if not _CPU_ONLY:
     from pyroffi.optimization_engines._hjcd_ik import (
         hjcd_solve_cuda,
         hjcd_solve_cuda_batch,
@@ -164,42 +174,40 @@ if not _CPU_ONLY:
         mppi_ik_solve_cuda_batch,
     )
 
-# QuIK CPU (Halley's-method) IK backend (optional; needs cricket JIT + a
-# DH-representable serial chain).  It always runs on the CPU, so it is timed
-# here as the CPU alternative to the CUDA solvers.
-try:
-    from pyroffi.optimization_engines._quik_ik import QuIKSolver
-    _QUIK_IMPORT_OK = True
-except Exception:
-    _QUIK_IMPORT_OK = False
-
-# VAMP CPU collision checker + MPPI collision-free projection kernel (optional;
-# needs cricket JIT).  Used to give QuIK a collision-aware mode: seeds are
-# projected onto the collision-free manifold and solutions collision-filtered.
-try:
-    from pyroffi.collision import VAMPCPUCollisionChecker
-    _VAMP_CPU_IMPORT_OK = True
-except Exception:
-    _VAMP_CPU_IMPORT_OK = False
-
-# Learned-IK: imports only; model is loaded inside main() after the robot is known.
-try:
-    from pyroffi.optimization_engines._learned_ik import (
-        get_default_model_path,
-        load_learned_ik,
-        make_learned_ik_solve,
+    # Analytic (closed-form) IK for the 7-DOF spherical-wrist family.  The JAX
+    # backend is pure JAX; the CUDA/FFI
+    # backend needs a GPU and float64 (see the pre-import JAX_ENABLE_X64 flag
+    # above).
+    from pyroffi.kinematics._analytic_ik import (
+        analytic_ik_solve,
+        analytic_ik_solve_batched,
+        build_geometry,
     )
-    _LEARNED_IK_IMPORT_OK = True
-except Exception:
-    _LEARNED_IK_IMPORT_OK = False
 
-# PyRoKi IK solver (optional).
-try:
-    import pyroki as _pyroki
-    import jaxls as _jaxls
-    _PYROKI_AVAILABLE = True
-except Exception:
-    _PYROKI_AVAILABLE = False
+    from pyroffi.optimization_engines._analytic_ik import (
+        analytic_ik_solve_cuda,
+        analytic_ik_solve_cuda_batch,
+    )
+
+    # Learned-IK: imports only; model is loaded inside main() after the robot
+    # is known.
+    try:
+        from pyroffi.optimization_engines._learned_ik import (
+            get_default_model_path,
+            load_learned_ik,
+            make_learned_ik_solve,
+        )
+        _LEARNED_IK_IMPORT_OK = True
+    except Exception:
+        _LEARNED_IK_IMPORT_OK = False
+
+    # PyRoKi IK solver (optional).
+    try:
+        import pyroki as _pyroki
+        import jaxls as _jaxls
+        _PYROKI_AVAILABLE = True
+    except Exception:
+        _PYROKI_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -207,40 +215,55 @@ except Exception:
 
 ROBOT_NAMES = ("panda", "fetch", "baxter", "g1")
 
-# GLASS parallelism tier per robot, passed to the CUDA IK kernels via the
-# PYROFFI_IK_TIER env var (see src/pyroffi/cuda_kernels/_tier_kernel.cuh).
-# The tier is cached process-globally on first CUDA kernel launch; since every
-# solver already runs in its own subprocess (see main()), the tier for a robot's
-# CUDA-solver children is set from this table. g1 is omitted: at 43 DOF it
-# exceeds TIER_CHOICE_MAX_N (32) and PYROFFI_TIER_DISPATCH forces Tier::Block
-# regardless of this env var.
+# GLASS parallelism tier per robot, set via PYROFFI_IK_TIER for CUDA IK kernels
+# (cached process-globally on first launch, hence per-subprocess). Assignment
+# is by actuated DOF: thread for <=8 DOF (panda=7, fetch=8), warp for medium/
+# bimanual (baxter=14), block for high-DOF (g1=43 — also forced regardless,
+# since DOF > TIER_CHOICE_MAX_N locks the kernels to Tier::Block anyway).
 ROBOT_TIER = {
     "panda":  "thread",
-    "fetch":  "warp",
-    "baxter": "block",
+    "fetch":  "thread",
+    "baxter": "warp",
+    "g1":     "block",
 }
 
-# The four core IK methods, each with a JAX and a CUDA backend. Everything in the
-# benchmark keys off these base solver labels (see _candidate_solvers / --solver).
-_CORE_METHODS = ("HJCD", "LS", "SQP", "MPPI")
+_CORE_METHODS = ("HJCD", "LS", "SQP", "MPPI")  # each has a JAX + CUDA backend
+
+# Robots with a 7-DOF spherical-wrist chain, needed for the closed-form
+# Analytic-IK solve (build_geometry() validates this at runtime too).
+_ANALYTIC_ROBOTS = frozenset(("panda", "fetch", "baxter"))
+
+# cuRobo ships configs only for these two (_CUROBO_ROBOT_FILES, from
+# bench_ik_utils); fetch/baxter cuRobo rows are skipped with a logged note.
 
 
-def _candidate_solvers(cpu_only: bool, no_jax: bool) -> list[str]:
+def _candidate_solvers(
+    no_jax: bool, robot_name: str | None = None,
+) -> list[str]:
     """Base solver labels to benchmark, one subprocess each (see main()).
 
     This is the STATIC candidate set implied by the mode flags; the optional
-    solvers (Learned/PyRoKi/QuIK) may still be unavailable at runtime, in which
-    case that solver's child finds nothing to run and exits without writing rows.
+    solvers (Learned/PyRoKi/cuRobo) may still be unavailable at runtime, in
+    which case that solver's child finds nothing to run and exits without writing
+    rows.  When robot_name is given the set is further restricted to methods that
+    support that robot: Analytic-IK only for 7-DOF spherical-wrist arms, cuRobo
+    only where it ships a robot config.
     """
     labels: list[str] = []
     for m in _CORE_METHODS:
         if not no_jax:
             labels.append(f"{m}-JAX")
-        if not cpu_only:
-            labels.append(f"{m}-CUDA")
+        labels.append(f"{m}-CUDA")
+    labels += [f"{m}-CUDA-Traced" for m in _CORE_METHODS]
+    _analytic_ok = robot_name is None or robot_name in _ANALYTIC_ROBOTS
+    if not no_jax and _analytic_ok:
+        labels.append("Analytic-JAX")
+    if _analytic_ok:
+        labels.append("Analytic-CUDA")
     if not no_jax:
-        labels += ["Learned-JAX", "PyRoKi"]
-    labels.append("QuIK-CPU")
+        labels += ["Learned-JAX", "PyRoKi-LS", "PyRoKi-AnalyticJac"]
+    if robot_name is not None and robot_name in _CUROBO_ROBOT_FILES:
+        labels.append("cuRobo")
     return labels
 
 
@@ -256,7 +279,7 @@ ROBOT_SRDFS = {
     "panda": RESOURCE_ROOT / "panda" / "panda.srdf",
     "fetch": RESOURCE_ROOT / "fetch" / "fetch.srdf",
     "baxter": RESOURCE_ROOT / "baxter" / "baxter.srdf",
-    "g1": RESOURCE_ROOT / "g1_description" / "g1_29dof.srdf",
+    "g1": RESOURCE_ROOT / "g1_description" / "g1_29dof_with_hand.srdf",
 }
 
 # Candidate EE links per robot. The first existing link in the loaded URDF is used.
@@ -275,7 +298,7 @@ ROBOT_FIXED_JOINT_NAMES = {
     "g1": (),
 }
 
-N_TARGETS = 10    # number of random target poses to evaluate
+N_TARGETS = 32    # number of random target poses to evaluate
 N_TARGETS_BATCH = 256
 N_WARMUP  = 3      # JIT / kernel warm-up calls (discarded from timing)
 N_TIMED   = 5      # timed repetitions (sequential: per pose; batch: per full call)
@@ -323,13 +346,17 @@ IK_KWARGS_SQP_CUDA = dict(
     eps_pos = 1e-8,
     eps_ori = 1e-8,
 )
+# Same solver, compiled against cricket-traced kinematics for the robot's EE.
+IK_KWARGS_SQP_CUDA_TRACED = dict(**IK_KWARGS_SQP_CUDA, traced=True)
+IK_KWARGS_LS_CUDA_TRACED = dict(**IK_KWARGS_LS_CUDA, traced=True)
+IK_KWARGS_HJCD_CUDA_TRACED = dict(**IK_KWARGS_HJCD_CUDA, traced=True)
 
 # MPPI-IK hyper-parameters.
 IK_KWARGS_MPPI_JAX = dict(
     num_seeds         = 32,
     n_particles       = 16,
     n_mppi_iters      = 5,
-    n_lbfgs_iters     = 30,
+    n_lbfgs_iters     = 25,   # == CUDA backend (fairness: identical refinement budget)
     m_lbfgs           = 5,
     pos_weight        = 50.0,
     ori_weight        = 10.0,
@@ -351,6 +378,7 @@ IK_KWARGS_MPPI_CUDA = dict(
     eps_ori           = 1e-8,
     continuity_weight = 0.0,
 )
+IK_KWARGS_MPPI_CUDA_TRACED = dict(**IK_KWARGS_MPPI_CUDA, traced=True)
 
 # Learned-IK hyper-parameters.
 # num_seeds:      half come from the MLP prediction ± noise; half are random.
@@ -373,9 +401,18 @@ IK_KWARGS_PYROKI = dict(
     max_iter     = 100,
 )
 
-# Success threshold.
-POS_THR_M   = 1e-3
-ROT_THR_RAD = 0.05
+# Analytic (closed-form) IK: the 7-DOF branch solve is deterministic, so the only
+# tuning knob is the q7 sample grid (JAX) / seed budget (CUDA); both use 32 to
+# match every other method's num_seeds.
+IK_KWARGS_ANALYTIC_JAX = dict(
+    num_q7 = 32,
+)
+IK_KWARGS_ANALYTIC_CUDA = dict(
+    num_seeds = 32,
+)
+
+# Success thresholds (POS_THR_M, ROT_THR_RAD) live in bench_ik_utils, shared
+# with the cuRobo child's scoring.
 
 # ---------------------------------------------------------------------------
 # Collision-free IK configuration
@@ -438,7 +475,6 @@ def _pose_errors(
         (target_pose.rotation().inverse() @ actual.rotation()).log()
     ))
     return pos_err, rot_err
-
 
 
 def _run_solver_sequential(
@@ -559,120 +595,8 @@ def _run_solver_batch(
 # ---------------------------------------------------------------------------
 # Summary helpers
 # ---------------------------------------------------------------------------
-
-_COL_W = 20  # method name column width
-_NUM_W = 10  # numeric column width
-
-def _table_header(cols: list[str]) -> str:
-    row = f"  {'Method':<{_COL_W}}"
-    for c in cols:
-        row += f"  {c:>{_NUM_W}}"
-    return row
-
-def _table_sep(n_cols: int) -> str:
-    return "  " + "-" * (_COL_W + n_cols * (_NUM_W + 2))
-
-def _table_row(label: str, vals: list[str]) -> str:
-    row = f"  {label:<{_COL_W}}"
-    for v in vals:
-        row += f"  {v:>{_NUM_W}}"
-    return row
-
-
-def _seq_row(label: str, results: list[SolveResult]) -> tuple[str, dict]:
-    pos    = np.array([r.pos_err * 1e3 for r in results])
-    rot    = np.array([r.rot_err       for r in results])
-    t      = np.array([r.time_ms       for r in results])
-    solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
-    n      = len(results)
-    vals = [
-        f"{np.median(t):.3f}",
-        f"{np.percentile(t, 95):.3f}",
-        f"{np.median(pos):.4f}",
-        f"{np.percentile(pos, 95):.4f}",
-        f"{np.median(rot):.4f}",
-        f"{np.percentile(rot, 95):.4f}",
-        f"{solved}/{n}",
-    ]
-    return _table_row(label, vals), {"t_med": float(np.median(t))}
-
-
-def _seq_row_coll(
-    label: str, results: list[SolveResult], coll_free: int,
-) -> tuple[str, dict]:
-    """Like _seq_row but with an extra coll_free column."""
-    pos    = np.array([r.pos_err * 1e3 for r in results])
-    rot    = np.array([r.rot_err       for r in results])
-    t      = np.array([r.time_ms       for r in results])
-    solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
-    n      = len(results)
-    vals = [
-        f"{np.median(t):.3f}",
-        f"{np.percentile(t, 95):.3f}",
-        f"{np.median(pos):.4f}",
-        f"{np.percentile(pos, 95):.4f}",
-        f"{np.median(rot):.4f}",
-        f"{np.percentile(rot, 95):.4f}",
-        f"{solved}/{n}",
-        f"{coll_free}/{n}",
-    ]
-    return _table_row(label, vals), {"t_med": float(np.median(t))}
-
-
-def _batch_row(label: str, result: BatchResult) -> tuple[str, dict]:
-    pos    = result.pos_errs * 1e3
-    rot    = result.rot_errs
-    solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
-    n      = len(pos)
-
-    def _fmt_pct(v: float) -> str:
-        return f"{v:.0f}%" if not np.isnan(v) else "n/a"
-
-    def _fmt_mb(v: float) -> str:
-        return f"{v:.0f}" if not np.isnan(v) else "n/a"
-
-    vals = [
-        f"{result.time_ms:.3f}",
-        f"{np.median(pos):.4f}",
-        f"{np.percentile(pos, 95):.4f}",
-        f"{np.median(rot):.4f}",
-        f"{np.percentile(rot, 95):.4f}",
-        f"{solved}/{n}",
-        _fmt_pct(result.peak_gpu_util),
-        _fmt_pct(result.avg_gpu_util),
-        _fmt_mb(result.peak_vram_mb),
-    ]
-    return _table_row(label, vals), {}
-
-
-def _batch_row_coll(
-    label: str, result: BatchResult, coll_free: int,
-) -> tuple[str, dict]:
-    """Like _batch_row but with an extra coll_free column."""
-    pos    = result.pos_errs * 1e3
-    rot    = result.rot_errs
-    solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
-    n      = len(pos)
-
-    def _fmt_pct(v: float) -> str:
-        return f"{v:.0f}%" if not np.isnan(v) else "n/a"
-
-    def _fmt_mb(v: float) -> str:
-        return f"{v:.0f}" if not np.isnan(v) else "n/a"
-
-    vals = [
-        f"{result.time_ms:.3f}",
-        f"{np.median(pos):.4f}",
-        f"{np.percentile(pos, 95):.4f}",
-        f"{np.median(rot):.4f}",
-        f"{np.percentile(rot, 95):.4f}",
-        f"{solved}/{n}",
-        f"{coll_free}/{n}",
-        _fmt_pct(result.peak_gpu_util),
-        _fmt_pct(result.avg_gpu_util),
-        _fmt_mb(result.peak_vram_mb),
-    ]
-    return _table_row(label, vals), {}
+# _table_header/_table_sep/_table_row and _seq_row/_seq_row_coll/_batch_row/
+# _batch_row_coll live in bench_ik_utils (pure numpy, no jax dependency).
 
 
 def _make_batched_jax_solver(base_fn, ik_kwargs):
@@ -777,10 +701,10 @@ def _build_batch_ik_timer(fn, robot, tli, fixed_joint_mask, kwargs, is_jax_batch
     return _timer
 
 
-def _time_scan(timer_fn, *args, n: int = N_TIMED) -> float:
+def _time_scan(timer_fn, *args, n: int | None = None) -> float:
     """Run a scan-based timer *n* times and return median per-repeat wall-clock time (s)."""
     times = []
-    for _ in range(n):
+    for _ in range(N_TIMED if n is None else n):
         t0 = time.perf_counter()
         out = timer_fn(*args)
         jax.block_until_ready(out)
@@ -801,6 +725,90 @@ def _make_batched_rng_keys_seq(base_rng_keys: jax.Array) -> jax.Array:
 
 
 # ---------------------------------------------------------------------------
+# Analytic (closed-form) IK adapters
+# ---------------------------------------------------------------------------
+# The closed-form solve covers only the 7-DOF arm chain (the FIRST 7 actuated
+# joints of every robot in this benchmark).  Joints past the chain (gripper
+# fingers) keep their previous value, and fixed-joint-masked joints are pinned
+# to their previous value — exactly what the other solvers do through
+# fixed_joint_mask.
+
+def _embed_7dof(q7, prev, fixed_joint_mask):
+    """Embed a 7-DOF closed-form solution into the full actuated space."""
+    if q7.shape[-1] != prev.shape[-1]:
+        full = jnp.concatenate([q7, prev[..., 7:]], axis=-1)
+    else:
+        full = q7
+    return jnp.where(fixed_joint_mask == 1, prev, full)
+
+
+def _make_analytic_seq_fn(geometry, target_link_name):
+    """Map the bench's generic seq convention onto analytic_ik_solve (JAX).
+
+    The solve is deterministic, so rng_key is accepted and ignored.
+    """
+    def fn(robot, target_link_indices, target_poses, rng_key, previous_cfg,
+           fixed_joint_mask=None, **kwargs):
+        tp = target_poses[0] if isinstance(target_poses, (tuple, list)) else target_poses
+        q7, _found = analytic_ik_solve(
+            robot, target_link_name, tp,
+            num_q7=int(kwargs.get("num_q7", 32)),
+            previous_cfg=previous_cfg,      # sliced [:7] internally
+            geometry=geometry,
+        )
+        return _embed_7dof(q7, previous_cfg, fixed_joint_mask)
+    return fn
+
+
+def _make_analytic_jax_batch_fn(geometry, target_link_name):
+    """Map the bench's generic JAX batch convention onto analytic_ik_solve_batched.
+
+    ``rng_keys`` is accepted and ignored (deterministic solve); the batched JAX
+    path takes target POSE MATRICES, hence ``.as_matrix()``.
+    """
+    def fn(robot, tli, target_poses, rng_keys, previous_cfgs,
+           fixed_joint_mask=None, **kwargs):
+        q7, _found = analytic_ik_solve_batched(
+            robot, target_link_name, target_poses.as_matrix(),
+            num_q7=int(kwargs.get("num_q7", 32)),
+            previous_cfg=previous_cfgs,     # sliced :7 internally
+            geometry=geometry,
+            backend="jax",                  # force JAX for the Analytic-JAX row
+        )
+        return _embed_7dof(q7, previous_cfgs, fixed_joint_mask)
+    return fn
+
+
+def _make_analytic_cuda_seq_fn():
+    """Generic seq convention onto analytic_ik_solve_cuda (CUDA FFI, x64)."""
+    def fn(robot, tli, target_poses, rng_key, previous_cfg,
+           fixed_joint_mask=None, **kwargs):
+        tp = target_poses[0] if isinstance(target_poses, (tuple, list)) else target_poses
+        # The FFI kernel reshapes previous_cfg to (1, 7): exactly 7 columns.
+        prev7 = None if previous_cfg is None else jnp.asarray(previous_cfg)[:7]
+        q7 = analytic_ik_solve_cuda(
+            robot, tli, tp, rng_key,
+            previous_cfg=prev7,
+            num_seeds=int(kwargs.get("num_seeds", 32)),
+        )
+        return _embed_7dof(q7, previous_cfg, fixed_joint_mask)
+    return fn
+
+
+def _make_analytic_cuda_batch_fn():
+    """Generic CUDA batch convention onto analytic_ik_solve_cuda_batch."""
+    def fn(robot, tli, target_poses, rng_key, previous_cfgs,
+           fixed_joint_mask=None, **kwargs):
+        q7 = analytic_ik_solve_cuda_batch(
+            robot, tli, target_poses, rng_key,
+            previous_cfgs=jnp.asarray(previous_cfgs)[:, :7],  # FFI: 7 cols
+            num_seeds=int(kwargs.get("num_seeds", 32)),
+        )
+        return _embed_7dof(q7, previous_cfgs, fixed_joint_mask)
+    return fn
+
+
+# ---------------------------------------------------------------------------
 # PyRoKi helpers
 # ---------------------------------------------------------------------------
 
@@ -811,13 +819,20 @@ def _make_pyroki_solvers(
     *,
     collision_cost_fn=None,
     collision_weight: float = 0.0,
+    pose_cost_factory=None,
 ):
     """Build JIT'd single-problem and batch PyRoKi IK solvers.
+
+    ``pose_cost_factory`` selects the pose-cost factory: pyroki's autodiff
+    ``pose_cost`` (default, "PyRoKi-LS") or ``pose_cost_analytic_jac``
+    ("PyRoKi-AnalyticJac" — analytic task-space Jacobian, same LM solver).
 
     Returns:
         solve_fn(target_wxyz_xyz, seed_cfgs) -> cfg  (single target)
         batch_fn(target_wxyz_xyz_batch, seed_cfgs_batch) -> cfgs  (N targets)
     """
+    if pose_cost_factory is None:
+        pose_cost_factory = _pyroki.costs.pose_cost
     joint_var = pyroki_robot.joint_var_cls(0)
     tli_arr   = jnp.array(target_link_index, dtype=jnp.int32)
     pos_w     = float(kwargs.get("pos_weight", 50.0))
@@ -850,7 +865,7 @@ def _make_pyroki_solvers(
 
         def _one_seed(seed_cfg):
             costs = [
-                _pyroki.costs.pose_cost(pyroki_robot, joint_var, target, tli_arr, pos_w, ori_w),
+                pose_cost_factory(pyroki_robot, joint_var, target, tli_arr, pos_w, ori_w),
                 _pyroki.costs.limit_cost(pyroki_robot, joint_var),
             ]
             if _coll_cost_factory is not None:
@@ -979,166 +994,6 @@ def _run_pyroki_batch(
                        peak_gpu_util=peak_gpu, avg_gpu_util=avg_gpu, peak_vram_mb=peak_vram)
 
 
-def _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker):
-    """Shared seed-generation / solution-selection for the QuIK bench runners.
-
-    Returns ``(make_seeds, pick_best)``:
-
-    ``make_seeds(rng, n_batch)`` draws ``[n_batch, num_seeds, dof]`` chain-space
-    seeds; when ``vamp_checker`` is given they are first pushed onto the
-    collision-free manifold with the MPPI projection kernel
-    (:meth:`VAMPCPUCollisionChecker.project_collision_free`), scattered through
-    the robot's full actuated vector (non-chain joints at the limit midpoint).
-
-    ``pick_best(q_actuated, err)`` selects the lowest-error solution per
-    problem; with a checker, the lowest-error *collision-free* solution
-    (falling back to lowest error when none is free).
-    """
-    order = quik.model.actuated_order
-    lo_c = np.where(np.isfinite(lo[order]), lo[order], -np.pi)
-    hi_c = np.where(np.isfinite(hi[order]), hi[order], np.pi)
-    n_act = lo.shape[0]
-    mid = np.where(np.isfinite(lo) & np.isfinite(hi), (lo + hi) / 2.0, 0.0)
-    lo_f = np.where(np.isfinite(lo), lo, -np.pi).astype(np.float32)
-    hi_f = np.where(np.isfinite(hi), hi, np.pi).astype(np.float32)
-
-    def make_seeds(rng, n_batch: int) -> np.ndarray:
-        seeds = rng.uniform(
-            lo_c, hi_c, (n_batch, num_seeds, quik.dof)
-        ).astype(np.float32)
-        if vamp_checker is None:
-            return seeds
-        q_full = np.broadcast_to(
-            mid.astype(np.float32), (n_batch, num_seeds, n_act)
-        ).copy()
-        q_full[..., order] = seeds
-        qp, _ok = vamp_checker.project_collision_free(
-            None, q_full.reshape(-1, n_act),
-            lower=lo_f, upper=hi_f, seed=int(rng.integers(2**31)),
-        )
-        return np.asarray(qp).reshape(n_batch, num_seeds, n_act)[..., order]
-
-    def pick_best(q_actuated: np.ndarray, err: np.ndarray) -> np.ndarray:
-        # q_actuated: [n_batch, num_seeds, n_act]; err: [n_batch, num_seeds]
-        if vamp_checker is not None:
-            free = np.asarray(
-                vamp_checker.check_collision_free(
-                    None, q_actuated.reshape(-1, q_actuated.shape[-1])
-                )
-            ).reshape(err.shape)
-            err = np.where(free, err, err + 1e6)  # free solutions always win
-        best = np.argmin(err, axis=1)
-        return q_actuated[np.arange(err.shape[0]), best]
-
-    return make_seeds, pick_best
-
-
-def _run_quik_sequential(
-    quik: "QuIKSolver",
-    robot: "pk.Robot",
-    target_link_index: int,
-    target_poses: list,
-    lo: np.ndarray,
-    hi: np.ndarray,
-    num_seeds: int,
-    algorithm: int = 0,
-    vamp_checker=None,
-) -> list[SolveResult]:
-    """Run the QuIK CPU solver sequentially, timing with plain wall-clock.
-
-    QuIK is a CPU C++ FFI kernel, so (like PyRoKi) it is timed with wall-clock
-    rather than the JAX ``lax.scan`` device timer.  Seeds are drawn in the
-    chain-joint subspace; the returned config is scattered back into the robot's
-    full actuated-joint vector for a like-for-like FK error evaluation.
-
-    With ``vamp_checker`` the run is collision-aware: seeds are MPPI-projected
-    onto the collision-free manifold before solving, and the best
-    collision-free solution is preferred (both inside the timed region).
-    """
-    make_seeds, pick_best = _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker)
-
-    def one(pose_mat, rng) -> jax.Array:
-        seeds = make_seeds(rng, 1)[0]
-        poses = jnp.broadcast_to(jnp.asarray(pose_mat, jnp.float32), (num_seeds, 4, 4))
-        out = quik.solve_to_actuated(poses, jnp.asarray(seeds), algorithm=algorithm)
-        q = np.asarray(out["q_actuated"])[None]
-        err = np.asarray(out["error"])[None]
-        return jnp.asarray(pick_best(q, err)[0])
-
-    results: list[SolveResult] = []
-    for i, target_pose in enumerate(target_poses):
-        pose_mat = np.asarray(target_pose.as_matrix())
-        rng = np.random.default_rng(i + 1)
-        cfg = one(pose_mat, rng)
-        jax.block_until_ready(cfg)
-        pos_err, rot_err = _pose_errors(robot, cfg, target_link_index, target_pose)
-        times = []
-        for j in range(N_TIMED):
-            rng_j = np.random.default_rng(1000 * (i + 1) + j)
-            t0 = time.perf_counter()
-            out = one(pose_mat, rng_j)
-            jax.block_until_ready(out)
-            times.append(time.perf_counter() - t0)
-        results.append(SolveResult(np.array(cfg), pos_err, rot_err, float(np.median(times)) * 1e3))
-    return results
-
-
-def _run_quik_batch(
-    quik: "QuIKSolver",
-    robot: "pk.Robot",
-    target_link_index: int,
-    target_poses_stacked: jaxlie.SE3,
-    lo: np.ndarray,
-    hi: np.ndarray,
-    num_seeds: int,
-    algorithm: int = 0,
-    vamp_checker=None,
-) -> BatchResult:
-    """Run the QuIK CPU solver over all targets in one fused FFI call (wall-clock).
-
-    With ``vamp_checker`` the run is collision-aware (see
-    :func:`_run_quik_sequential`).
-    """
-    make_seeds, pick_best = _quik_seed_helpers(quik, lo, hi, num_seeds, vamp_checker)
-    n_targets = len(target_poses_stacked.wxyz_xyz)
-    Ts = np.stack([
-        np.asarray(jaxlie.SE3(target_poses_stacked.wxyz_xyz[i]).as_matrix())
-        for i in range(n_targets)
-    ]).astype(np.float32)
-
-    def one(rng) -> np.ndarray:
-        seeds = make_seeds(rng, n_targets)
-        poses = np.repeat(Ts[:, None], num_seeds, axis=1)  # (n_targets, num_seeds, 4, 4)
-        out = quik.solve_to_actuated(
-            jnp.asarray(poses.reshape(-1, 4, 4)),
-            jnp.asarray(seeds.reshape(-1, quik.dof)),
-            algorithm=algorithm,
-        )
-        q = np.asarray(out["q_actuated"]).reshape(n_targets, num_seeds, -1)
-        err = np.asarray(out["error"]).reshape(n_targets, num_seeds)
-        return pick_best(q, err)
-
-    cfgs_np = one(np.random.default_rng(0))
-    pos_errs = np.empty(n_targets)
-    rot_errs = np.empty(n_targets)
-    for i in range(n_targets):
-        tp = jaxlie.SE3(target_poses_stacked.wxyz_xyz[i])
-        pos_errs[i], rot_errs[i] = _pose_errors(
-            robot, jnp.array(cfgs_np[i]), target_link_index, tp
-        )
-
-    times = []
-    for j in range(N_TIMED):
-        rng_j = np.random.default_rng(j + 1)
-        t0 = time.perf_counter()
-        out = one(rng_j)
-        jax.block_until_ready(jnp.asarray(out))
-        times.append(time.perf_counter() - t0)
-
-    effective_ms = float(np.median(times)) * 1e3 / n_targets
-    return BatchResult(cfgs_np, pos_errs, rot_errs, effective_ms)
-
-
 # ---------------------------------------------------------------------------
 # Collision environment helpers
 # ---------------------------------------------------------------------------
@@ -1261,6 +1116,99 @@ def _default_env_file() -> pathlib.Path:
     return ENV_FILE
 
 
+def robot_env_path(robot_name: str) -> pathlib.Path:
+    """Per-robot obstacle scene path (see _build_robot_env_dict).
+
+    Public (no leading underscore): bench_ik_utils's cuRobo child derives the
+    SAME path independently from robot_name, so this naming convention is a
+    contract between the two files, not a private implementation detail.
+    """
+    return RESOURCE_ROOT / f"bench_env_large_{robot_name}.json"
+
+
+def _immovable_link_names(robot: pk.Robot) -> set[str]:
+    """Links whose pose does NOT depend on any actuated joint (rigid base/torso/
+    pedestal). FK at two different configs and keep the links that didn't move.
+    """
+    n_act = robot.joints.num_actuated_joints
+    lo = np.array(robot.joints.lower_limits)
+    hi = np.array(robot.joints.upper_limits)
+    T_lo = np.asarray(robot.forward_kinematics(jnp.array(lo, dtype=jnp.float32)))
+    T_hi = np.asarray(robot.forward_kinematics(jnp.array(hi, dtype=jnp.float32)))
+    names = robot.links.names
+    diff = np.abs(T_lo - T_hi).reshape(len(names), -1).max(axis=-1)
+    return {names[i] for i in range(len(names)) if diff[i] < 1e-6}
+
+
+def _build_robot_env_dict(robot_name: str, robot: pk.Robot,
+                          robot_coll: RobotCollisionSpherized) -> dict:
+    """Filter the shared obstacle catalogue (ENV_FILE) down to obstacles that
+    don't permanently intersect this robot's FIXED links.
+
+    A rigid base/torso/pedestal isn't reachable by any IK joint, so an obstacle
+    embedded in it makes the "collision-free" objective unsatisfiable for every
+    solver and backend regardless of algorithm — poisoning the collision
+    penalty's gradient/merit contribution with an unwinnable, heavily-weighted
+    term. MEASURED: this is exactly what happened for baxter (base/torso
+    penetrating 4 of the 9 shared obstacles by up to -0.15 m at any config),
+    degrading collision-free pos error from ~1mm (panda) to 300-1600mm across
+    every JAX and CUDA solver alike.
+
+    Result is cached to robot_env_path(robot_name); cuboids currently in the
+    shared catalogue are 0, so only spheres are filtered (cuboid filtering can
+    be added the same way if the catalogue ever grows one).
+    """
+    base_env = json.loads(ENV_FILE.read_text())
+    immovable = _immovable_link_names(robot)
+    if not immovable:
+        return base_env
+
+    n_act = robot.joints.num_actuated_joints
+    coll_geom = robot_coll.at_config(robot, jnp.zeros(n_act, dtype=jnp.float32))
+    centers = np.asarray(coll_geom.pose.translation())  # (n_sph_per_link, n_link, 3)
+    radii = np.asarray(coll_geom.radius)                # (n_sph_per_link, n_link)
+    link_names = robot.links.names
+
+    def _fixed_link_min_dist(center: np.ndarray, radius: float) -> float:
+        best = float("inf")
+        for li, name in enumerate(link_names):
+            if name not in immovable:
+                continue
+            for si in range(centers.shape[0]):
+                r = float(radii[si, li])
+                if r <= 0.0:
+                    continue
+                d = float(np.linalg.norm(centers[si, li] - center)) - r - radius
+                best = min(best, d)
+        return best
+
+    kept, dropped = [], []
+    for s in base_env.get("spheres", []):
+        d = _fixed_link_min_dist(np.array(s["center"], dtype=np.float64), s["radius"])
+        (kept if d > 0.0 else dropped).append(s)
+    if dropped:
+        print(f"  {robot_name}: dropped {len(dropped)} obstacle(s) permanently "
+              f"intersecting a fixed link: {[s['name'] for s in dropped]}")
+
+    env = dict(base_env)
+    env["spheres"] = kept
+    env["description"] = (
+        f"Static collision benchmark environment for {robot_name}, filtered "
+        f"from {ENV_FILE.name} to drop obstacles inside fixed (non-actuated) "
+        f"links."
+    )
+    if "curobo_world_model" in env:
+        kept_names = {s["name"] for s in kept}
+        cwm = dict(env["curobo_world_model"])
+        cwm["sphere"] = {k: v for k, v in cwm.get("sphere", {}).items() if k in kept_names}
+        env["curobo_world_model"] = cwm
+
+    path = robot_env_path(robot_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(env, indent=2))
+    return env
+
+
 def _default_srdf_for_robot(robot_name: str) -> pathlib.Path | None:
     """Resolve SRDF path for a robot, preferring explicit mapping then folder scan."""
     mapped = ROBOT_SRDFS.get(robot_name)
@@ -1303,158 +1251,7 @@ def _disabled_pairs_from_srdf(srdf_path: pathlib.Path | None) -> tuple[tuple[str
 # ---------------------------------------------------------------------------
 # CSV output
 # ---------------------------------------------------------------------------
-
-_CSV_FIELDS = [
-    "timestamp", "robot", "mode", "solver", "collision_free",
-    "n_problems", "n_timed",
-    "t_med_ms", "t_p95_ms",
-    "pos_med_mm", "pos_p95_mm",
-    "rot_med_rad", "rot_p95_rad",
-    "success_n", "success_total",
-    "coll_free_n",
-    "peak_gpu_pct", "avg_gpu_pct", "peak_vram_mb",
-]
-
-
-def _write_csv(
-    path: pathlib.Path,
-    timestamp: str,
-    robot_name: str,
-    seq_results: dict[str, list[SolveResult]],
-    batch_results: dict[str, BatchResult],
-    seq_coll_results: dict[str, list[SolveResult]],
-    batch_coll_results: dict[str, BatchResult],
-    seq_coll_free: dict[str, int],
-    batch_coll_free: dict[str, int],
-) -> None:
-    """Append all benchmark results to *path* as CSV rows."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not path.exists()
-
-    rows: list[dict] = []
-
-    # -- Sequential (no collision) ------------------------------------------
-    for solver, results in seq_results.items():
-        pos = np.array([r.pos_err * 1e3 for r in results])
-        rot = np.array([r.rot_err       for r in results])
-        t   = np.array([r.time_ms       for r in results])
-        solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
-        rows.append({
-            "timestamp":      timestamp,
-            "robot":          robot_name,
-            "mode":           "sequential",
-            "solver":         solver,
-            "collision_free": False,
-            "n_problems":     len(results),
-            "n_timed":        N_TIMED,
-            "t_med_ms":       round(float(np.median(t)),        6),
-            "t_p95_ms":       round(float(np.percentile(t, 95)), 6),
-            "pos_med_mm":     round(float(np.median(pos)),       6),
-            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
-            "rot_med_rad":    round(float(np.median(rot)),       6),
-            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
-            "success_n":      solved,
-            "success_total":  len(results),
-            "coll_free_n":    "",
-            "peak_gpu_pct":   "",
-            "avg_gpu_pct":    "",
-            "peak_vram_mb":   "",
-        })
-
-    # -- Batch (no collision) ------------------------------------------------
-    for solver, result in batch_results.items():
-        pos    = result.pos_errs * 1e3
-        rot    = result.rot_errs
-        solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
-
-        def _fmtf(v): return round(float(v), 6) if not np.isnan(v) else ""
-
-        rows.append({
-            "timestamp":      timestamp,
-            "robot":          robot_name,
-            "mode":           "batch",
-            "solver":         solver,
-            "collision_free": False,
-            "n_problems":     len(pos),
-            "n_timed":        N_TIMED,
-            "t_med_ms":       round(result.time_ms, 6),
-            "t_p95_ms":       "",
-            "pos_med_mm":     round(float(np.median(pos)),        6),
-            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
-            "rot_med_rad":    round(float(np.median(rot)),         6),
-            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
-            "success_n":      solved,
-            "success_total":  len(pos),
-            "coll_free_n":    "",
-            "peak_gpu_pct":   _fmtf(result.peak_gpu_util),
-            "avg_gpu_pct":    _fmtf(result.avg_gpu_util),
-            "peak_vram_mb":   _fmtf(result.peak_vram_mb),
-        })
-
-    # -- Sequential (collision-free) -----------------------------------------
-    for solver, results in seq_coll_results.items():
-        pos = np.array([r.pos_err * 1e3 for r in results])
-        rot = np.array([r.rot_err       for r in results])
-        t   = np.array([r.time_ms       for r in results])
-        solved = sum(r.pos_err < POS_THR_M and r.rot_err < ROT_THR_RAD for r in results)
-        rows.append({
-            "timestamp":      timestamp,
-            "robot":          robot_name,
-            "mode":           "sequential",
-            "solver":         solver,
-            "collision_free": True,
-            "n_problems":     len(results),
-            "n_timed":        N_TIMED,
-            "t_med_ms":       round(float(np.median(t)),          6),
-            "t_p95_ms":       round(float(np.percentile(t, 95)),  6),
-            "pos_med_mm":     round(float(np.median(pos)),         6),
-            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
-            "rot_med_rad":    round(float(np.median(rot)),         6),
-            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
-            "success_n":      solved,
-            "success_total":  len(results),
-            "coll_free_n":    seq_coll_free.get(solver, ""),
-            "peak_gpu_pct":   "",
-            "avg_gpu_pct":    "",
-            "peak_vram_mb":   "",
-        })
-
-    # -- Batch (collision-free) ----------------------------------------------
-    for solver, result in batch_coll_results.items():
-        pos    = result.pos_errs * 1e3
-        rot    = result.rot_errs
-        solved = int(np.sum((result.pos_errs < POS_THR_M) & (result.rot_errs < ROT_THR_RAD)))
-
-        def _fmtf(v): return round(float(v), 6) if not np.isnan(v) else ""  # noqa: F811
-
-        rows.append({
-            "timestamp":      timestamp,
-            "robot":          robot_name,
-            "mode":           "batch",
-            "solver":         solver,
-            "collision_free": True,
-            "n_problems":     len(pos),
-            "n_timed":        N_TIMED,
-            "t_med_ms":       round(result.time_ms, 6),
-            "t_p95_ms":       "",
-            "pos_med_mm":     round(float(np.median(pos)),         6),
-            "pos_p95_mm":     round(float(np.percentile(pos, 95)), 6),
-            "rot_med_rad":    round(float(np.median(rot)),         6),
-            "rot_p95_rad":    round(float(np.percentile(rot, 95)), 6),
-            "success_n":      solved,
-            "success_total":  len(pos),
-            "coll_free_n":    batch_coll_free.get(solver, ""),
-            "peak_gpu_pct":   _fmtf(result.peak_gpu_util),
-            "avg_gpu_pct":    _fmtf(result.avg_gpu_util),
-            "peak_vram_mb":   _fmtf(result.peak_vram_mb),
-        })
-
-    with path.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
-        if write_header:
-            writer.writeheader()
-        writer.writerows(rows)
-
+# _CSV_FIELDS / _write_csv live in bench_ik_utils.
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1476,6 +1273,7 @@ def _run_robot_benchmark(
     robot_name: str,
     csv_file: pathlib.Path | None,
     solver_filter: str | None = None,
+    blocks: set[str] | None = None,
 ) -> None:  # noqa: C901
     # When ``solver_filter`` is set (the per-solver subprocess path, see main()),
     # only that one base solver is set up, warmed up, timed and written. ``_want``
@@ -1486,25 +1284,25 @@ def _run_robot_benchmark(
             return True
         return name.replace("-COLL", "").replace("-BATCH", "") == solver_filter
 
+    # ``blocks`` (from --blocks) restricts which of the four evaluation phases run:
+    # {"seq","seq_coll","batch","batch_coll"}. None means all four.
+    def _block_wanted(block: str) -> bool:
+        return blocks is None or block in blocks
+
     print("=" * 80)
     _title_solver = solver_filter if solver_filter is not None else \
         "HJCD-IK, LS-IK, SQP-IK, and MPPI-IK"
     print(f"IK benchmark: {_title_solver}  (robot={robot_name}, "
           f"n_targets={N_TARGETS}, n_timed={N_TIMED})")
     gpu_mon_status = (
-        "disabled (--cpu-only)"
-        if _CPU_ONLY else
         "enabled (pynvml)"
         if _NVML_OK else
         "disabled (install nvidia-ml-py for GPU stats)"
     )
-    if _CPU_ONLY:
-        print("CPU-only mode: running only CPU-native solvers (QuIK); "
-              "skipping all CUDA and JAX solvers; JAX_PLATFORMS=cpu")
-    elif _NO_JAX:
+    if _NO_JAX:
         print("No-JAX mode: skipping all JAX-based solvers "
               "(HJCD/LS/SQP/MPPI-JAX, Learned-JAX, PyRoKi); "
-              "CUDA/FFI kernel solvers and QuIK still run")
+              "CUDA/FFI kernel solvers still run")
     print(f"GPU monitoring: {gpu_mon_status}")
     print("=" * 80)
 
@@ -1539,64 +1337,55 @@ def _run_robot_benchmark(
     mid_cfg = jnp.array((lo + hi) / 2, dtype=jnp.float32)
 
     # ------------------------------------------------------------------
-    # PyRoKi setup (optional)
+    # PyRoKi setup (optional): two variants sharing one pyroki robot
+    #   PyRoKi-LS          — autodiff pose residual (pyroki.costs.pose_cost)
+    #   PyRoKi-AnalyticJac — analytic task-space Jacobian
+    #                        (pyroki.costs.pose_cost_analytic_jac), same LM solver
     # ------------------------------------------------------------------
-    _pyroki_solve_fn      = None
-    _pyroki_batch_fn      = None
-    _pyroki_coll_solve_fn = None
-    _pyroki_coll_batch_fn = None
+    _pyroki_ls       = None   # (solve_fn, batch_fn)
+    _pyroki_analytic = None   # (solve_fn, batch_fn)
+    _pyroki_ls_coll       = None
+    _pyroki_analytic_coll = None
 
-    if not _want("PyRoKi"):
+    if not (_want("PyRoKi-LS") or _want("PyRoKi-AnalyticJac")):
         pass  # not the selected solver; skip PyRoKi setup entirely
     elif _NO_JAX:
-        print("\nPyRoKi disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
+        print("\nPyRoKi disabled (--no-jax: JAX-based solvers are skipped).")
     elif _PYROKI_AVAILABLE:
-        print("\nSetting up PyRoKi solver ...")
+        print("\nSetting up PyRoKi solvers (LS + AnalyticJac) ...")
         _pyroki_robot = _pyroki.Robot.from_urdf(urdf)
-        _pyroki_solve_fn, _pyroki_batch_fn = _make_pyroki_solvers(
-            _pyroki_robot, target_link_index, IK_KWARGS_PYROKI
-        )
-        # Warm up (triggers JIT compilation).
+        # Warm-up inputs shared by both variants.
         _num_seeds = IK_KWARGS_PYROKI["num_seeds"]
         _lo_j = jnp.array(lo, dtype=jnp.float32)
         _hi_j = jnp.array(hi, dtype=jnp.float32)
-        _key0 = jax.random.PRNGKey(0)
-        _seeds0 = jax.random.uniform(_key0, (_num_seeds, n_act), minval=_lo_j, maxval=_hi_j)
-        # We need a placeholder target to warm up; it will be replaced in actual runs.
+        _seeds0 = jax.random.uniform(
+            jax.random.PRNGKey(0), (_num_seeds, n_act), minval=_lo_j, maxval=_hi_j,
+        )
+        # Placeholder target to warm up; it will be replaced in actual runs.
         _mid_wxyz_xyz = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5], dtype=jnp.float32)
-        print("  Warming up PyRoKi (JIT compile) ...")
-        for _ in range(N_WARMUP):
-            _w = _pyroki_solve_fn(_mid_wxyz_xyz, _seeds0)
-            jax.block_until_ready(_w)
-        print("  PyRoKi ready.")
+
+        def _build_pyroki_variant(label, pose_cost_factory):
+            """Build and warm up one PyRoKi variant; None if not selected."""
+            if not _want(label):
+                return None
+            solve_fn, batch_fn = _make_pyroki_solvers(
+                _pyroki_robot, target_link_index, IK_KWARGS_PYROKI,
+                pose_cost_factory=pose_cost_factory,
+            )
+            if _block_wanted("seq") or _block_wanted("seq_coll"):
+                print(f"  Warming up {label} (JIT compile) ...")
+                for _ in range(N_WARMUP):
+                    _w = solve_fn(_mid_wxyz_xyz, _seeds0)
+                    jax.block_until_ready(_w)
+                print(f"  {label} ready.")
+            return solve_fn, batch_fn
+
+        _pyroki_ls = _build_pyroki_variant("PyRoKi-LS", _pyroki.costs.pose_cost)
+        _pyroki_analytic = _build_pyroki_variant(
+            "PyRoKi-AnalyticJac", _pyroki.costs.pose_cost_analytic_jac,
+        )
     elif not _PYROKI_AVAILABLE:
         print("\nPyRoKi unavailable (pip install git+https://github.com/chungmin99/pyroki.git).")
-
-    # ------------------------------------------------------------------
-    # QuIK CPU solver setup (optional)
-    # ------------------------------------------------------------------
-    _quik_solver = None
-    _quik_num_seeds = 32
-    if _QUIK_IMPORT_OK and _want("QuIK-CPU"):
-        print("\nSetting up QuIK CPU solver (POE->DH + cricket JIT) ...")
-        try:
-            _quik_solver = QuIKSolver(robot, target_link_name)
-            # Warm up (compile the FFI kernel; DH already extracted/validated).
-            _order = _quik_solver.model.actuated_order
-            _lo_c = np.where(np.isfinite(lo[_order]), lo[_order], -np.pi)
-            _hi_c = np.where(np.isfinite(hi[_order]), hi[_order], np.pi)
-            _seeds0 = np.random.default_rng(0).uniform(
-                _lo_c, _hi_c, (_quik_num_seeds, _quik_solver.dof)
-            ).astype(np.float32)
-            _p0 = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (_quik_num_seeds, 4, 4))
-            for _ in range(N_WARMUP):
-                jax.block_until_ready(_quik_solver.solve(_p0, jnp.asarray(_seeds0))["q"])
-            print(f"  QuIK ready (dof={_quik_solver.dof}, CPU).")
-        except Exception as e:  # noqa: BLE001
-            print(f"  QuIK unavailable for {robot_name}: {type(e).__name__}: {str(e)[:90]}")
-            _quik_solver = None
-    elif _want("QuIK-CPU"):
-        print("\nQuIK unavailable (needs cricket JIT; build external/cricket).")
 
     # ------------------------------------------------------------------
     # Collision setup
@@ -1604,7 +1393,6 @@ def _run_robot_benchmark(
     robot_coll     = None
     _obs_geoms: list = []
     _collision_penalty = None
-    _quik_vamp_checker = None
     coll_kwargs_jax  = {}
     coll_kwargs_cuda = {}
     coll_kwargs_ls_cuda_kernel = {}
@@ -1618,15 +1406,21 @@ def _run_robot_benchmark(
             print(f"  Using SRDF disabled pairs: {srdf_path} ({len(ignore_pairs)} pairs)")
         else:
             print("  SRDF disabled pairs: none")
-        env_file = _default_env_file()
-        if not env_file.exists():
+        shared_env_file = _default_env_file()
+        if not shared_env_file.exists():
             raise FileNotFoundError(
-                f"Environment file not found: {env_file}. "
+                f"Environment file not found: {shared_env_file}. "
                 "Create it once (for example by running this benchmark for panda) "
                 "or point your workflow to an existing bench_env.json."
             )
-        env_dict = json.loads(env_file.read_text())
-        print(f"  Loaded environment from {env_file}")
+        # Filtered per-robot: the shared catalogue was tuned against panda's
+        # small origin-mounted footprint and can sit INSIDE a bigger robot's
+        # fixed base/torso, which no IK joint can ever move out of the way —
+        # see _build_robot_env_dict's docstring.
+        env_dict = _build_robot_env_dict(robot_name, robot, robot_coll)
+        env_file = robot_env_path(robot_name)
+        print(f"  Loaded environment from {shared_env_file}, filtered for "
+              f"{robot_name} -> {env_file}")
 
         _validate_env_dict(env_dict, env_file)
 
@@ -1681,46 +1475,28 @@ def _run_robot_benchmark(
         _check_coll_jit        = jax.jit(_min_coll_dist_single)
         _check_coll_batch_jit  = jax.jit(jax.vmap(_min_coll_dist_single))
 
-        # Collision-aware QuIK: VAMP CPU checker + MPPI seed projection.
-        if _quik_solver is not None and _VAMP_CPU_IMPORT_OK:
-            print("  Setting up collision-aware QuIK (VAMP MPPI seed projection) ...")
-            try:
-                _quik_vamp_checker = VAMPCPUCollisionChecker(
-                    ROBOT_URDFS[robot_name], srdf_path=srdf_path
-                )
-                if _quik_vamp_checker.dimension != n_act:
-                    raise RuntimeError(
-                        f"VAMP dimension {_quik_vamp_checker.dimension} != "
-                        f"robot actuated count {n_act}"
-                    )
-                _quik_vamp_checker.set_world_geoms(_obs_geoms)
-                # Warm up the projection + check kernels.
-                _warm = np.zeros((4, n_act), np.float32)
-                jax.block_until_ready(
-                    _quik_vamp_checker.project_collision_free(None, _warm)[0]
-                )
-                jax.block_until_ready(
-                    _quik_vamp_checker.check_collision_free(None, _warm)
-                )
-                print("  Collision-aware QuIK ready.")
-            except Exception as e:  # noqa: BLE001
-                print(f"  Collision-aware QuIK unavailable: "
-                      f"{type(e).__name__}: {str(e)[:90]}")
-                _quik_vamp_checker = None
-
-        if _pyroki_solve_fn is not None:
-            print("  Setting up collision-aware PyRoKi ...")
+        def _make_pyroki_coll_variant(variant, label):
+            """Collision-aware build of one PyRoKi variant; None if the base
+            variant is absent."""
+            if variant is None:
+                return None
+            print(f"  Setting up collision-aware {label} ...")
 
             def _pyroki_coll_cost(cfg):
                 return _collision_penalty(cfg, robot, _dummy)
 
-            _pyroki_coll_solve_fn, _pyroki_coll_batch_fn = _make_pyroki_solvers(
+            return _make_pyroki_solvers(
                 _pyroki_robot,
                 target_link_index,
                 IK_KWARGS_PYROKI,
                 collision_cost_fn=_pyroki_coll_cost,
                 collision_weight=COLL_WEIGHT,
             )
+
+        _pyroki_ls_coll = _make_pyroki_coll_variant(_pyroki_ls, "PyRoKi-LS")
+        _pyroki_analytic_coll = _make_pyroki_coll_variant(
+            _pyroki_analytic, "PyRoKi-AnalyticJac",
+        )
 
     # ------------------------------------------------------------------
     # Learned-IK: load pre-trained Flax model (optional)
@@ -1731,7 +1507,7 @@ def _run_robot_benchmark(
     if not _want("Learned-JAX"):
         pass  # not the selected solver; skip Learned-IK setup entirely
     elif _NO_JAX:
-        print("\nLearned-IK disabled (--cpu-only/--no-jax: JAX-based solvers are skipped).")
+        print("\nLearned-IK disabled (--no-jax: JAX-based solvers are skipped).")
     elif _LEARNED_IK_IMPORT_OK:
         _model_path = get_default_model_path(robot_name)
         if _model_path.exists():
@@ -1807,6 +1583,21 @@ def _run_robot_benchmark(
     target_poses_stacked = jaxlie.SE3(
         jnp.stack([p.wxyz_xyz for p in all_target_poses])
     )  # (N_TARGETS_BATCH, 7)
+
+    # Sidecar for the cuRobo child, which runs in a separate conda env and
+    # cannot consume these jaxlie poses directly (see _run_curobo_child).
+    # The dump is deterministic (seed-0 targets), so every pyroffi child
+    # rewrites the identical file; cuRobo is the LAST candidate solver per
+    # robot, so by the time its child starts the file is guaranteed to exist.
+    if robot_name in _CUROBO_ROBOT_FILES:
+        out_dir = csv_file.parent if csv_file is not None else RESOURCE_ROOT
+        targets_npz = out_dir / f"bench_ik_targets_{robot_name}.npz"
+        np.savez_compressed(
+            targets_npz,
+            seq=np.stack([p.wxyz_xyz for p in target_poses]).astype(np.float32),
+            batch=target_poses_stacked.wxyz_xyz.astype(np.float32),
+        )
+        print(f"  wrote cuRobo target sidecar: {targets_npz}")
 
     # Per-pose RNG keys and warm-start configs.
     rng_keys          = [jax.random.PRNGKey(i + 1) for i in range(N_TARGETS)]
@@ -1889,13 +1680,16 @@ def _run_robot_benchmark(
         ("SQP-JAX",    jit_sqp,           {}),
         ("MPPI-JAX",   jit_mppi,          {}),
     ]
-    if not _CPU_ONLY:
-        warmup_seq += [
-            ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
-            ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
-            ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
-            ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
-        ]
+    warmup_seq += [
+        ("HJCD-CUDA",  hjcd_solve_cuda,    IK_KWARGS_HJCD_CUDA),
+        ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED),
+        ("LS-CUDA",    ls_ik_solve_cuda,   IK_KWARGS_LS_CUDA),
+        ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED),
+        ("SQP-CUDA",   sqp_ik_solve_cuda,  IK_KWARGS_SQP_CUDA),
+        ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED),
+        ("MPPI-CUDA",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA),
+        ("MPPI-CUDA-Traced",  mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED),
+    ]
     if _learned_ik_available:
         warmup_seq.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX))
     if COLLISION_FREE:
@@ -1906,13 +1700,16 @@ def _run_robot_benchmark(
                 ("SQP-JAX-COLL",   jit_sqp_coll,           coll_kwargs_jax),
                 ("MPPI-JAX-COLL",  jit_mppi_coll,          coll_kwargs_jax),
             ]
-        if not _CPU_ONLY:
-            warmup_seq += [
-                ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
-                ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}),
-                ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
-                ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
-            ]
+        warmup_seq += [
+            ("HJCD-CUDA-COLL", hjcd_solve_cuda,        {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("HJCD-CUDA-Traced-COLL", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("LS-CUDA-COLL",   ls_ik_solve_cuda,       {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}),
+            ("LS-CUDA-Traced-COLL", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
+            ("SQP-CUDA-COLL",  sqp_ik_solve_cuda,      {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda}),
+            ("SQP-CUDA-Traced-COLL", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-Traced-COLL", mppi_ik_solve_cuda,     {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
+        ]
 
     warmup_batch_jax = [] if _NO_JAX else [
         ("HJCD-JAX-BATCH",  jit_hjcd_batch,  {}),
@@ -1931,26 +1728,38 @@ def _run_robot_benchmark(
         ]
 
     warmup_batch_cuda = []
-    if not _CPU_ONLY:
+    warmup_batch_cuda += [
+        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
+        ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED),
+        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
+        ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED),
+        ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
+        ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED),
+        ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
+        ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED),
+    ]
+    if COLLISION_FREE:
         warmup_batch_cuda += [
-            ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA),
-            ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,     IK_KWARGS_HJCD_CUDA),
-            ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA),
-            ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA),
+            ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}),
+            ("LS-CUDA-Traced-COLL-BATCH", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}),
+            ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
+            ("HJCD-CUDA-Traced-COLL-BATCH", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
+            ("SQP-CUDA-Traced-COLL-BATCH", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
+            ("MPPI-CUDA-Traced-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}),
         ]
-        if COLLISION_FREE:
-            warmup_batch_cuda += [
-                ("LS-CUDA-COLL-BATCH",   ls_ik_solve_cuda_batch,   {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}),
-                ("HJCD-CUDA-COLL-BATCH", hjcd_solve_cuda_batch,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}),
-                ("SQP-CUDA-COLL-BATCH",  sqp_ik_solve_cuda_batch,  {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}),
-                ("MPPI-CUDA-COLL-BATCH", mppi_ik_solve_cuda_batch, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}),
-            ]
 
     # Per-solver isolation: keep only the selected solver's warmups so that only
     # its timers are built (and only its kernels are JIT/compiled in this process).
-    warmup_seq        = [e for e in warmup_seq        if _want(e[0])]
-    warmup_batch_jax  = [e for e in warmup_batch_jax  if _want(e[0])]
-    warmup_batch_cuda = [e for e in warmup_batch_cuda if _want(e[0])]
+    # Likewise drop warmups for evaluation blocks that --blocks excludes.
+    def _warm(label: str) -> bool:
+        block = ("batch" if label.endswith("-BATCH") else "seq") + ("_coll" if "-COLL" in label else "")
+        return _want(label) and _block_wanted(block)
+
+    warmup_seq        = [e for e in warmup_seq        if _warm(e[0])]
+    warmup_batch_jax  = [e for e in warmup_batch_jax  if _warm(e[0])]
+    warmup_batch_cuda = [e for e in warmup_batch_cuda if _warm(e[0])]
 
     tli = (target_link_index,)
 
@@ -2001,18 +1810,23 @@ def _run_robot_benchmark(
         )
         batch_timers[name] = t
 
-    if _pyroki_batch_fn is not None:
+    for _label, _variant in (("PyRoKi-LS-BATCH", _pyroki_ls),
+                            ("PyRoKi-AnalyticJac-BATCH", _pyroki_analytic)):
+        if not (_block_wanted("batch") or _block_wanted("batch_coll")):
+            continue  # skip the (large) vmapped batch warmup entirely
+        if _variant is None:
+            continue
         _num_seeds = IK_KWARGS_PYROKI["num_seeds"]
         _lo_j = jnp.array(lo, dtype=jnp.float32)
         _hi_j = jnp.array(hi, dtype=jnp.float32)
-        print("Warming up PyRoKi-BATCH ...")
+        print(f"Warming up {_label} ...")
         _batch_seeds = jax.random.uniform(
             jax.random.PRNGKey(0),
             (len(target_poses_stacked.wxyz_xyz), _num_seeds, n_act),
             minval=_lo_j, maxval=_hi_j,
         )
         for _ in range(N_WARMUP):
-            out = _pyroki_batch_fn(target_poses_stacked.wxyz_xyz, _batch_seeds)
+            out = _variant[1](target_poses_stacked.wxyz_xyz, _batch_seeds)
             jax.block_until_ready(out)
 
     # ------------------------------------------------------------------
@@ -2028,13 +1842,16 @@ def _run_robot_benchmark(
         ("SQP-JAX",   jit_sqp,          {},                seq_timers.get("SQP-JAX")),
         ("MPPI-JAX",  jit_mppi,         {},                seq_timers.get("MPPI-JAX")),
     ]
-    if not _CPU_ONLY:
-        seq_solvers += [
-            ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
-            ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
-            ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
-            ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
-        ]
+    seq_solvers += [
+        ("HJCD-CUDA", hjcd_solve_cuda,  IK_KWARGS_HJCD_CUDA,   seq_timers.get("HJCD-CUDA")),
+        ("HJCD-CUDA-Traced", hjcd_solve_cuda, IK_KWARGS_HJCD_CUDA_TRACED, seq_timers.get("HJCD-CUDA-Traced")),
+        ("LS-CUDA",   ls_ik_solve_cuda,  IK_KWARGS_LS_CUDA, seq_timers.get("LS-CUDA")),
+        ("LS-CUDA-Traced", ls_ik_solve_cuda, IK_KWARGS_LS_CUDA_TRACED, seq_timers.get("LS-CUDA-Traced")),
+        ("SQP-CUDA",  sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA, seq_timers.get("SQP-CUDA")),
+        ("SQP-CUDA-Traced", sqp_ik_solve_cuda, IK_KWARGS_SQP_CUDA_TRACED, seq_timers.get("SQP-CUDA-Traced")),
+        ("MPPI-CUDA", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA, seq_timers.get("MPPI-CUDA")),
+        ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, IK_KWARGS_MPPI_CUDA_TRACED, seq_timers.get("MPPI-CUDA-Traced")),
+    ]
     if _learned_ik_available:
         seq_solvers.append(("Learned-JAX", _learned_ik_fn, IK_KWARGS_LEARNED_JAX,
                             seq_timers.get("Learned-JAX")))
@@ -2049,19 +1866,18 @@ def _run_robot_benchmark(
             fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs, n_act, timer=timer,
         )
 
-    if _pyroki_solve_fn is not None:
-        print("  Running PyRoKi ...")
-        seq_results["PyRoKi"] = _run_pyroki_sequential(
-            _pyroki_solve_fn, robot, _pyroki_robot, target_link_index,
+    for _label, _variant in (("PyRoKi-LS", _pyroki_ls),
+                            ("PyRoKi-AnalyticJac", _pyroki_analytic)):
+        if not _block_wanted("seq"):
+            continue
+        if _variant is None:
+            continue
+        print(f"  Running {_label} ...")
+        seq_results[_label] = _run_pyroki_sequential(
+            _variant[0], robot, _pyroki_robot, target_link_index,
             target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
-    if _quik_solver is not None:
-        print("  Running QuIK-CPU ...")
-        seq_results["QuIK-CPU"] = _run_quik_sequential(
-            _quik_solver, robot, target_link_index, target_poses,
-            lo, hi, _quik_num_seeds,
-        )
 
     # ------------------------------------------------------------------
     # Sequential evaluation — collision-free IK
@@ -2079,14 +1895,17 @@ def _run_robot_benchmark(
             ("SQP-JAX",   jit_sqp_coll,       coll_kwargs_jax,                              seq_timers.get("SQP-JAX-COLL")),
             ("MPPI-JAX",  jit_mppi_coll,      coll_kwargs_jax,                              seq_timers.get("MPPI-JAX-COLL")),
         ]
-        if not _CPU_ONLY:
-            seq_coll_solvers += [
-                ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
-                ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
-                ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
-                ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
-            ]
-        seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0])]
+        seq_coll_solvers += [
+            ("HJCD-CUDA", hjcd_solve_cuda,    {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda},  seq_timers.get("HJCD-CUDA-COLL")),
+            ("HJCD-CUDA-Traced", hjcd_solve_cuda, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("HJCD-CUDA-Traced-COLL")),
+            ("LS-CUDA",   ls_ik_solve_cuda,   {**IK_KWARGS_LS_CUDA, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-COLL")),
+            ("LS-CUDA-Traced", ls_ik_solve_cuda, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, seq_timers.get("LS-CUDA-Traced-COLL")),
+            ("SQP-CUDA",  sqp_ik_solve_cuda,  {**IK_KWARGS_SQP_CUDA, **coll_kwargs_cuda},   seq_timers.get("SQP-CUDA-COLL")),
+            ("SQP-CUDA-Traced", sqp_ik_solve_cuda, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, seq_timers.get("SQP-CUDA-Traced-COLL")),
+            ("MPPI-CUDA", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-COLL")),
+            ("MPPI-CUDA-Traced", mppi_ik_solve_cuda, {**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda},  seq_timers.get("MPPI-CUDA-Traced-COLL")),
+        ]
+        seq_coll_solvers = [s for s in seq_coll_solvers if _want(s[0]) and _block_wanted("seq_coll")]
 
         for name, fn, kwargs, timer in seq_coll_solvers:
             print(f"  Running {name}-COLL ...")
@@ -2095,19 +1914,18 @@ def _run_robot_benchmark(
                 fixed_joint_mask, rng_keys, previous_cfgs_seq, kwargs, n_act, timer=timer,
             )
 
-        if _pyroki_coll_solve_fn is not None:
-            print("  Running PyRoKi-COLL ...")
-            seq_coll_results["PyRoKi"] = _run_pyroki_sequential(
-                _pyroki_coll_solve_fn, robot, _pyroki_robot, target_link_index,
+        for _label, _variant in (("PyRoKi-LS", _pyroki_ls_coll),
+                                ("PyRoKi-AnalyticJac", _pyroki_analytic_coll)):
+            if not _block_wanted("seq_coll"):
+                continue
+            if _variant is None:
+                continue
+            print(f"  Running {_label}-COLL ...")
+            seq_coll_results[_label] = _run_pyroki_sequential(
+                _variant[0], robot, _pyroki_robot, target_link_index,
                 target_poses, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
-        if _quik_vamp_checker is not None:
-            print("  Running QuIK-CPU-COLL ...")
-            seq_coll_results["QuIK-CPU"] = _run_quik_sequential(
-                _quik_solver, robot, target_link_index, target_poses,
-                lo, hi, _quik_num_seeds, vamp_checker=_quik_vamp_checker,
-            )
 
     # ------------------------------------------------------------------
     # Batch evaluation (JAX + CUDA batch solvers)
@@ -2122,13 +1940,16 @@ def _run_robot_benchmark(
         ("SQP-JAX-BATCH",   jit_sqp_batch,            {},                 rng_keys_batch, batch_timers.get("SQP-JAX-BATCH")),
         ("MPPI-JAX-BATCH",  jit_mppi_batch,           {},                 rng_keys_batch, batch_timers.get("MPPI-JAX-BATCH")),
     ]
-    if not _CPU_ONLY:
-        batch_solvers += [
-            ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
-            ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
-            ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
-            ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
-        ]
+    batch_solvers += [
+        ("LS-CUDA-BATCH",   ls_ik_solve_cuda_batch,   IK_KWARGS_LS_CUDA,  rng0,           batch_timers.get("LS-CUDA-BATCH")),
+        ("LS-CUDA-Traced-BATCH", ls_ik_solve_cuda_batch, IK_KWARGS_LS_CUDA_TRACED, rng0, batch_timers.get("LS-CUDA-Traced-BATCH")),
+        ("HJCD-CUDA-BATCH", hjcd_solve_cuda_batch,    IK_KWARGS_HJCD_CUDA, rng0,          batch_timers.get("HJCD-CUDA-BATCH")),
+        ("HJCD-CUDA-Traced-BATCH", hjcd_solve_cuda_batch, IK_KWARGS_HJCD_CUDA_TRACED, rng0, batch_timers.get("HJCD-CUDA-Traced-BATCH")),
+        ("SQP-CUDA-BATCH",  sqp_ik_solve_cuda_batch,  IK_KWARGS_SQP_CUDA,  rng0,         batch_timers.get("SQP-CUDA-BATCH")),
+        ("SQP-CUDA-Traced-BATCH", sqp_ik_solve_cuda_batch, IK_KWARGS_SQP_CUDA_TRACED, rng0, batch_timers.get("SQP-CUDA-Traced-BATCH")),
+        ("MPPI-CUDA-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA, rng0,         batch_timers.get("MPPI-CUDA-BATCH")),
+        ("MPPI-CUDA-Traced-BATCH", mppi_ik_solve_cuda_batch, IK_KWARGS_MPPI_CUDA_TRACED, rng0,         batch_timers.get("MPPI-CUDA-Traced-BATCH")),
+    ]
     if _learned_ik_available:
         batch_solvers.append(("Learned-JAX-BATCH", _learned_ik_fn_batch, {}, rng_keys_batch,
                               batch_timers.get("Learned-JAX-BATCH")))
@@ -2144,19 +1965,18 @@ def _run_robot_benchmark(
             is_jax_batch=jnp.asarray(rng).ndim == 2, timer=timer,
         )
 
-    if _pyroki_batch_fn is not None:
-        print("  Running PyRoKi-BATCH ...")
-        batch_results["PyRoKi-BATCH"] = _run_pyroki_batch(
-            _pyroki_batch_fn, robot, _pyroki_robot, target_link_index,
+    for _label, _variant in (("PyRoKi-LS-BATCH", _pyroki_ls),
+                            ("PyRoKi-AnalyticJac-BATCH", _pyroki_analytic)):
+        if not _block_wanted("batch"):
+            continue
+        if _variant is None:
+            continue
+        print(f"  Running {_label} ...")
+        batch_results[_label] = _run_pyroki_batch(
+            _variant[1], robot, _pyroki_robot, target_link_index,
             target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
         )
 
-    if _quik_solver is not None:
-        print("  Running QuIK-CPU-BATCH ...")
-        batch_results["QuIK-CPU-BATCH"] = _run_quik_batch(
-            _quik_solver, robot, target_link_index, target_poses_stacked,
-            lo, hi, _quik_num_seeds,
-        )
 
     # ------------------------------------------------------------------
     # Batch evaluation — collision-free IK
@@ -2174,14 +1994,17 @@ def _run_robot_benchmark(
             ("SQP-JAX",   jit_sqp_coll_batch,     {},                                          rng_keys_batch, batch_timers.get("SQP-JAX-COLL-BATCH")),
             ("MPPI-JAX",  jit_mppi_coll_batch,    {},                                          rng_keys_batch, batch_timers.get("MPPI-JAX-COLL-BATCH")),
         ]
-        if not _CPU_ONLY:
-            batch_coll_solvers += [
-                ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
-                ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
-                ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
-                ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
-            ]
-        batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0])]
+        batch_coll_solvers += [
+            ("LS-CUDA",   ls_ik_solve_cuda_batch,  {**IK_KWARGS_LS_CUDA,   **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-COLL-BATCH")),
+            ("LS-CUDA-Traced", ls_ik_solve_cuda_batch, {**IK_KWARGS_LS_CUDA_TRACED, **coll_kwargs_ls_cuda_kernel}, rng0, batch_timers.get("LS-CUDA-Traced-COLL-BATCH")),
+            ("HJCD-CUDA", hjcd_solve_cuda_batch,   {**IK_KWARGS_HJCD_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-COLL-BATCH")),
+            ("HJCD-CUDA-Traced", hjcd_solve_cuda_batch, {**IK_KWARGS_HJCD_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("HJCD-CUDA-Traced-COLL-BATCH")),
+            ("SQP-CUDA",  sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA,  **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-COLL-BATCH")),
+            ("SQP-CUDA-Traced", sqp_ik_solve_cuda_batch, {**IK_KWARGS_SQP_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("SQP-CUDA-Traced-COLL-BATCH")),
+            ("MPPI-CUDA", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-COLL-BATCH")),
+            ("MPPI-CUDA-Traced", mppi_ik_solve_cuda_batch,{**IK_KWARGS_MPPI_CUDA_TRACED, **coll_kwargs_cuda}, rng0, batch_timers.get("MPPI-CUDA-Traced-COLL-BATCH")),
+        ]
+        batch_coll_solvers = [s for s in batch_coll_solvers if _want(s[0]) and _block_wanted("batch_coll")]
 
         for name, fn, kwargs, rng, timer in batch_coll_solvers:
             print(f"  Running {name}-COLL-BATCH ...")
@@ -2191,19 +2014,18 @@ def _run_robot_benchmark(
                 is_jax_batch=jnp.asarray(rng).ndim == 2, timer=timer,
             )
 
-        if _pyroki_coll_batch_fn is not None:
-            print("  Running PyRoKi-COLL-BATCH ...")
-            batch_coll_results["PyRoKi"] = _run_pyroki_batch(
-                _pyroki_coll_batch_fn, robot, _pyroki_robot, target_link_index,
+        for _label, _variant in (("PyRoKi-LS", _pyroki_ls_coll),
+                                ("PyRoKi-AnalyticJac", _pyroki_analytic_coll)):
+            if not _block_wanted("batch_coll"):
+                continue
+            if _variant is None:
+                continue
+            print(f"  Running {_label}-COLL-BATCH ...")
+            batch_coll_results[_label] = _run_pyroki_batch(
+                _variant[1], robot, _pyroki_robot, target_link_index,
                 target_poses_stacked, lo, hi, n_act, IK_KWARGS_PYROKI["num_seeds"],
             )
 
-        if _quik_vamp_checker is not None:
-            print("  Running QuIK-CPU-COLL-BATCH ...")
-            batch_coll_results["QuIK-CPU"] = _run_quik_batch(
-                _quik_solver, robot, target_link_index, target_poses_stacked,
-                lo, hi, _quik_num_seeds, vamp_checker=_quik_vamp_checker,
-            )
 
     # ------------------------------------------------------------------
     # Results tables
@@ -2231,36 +2053,36 @@ def _run_robot_benchmark(
         for jax_label, cuda_label in _method_pairs:
             if not _NO_JAX:
                 order.append(jax_label + jax_batch_suffix)
-            if not _CPU_ONLY:
-                order.append(cuda_label + jax_batch_suffix)
+            order.append(cuda_label + jax_batch_suffix)
+        order += [f"{m}-CUDA-Traced{jax_batch_suffix}" for m in _CORE_METHODS]
         return order
 
     seq_order = _method_order()
     if _learned_ik_available:
         seq_order.append("Learned-JAX")
-    if _pyroki_solve_fn is not None:
-        seq_order.append("PyRoKi")
-    if "QuIK-CPU" in seq_results:
-        seq_order.append("QuIK-CPU")
+    if _pyroki_ls is not None:
+        seq_order.append("PyRoKi-LS")
+    if _pyroki_analytic is not None:
+        seq_order.append("PyRoKi-AnalyticJac")
 
     batch_order = _method_order("-BATCH")
     if _learned_ik_available:
         batch_order.append("Learned-JAX-BATCH")
-    if _pyroki_batch_fn is not None:
-        batch_order.append("PyRoKi-BATCH")
-    if "QuIK-CPU-BATCH" in batch_results:
-        batch_order.append("QuIK-CPU-BATCH")
+    if _pyroki_ls is not None:
+        batch_order.append("PyRoKi-LS-BATCH")
+    if _pyroki_analytic is not None:
+        batch_order.append("PyRoKi-AnalyticJac-BATCH")
 
     coll_seq_order = _method_order()
-    if _pyroki_coll_solve_fn is not None:
-        coll_seq_order.append("PyRoKi")
-    if "QuIK-CPU" in seq_coll_results:
-        coll_seq_order.append("QuIK-CPU")
+    if _pyroki_ls_coll is not None:
+        coll_seq_order.append("PyRoKi-LS")
+    if _pyroki_analytic_coll is not None:
+        coll_seq_order.append("PyRoKi-AnalyticJac")
     coll_batch_order = _method_order()
-    if _pyroki_coll_batch_fn is not None:
-        coll_batch_order.append("PyRoKi")
-    if "QuIK-CPU" in batch_coll_results:
-        coll_batch_order.append("QuIK-CPU")
+    if _pyroki_ls_coll is not None:
+        coll_batch_order.append("PyRoKi-LS")
+    if _pyroki_analytic_coll is not None:
+        coll_batch_order.append("PyRoKi-AnalyticJac")
 
     # In the per-solver isolation path only one solver's results exist; keep the
     # canonical ordering but drop labels this process did not run.
@@ -2340,10 +2162,25 @@ def _run_robot_benchmark(
             seq_coll_results, batch_coll_results,
             seq_coll_free if COLLISION_FREE else {},
             batch_coll_free if COLLISION_FREE else {},
+            n_timed=N_TIMED,
         )
         print(f"\nResults appended to {csv_file}")
 
     print()
+
+
+# cuRobo's child (_run_curobo_child, _curobo_python_cmd, and its constants)
+# lives in bench_ik_utils — see that module's docstring for the protocol.
+
+
+def _forwarded_flags(args: argparse.Namespace) -> list[str]:
+    """Dispatcher flags every child must see (run size and evaluation blocks)."""
+    out = []
+    for flag, value in (("--n-targets", args.n_targets), ("--n-targets-batch", args.n_targets_batch),
+                        ("--n-timed", args.n_timed), ("--blocks", args.blocks)):
+        if value is not None:
+            out += [flag, str(value)]
+    return out
 
 
 def _run_solver_subprocess(
@@ -2356,18 +2193,46 @@ def _run_solver_subprocess(
     can perturb another solver's timings. For CUDA solvers the robot's GLASS tier
     (ROBOT_TIER) is pinned via PYROFFI_IK_TIER, which is read once on first kernel
     launch; it is harmless (ignored) for JAX/CPU solvers.
+
+    cuRobo is the exception: it runs in its OWN conda env, but as THIS SAME
+    file re-invoked with ``--solver cuRobo`` (see _IS_CUROBO_CHILD /
+    _run_curobo_child) — it consumes the target sidecar this script wrote
+    during target generation (see _run_robot_benchmark).
     """
+    if solver == "cuRobo":
+        prefix = _curobo_python_cmd()
+        if prefix is None:
+            print(
+                f"\n=== Skipping {robot_name} / cuRobo: no cuRobo interpreter found ==="
+                "\n  Set CUROBO_PYTHON to the env's python, create a sibling 'curobo'"
+                "\n  conda env, or make 'conda' available — with an editable install"
+                "\n  of baselines/curobo."
+            )
+            return
+        cmd = prefix + [
+            __file__,
+            "--robot", robot_name,
+            "--solver", "cuRobo",
+            *_forwarded_flags(args),
+        ]
+        if args.outdir is not None:
+            cmd += ["--outdir", str(args.outdir)]
+        print(f"\n=== Running {robot_name} / cuRobo in subprocess ({' '.join(prefix)}) ===")
+        env = os.environ.copy()
+        env.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+        subprocess.run(cmd, env=env, check=True)
+        return
+
     tier = ROBOT_TIER.get(robot_name)
     tier_note = f", PYROFFI_IK_TIER={tier}" if tier is not None else ""
     print(f"\n=== Running {robot_name} / {solver} in subprocess{tier_note} ===")
 
-    cmd = [sys.executable, __file__, "--robot", robot_name, "--solver", solver]
+    cmd = [sys.executable, __file__, "--robot", robot_name, "--solver", solver,
+           *_forwarded_flags(args)]
     if args.outdir is not None:
         cmd += ["--outdir", str(args.outdir)]
     if args.no_jax:
         cmd += ["--no-jax"]
-    if args.cpu_only:
-        cmd += ["--cpu-only"]
 
     env = os.environ.copy()
     if tier is not None:
@@ -2379,7 +2244,19 @@ def _run_solver_subprocess(
     subprocess.run(cmd, env=env, check=True)
 
 
+def _split_choice(value: str | None, choices, flag: str) -> list[str]:
+    """Parse a comma-separated selection, rejecting names that are not valid choices."""
+    if value is None:
+        return list(choices)
+    picked = [v.strip() for v in value.split(",") if v.strip()]
+    unknown = [v for v in picked if v not in choices]
+    if unknown:
+        raise SystemExit(f"{flag}: unknown {', '.join(unknown)}; choose from {', '.join(choices)}.")
+    return picked
+
+
 def main() -> None:
+    global N_TARGETS, N_TARGETS_BATCH, N_TIMED
     parser = argparse.ArgumentParser(description="IK benchmark with multi-robot support")
     parser.add_argument(
         "--disable-robot",
@@ -2402,26 +2279,38 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--cpu-only",
-        action="store_true",
-        help=(
-            "Run only CPU-native IK solvers (QuIK and other non-JAX integrations): "
-            "skip all CUDA solvers AND all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, "
-            "Learned-JAX, PyRoKi), force JAX_PLATFORMS=cpu, and disable GPU (pynvml) "
-            "monitoring. This flag is parsed before jax is imported (see top of file)."
-        ),
-    )
-    parser.add_argument(
         "--no-jax",
         action="store_true",
         help=(
             "Skip all JAX-based solvers (HJCD/LS/SQP/MPPI-JAX, Learned-JAX, "
-            "PyRoKi) so only the CUDA/FFI kernel solvers (and QuIK) run, to "
-            "benchmark the FFI kernels in isolation. Unlike --cpu-only, CUDA "
-            "solvers and GPU (pynvml) monitoring stay enabled. This flag is "
-            "parsed before jax is imported (see top of file)."
+            "PyRoKi) so only the CUDA/FFI kernel solvers run, to benchmark the "
+            "FFI kernels in isolation. This flag is parsed before jax is imported "
+            "(see top of file)."
         ),
     )
+    # Targeted runs. Set on the dispatcher; forwarded to every child.
+    parser.add_argument(
+        "--robots",
+        default=None,
+        metavar="LIST",
+        help=f"Comma-separated robots to run (default: all of {', '.join(ROBOT_NAMES)}).",
+    )
+    parser.add_argument(
+        "--solvers",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated base solver labels to run, e.g. SQP-CUDA,SQP-CUDA-Traced "
+            "(default: every candidate for the mode flags). Each still runs in its own "
+            "subprocess; -BATCH/-COLL variants follow their base label."
+        ),
+    )
+    parser.add_argument("--n-targets", type=int, default=None, metavar="N",
+                        help=f"Sequential target poses (default {N_TARGETS}).")
+    parser.add_argument("--n-targets-batch", type=int, default=None, metavar="N",
+                        help=f"Batch target poses (default {N_TARGETS_BATCH}).")
+    parser.add_argument("--n-timed", type=int, default=None, metavar="N",
+                        help=f"Timed repetitions (default {N_TIMED}).")
     # The next two flags mark a per-solver child process (see _run_solver_subprocess).
     # A run WITHOUT --solver is the dispatcher: it spawns one child per (robot, solver).
     parser.add_argument(
@@ -2435,12 +2324,32 @@ def main() -> None:
         default=None,
         metavar="LABEL",
         help=(
-            "Benchmark exactly this one solver, e.g. HJCD-CUDA, LS-JAX, QuIK-CPU "
+            "Benchmark exactly this one solver, e.g. HJCD-CUDA, LS-JAX, cuRobo "
             "(per-solver child process; internal). Runs it in isolation and appends "
             "only its rows to the CSV."
         ),
     )
+    parser.add_argument(
+        "--blocks",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated subset of evaluation blocks to run: "
+            "{seq,seq_coll,batch,batch_coll}. Default runs all four. "
+            "Useful to skip the batch blocks (which build the large vmapped "
+            "kernel) when only per-problem latency is wanted."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.outdir is not None:
+        args.outdir.mkdir(parents=True, exist_ok=True)
+    N_TARGETS = args.n_targets or N_TARGETS
+    N_TARGETS_BATCH = args.n_targets_batch or N_TARGETS_BATCH
+    N_TIMED = args.n_timed or N_TIMED
+    if N_TARGETS > N_TARGETS_BATCH:
+        # Sequential targets are the first N_TARGETS of the batch set.
+        raise SystemExit(f"--n-targets ({N_TARGETS}) must not exceed --n-targets-batch ({N_TARGETS_BATCH}).")
 
     csv_file = (args.outdir / CSV_FILE.name) if args.outdir is not None else CSV_FILE
 
@@ -2448,20 +2357,39 @@ def main() -> None:
     if args.solver is not None:
         if args.robot is None:
             raise SystemExit("--solver requires --robot (internal child invocation).")
-        _run_robot_benchmark(args.robot, csv_file, solver_filter=args.solver)
+        if args.solver == "cuRobo":
+            # Separate conda env, no JAX/pyroffi — see _IS_CUROBO_CHILD. Use the
+            # per-robot filtered scene (robot_env_path) if a pyroffi child for
+            # this robot has already built one, else fall back to the shared
+            # catalogue — matches the target-sidecar dependency pattern (cuRobo
+            # is the LAST candidate solver per robot; see _candidate_solvers).
+            _curobo_env_file = robot_env_path(args.robot)
+            if not _curobo_env_file.exists():
+                _curobo_env_file = ENV_FILE
+            _run_curobo_child(
+                args.robot, csv_file,
+                env_file=_curobo_env_file, n_targets=N_TARGETS, n_targets_batch=N_TARGETS_BATCH,
+                n_warmup=N_WARMUP, n_timed=N_TIMED,
+            )
+            return
+        _blocks = set(args.blocks.split(",")) if args.blocks else None
+        _run_robot_benchmark(args.robot, csv_file, solver_filter=args.solver, blocks=_blocks)
         return
 
     # Dispatcher path: fan out one isolated subprocess per (robot, solver).
     disabled = set(args.disable_robot)
-    selected = [name for name in ROBOT_NAMES if name not in disabled]
+    wanted_robots = _split_choice(args.robots, ROBOT_NAMES, "--robots")
+    selected = [name for name in ROBOT_NAMES if name not in disabled and name in wanted_robots]
     if not selected:
         raise SystemExit("No robots selected. Re-enable at least one robot.")
 
-    # --cpu-only implies --no-jax (mirrors _NO_JAX at the top of the file).
-    solvers = _candidate_solvers(args.cpu_only, args.no_jax or args.cpu_only)
+    no_jax = args.no_jax
+    all_solvers = _candidate_solvers(no_jax) + ["cuRobo"]
+    wanted_solvers = _split_choice(args.solvers, all_solvers, "--solvers")
     print("Selected robots:", ", ".join(selected))
-    print("Solvers (one isolated subprocess each):", ", ".join(solvers))
     for robot_name in selected:
+        solvers = [s for s in _candidate_solvers(no_jax, robot_name) if s in wanted_solvers]
+        print(f"Solvers for {robot_name} (one isolated subprocess each):", ", ".join(solvers) or "none")
         for solver in solvers:
             _run_solver_subprocess(robot_name, solver, csv_file, args)
 

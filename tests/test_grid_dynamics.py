@@ -105,7 +105,7 @@ def test_batched_shapes_and_jit(setup):
 
 
 def test_mass_matrix_agreement(setup):
-    """Custom CrbaKernel M(q) vs the pure-JAX CRBA."""
+    """GRiD's generated crba_kernel M(q) vs the pure-JAX CRBA."""
     robot, gd = setup
     q = _state(gd, jax.random.PRNGKey(6))[0]
     M = gd.mass_matrix(q)
@@ -159,7 +159,7 @@ def test_cache_hit(setup):
     gd2 = GRiDDynamics.__new__(GRiDDynamics)  # noqa: F841 - just checking cache path
     from pyroffi.dynamics._grid_codegen import compile_grid_library
 
-    so = compile_grid_library(gd._grid_model)
+    _targets, so = compile_grid_library(gd._grid_model)
     assert so.is_file()
     assert time.monotonic() - t0 < 120.0
 

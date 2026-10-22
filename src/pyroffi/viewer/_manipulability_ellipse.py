@@ -127,9 +127,12 @@ class ManipulabilityEllipse:
 
         try:
             # --- Jacobian Calculation ---
+            # A floating base is held where it is: this is the arm's manipulability.
+            n_base = self._robot.nq - self._robot.joints.num_actuated_joints
             jacobian = jax.jacfwd(
-                lambda q: jaxlie.SE3(self._robot.forward_kinematics(q)).translation()
-            )(joints)[self._target_link_index]
+                lambda q: jaxlie.SE3(self._robot.forward_kinematics(
+                    jnp.concatenate([joints[:n_base], q]))).translation()
+            )(joints[n_base:])[self._target_link_index]
             assert jacobian.shape == (3, self._robot.joints.num_actuated_joints)
 
             # --- Manipulability Calculation ---

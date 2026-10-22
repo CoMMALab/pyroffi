@@ -21,8 +21,7 @@ where it is attached, its mass and its dimensions are pytree leaves.  So a jit
 recompiles per grasp-*topology* change (pick, place, handoff) rather than per
 state, while ``T_parent_body`` stays differentiable and ``vmap``-able — which is
 what makes batched grasp-candidate evaluation and ``∂cost/∂T_parent_body``
-possible, and why this exists rather than a binding to VAMP's single
-baked-at-codegen-time attachment.
+possible, rather than a single attachment baked in at codegen time.
 
 Entry points
 ------------

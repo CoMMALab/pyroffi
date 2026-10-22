@@ -223,10 +223,22 @@ def grid_inverse_dynamics_fn(grid_dynamics) -> InverseDynamicsFn:
         lead = q.shape[:-1]
         n = q.shape[-1]
         flat = tuple(a.reshape(-1, n).astype(jnp.float32) for a in (q, qd, qdd))
+        if getattr(grid_dynamics, "floating_base", False):
+            return _joint_torques_floating(grid_dynamics.inverse_dynamics, *flat).reshape(*lead, -1)
         tau = grid_dynamics.inverse_dynamics(*flat)
         return tau.reshape(*lead, n)
 
     return _fn
+
+
+def _joint_torques_floating(inverse_dynamics, q, qd, qdd):
+    """A floating base's path derivatives are in configuration coordinates; RNEA wants the
+    body twist and its rate. The base wrench is left to the contacts, so only the joint
+    torques come back (matching ``torque_lower``/``torque_upper`` over the joints)."""
+    from .._floating_base import curve_tangents
+
+    v, a = jax.vmap(curve_tangents)(q, qd, qdd)
+    return inverse_dynamics(q, v, a)[..., 6:]
 
 
 def jax_inverse_dynamics_fn(robot, gravity: float | None = None) -> InverseDynamicsFn:
@@ -243,6 +255,12 @@ def jax_inverse_dynamics_fn(robot, gravity: float | None = None) -> InverseDynam
     g = _DEFAULT_GRAVITY if gravity is None else gravity
 
     def _fn(q: Array, qd: Array, qdd: Array) -> Array:
+        if dyn.floating_base:
+            lead = q.shape[:-1]
+            flat = [x.reshape(-1, x.shape[-1]) for x in (q, qd, qdd)]
+            tau = _joint_torques_floating(
+                lambda *a: inverse_dynamics_jax(dyn, *a, g), *flat)
+            return tau.reshape(*lead, -1)
         return inverse_dynamics_jax(dyn, q, qd, qdd, g)
 
     return _fn

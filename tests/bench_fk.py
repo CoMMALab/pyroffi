@@ -17,8 +17,7 @@ Usage:
 
 Prerequisites:
     1. A CUDA-capable GPU must be available.
-    2. The CUDA FK library must be compiled:
-           bash build_kernels/build_fk_cuda.sh
+    2. The external/GRiM checkout (its kinematics kernel compiles per robot on first use).
     3. Local spherized URDFs must be present under ``resources/``.
 """
 
@@ -225,6 +224,10 @@ def _run_robot_benchmark(robot_name: str) -> tuple[list[dict[str, float | int | 
 
         out_jax = np.array(fk_jax(cfg_jax))
         out_cuda = np.array(fk_cuda(cfg_jax))
+        # q and -q are the same rotation, and the JAX path (via rotation matrices) and the
+        # CUDA path (quaternion products) need not pick the same sign; align before comparing.
+        flip = np.sum(out_jax[..., :4] * out_cuda[..., :4], axis=-1, keepdims=True) < 0
+        out_cuda[..., :4] = np.where(flip, -out_cuda[..., :4], out_cuda[..., :4])
         max_err = float(np.abs(out_jax - out_cuda).max())
         passed = bool(np.allclose(out_jax, out_cuda, atol=ATOL, rtol=RTOL))
         all_passed &= passed

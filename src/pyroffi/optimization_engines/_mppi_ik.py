@@ -50,8 +50,17 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
+from ._batching import dispatch_vmap_to_batched, sharded_batch_call
+from ._nullspace import project_single
+from ._implicit_diff import (
+    detached_robot,
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
+from ._ik_primitives import grim_targets, run_grim, self_collision_table_arrays
 from ._ls_ik import _ls_ik_single, _prepare_ls_collision_buffers
 
 
@@ -494,9 +503,7 @@ def mppi_ik_solve(
         )
     warm_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask[None, :], previous_cfg[None, :], random_seeds
     )
@@ -603,6 +610,7 @@ def mppi_ik_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _mppi_ik_solve_cuda_jit(
@@ -623,14 +631,14 @@ def _mppi_ik_solve_cuda_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -638,8 +646,8 @@ def _mppi_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target=None,
 ) -> tuple[Float[Array, "n_act"], Array]:
-    from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -659,9 +667,7 @@ def _mppi_ik_solve_cuda_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, :], previous_cfg[None, :], random_seeds
     )
@@ -671,42 +677,25 @@ def _mppi_ik_solve_cuda_jit(
     # each call without triggering JIT recompilation.
     rng_seed_arr = jax.random.bits(key_seed, dtype=jnp.uint32).astype(jnp.int32)
 
-    cfgs, errors = mppi_ik_cuda(
-        seeds          = seeds[None],           # (1, n_seeds, n_act)
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_Ts[None],       # (1, n_ee, 7)
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        rng_seed       = rng_seed_arr,
-        n_particles      = n_particles,
-        n_mppi_iters     = n_mppi_iters,
-        n_lbfgs_iters    = n_lbfgs_iters,
-        m_lbfgs          = m_lbfgs,
-        sigma            = sigma,
-        mppi_temperature = mppi_temperature,
-        pos_weight       = pos_weight,
-        ori_weight       = ori_weight,
-        eps_pos          = eps_pos,
-        eps_ori          = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
+    cfgs, errors = run_grim(
+        ffi_target, seeds[None], target_Ts[None],
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        rng_seed=rng_seed_arr,
+        n_particles=n_particles,
+        n_mppi_iters=n_mppi_iters,
+        n_lbfgs_iters=n_lbfgs_iters,
+        m_lbfgs=m_lbfgs,
+        sigma=sigma,
+        mppi_temperature=mppi_temperature,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
     cfgs   = cfgs[0]    # (n_seeds, n_act)
     errors = errors[0]  # (n_seeds,)
@@ -767,11 +756,11 @@ def mppi_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA MPPI+L-BFGS IK: coarse particle search then gradient refinement.
 
-    Requires ``_mppi_ik_cuda_lib.so`` compiled from ``_mppi_ik_cuda_kernel.cu``:
-        bash build_kernels/build_mppi_ik_cuda.sh
+    GRiM's kernel (``external/GRiM``, ``kernels/ik/mppi_ik.cu``) compiles for the robot on first use.
 
     Stage 1 (MPPI)
         At each of ``n_mppi_iters`` iterations, ``n_particles`` Gaussian
@@ -813,11 +802,21 @@ def mppi_ik_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
     if isinstance(target_poses, jaxlie.SE3):
         target_poses = (target_poses,)
     target_poses_t = tuple(target_poses)
+    # The solver (CUDA FFI + post-refinement) consumes ``target_poses_t``; detach
+    # it so no tangent crosses the FFI boundary. Without this the kernel's output
+    # is UNKNOWN during linearisation and the pose gradient fails with
+    # "Linearization failed to produce known values for all output primals" --
+    # the same cut detached_robot makes for the model. The LIVE ``target_poses``
+    # still reaches the implicit rule below, which is what carries dq*/dt.
+    target_poses_t = jax.tree_util.tree_map(jax.lax.stop_gradient, target_poses_t)
 
     n_act = robot.joints.num_actuated_joints
 
@@ -841,25 +840,6 @@ def mppi_ik_solve_cuda(
         collision_free=collision_free,
     )
 
-    # ── Pre-compute per-EE ancestor masks ──────────────────────────────────
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    parent_idx_np           = np.array(robot.joints.parent_indices)
-    n_joints                = robot.joints.num_joints
-    n_ee_count              = len(target_link_indices)
-
-    target_joints_np  = np.zeros(n_ee_count, dtype=np.int32)
-    ancestor_masks_np = np.zeros((n_ee_count, n_joints), dtype=np.int32)
-    for _i, _link_idx in enumerate(target_link_indices):
-        _tgt_jnt = int(parent_joint_indices_np[_link_idx])
-        target_joints_np[_i] = _tgt_jnt
-        _j = _tgt_jnt
-        while _j >= 0:
-            ancestor_masks_np[_i, _j] = 1
-            _j = int(parent_idx_np[_j])
-
-    target_jnts    = jnp.array(target_joints_np)
-    ancestor_masks = jnp.array(ancestor_masks_np)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -869,41 +849,98 @@ def mppi_ik_solve_cuda(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = grim_targets(
+        ("mppi",), robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
-    winner, winner_coll_cost = _mppi_ik_solve_cuda_jit(
-        robot=robot,
-        target_poses=target_poses_t,
-        rng_key=rng_key,
-        previous_cfg=previous_cfg,
-        num_seeds=num_seeds,
-        n_particles=n_particles,
-        n_mppi_iters=n_mppi_iters,
-        n_lbfgs_iters=n_lbfgs_iters,
-        m_lbfgs=m_lbfgs,
-        pos_weight=pos_weight,
-        ori_weight=ori_weight,
-        sigma=sigma,
-        mppi_temperature=mppi_temperature,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        continuity_weight=continuity_weight,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
-    )
+        # vmap folds the mapped axis into the kernel's PROBLEM axis and makes one
+    # launch, rather than serialising a kernel that already batches.
+    def _single(tgt, prev):
+        return _mppi_ik_solve_cuda_jit(
+
+            robot=_robot_k,
+                target_poses=tuple(jaxlie.SE3(w) for w in tgt),
+            rng_key=rng_key,
+                previous_cfg=prev,
+            num_seeds=num_seeds,
+            n_particles=n_particles,
+            n_mppi_iters=n_mppi_iters,
+            n_lbfgs_iters=n_lbfgs_iters,
+            m_lbfgs=m_lbfgs,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            sigma=sigma,
+            mppi_temperature=mppi_temperature,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
+        )
+
+    def _batched(tgt, prev):
+        # The batched kernel handles ONE end-effector, so the multi-EE form
+        # cannot fold into it. Falling back to a mapped single solve would
+        # silently reintroduce the serialisation this exists to avoid.
+        if len(target_link_indices) != 1:
+            raise NotImplementedError(
+                "vmap over this solver is only supported for a single "
+                f"end-effector; got {len(target_link_indices)}. Call the "
+                "*_solve_cuda_batch entry point with a batched target instead.")
+        winners = _mppi_ik_solve_cuda_batch_jit(
+
+            robot=_robot_k,
+                target_poses_batch=jaxlie.SE3(tgt[:, 0]),
+            rng_key=rng_key,
+                previous_cfgs=prev,
+            num_seeds=num_seeds,
+            n_particles=n_particles,
+            n_mppi_iters=n_mppi_iters,
+            n_lbfgs_iters=n_lbfgs_iters,
+            m_lbfgs=m_lbfgs,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            sigma=sigma,
+            mppi_temperature=mppi_temperature,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+            ffi_target=ffi_target,
+        )
+        return winners, jnp.zeros((winners.shape[0],))
+
+    winner, winner_coll_cost = dispatch_vmap_to_batched(_single, _batched)(
+        jnp.stack([t.wxyz_xyz for t in target_poses_t]), previous_cfg)
 
     # ── Optional post-CUDA JAX constraint refinement ─────────────────────
     if bool(post_constraint_fns) and constraint_refine_iters > 0:
@@ -912,17 +949,26 @@ def mppi_ik_solve_cuda(
             if fixed_joint_mask is not None
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
-        winner = _ls_ik_single(
+        winner = project_single(
             winner, robot, target_link_indices, target_poses_t,
-            constraint_refine_iters, 5e-3, pos_weight, ori_weight,
-            robot.joints.lower_limits, robot.joints.upper_limits,
-            fmask,
-            constraint_fns=post_constraint_fns,
-            constraint_args=post_constraint_args,
-            constraint_weights=post_constraint_weights,
+            post_constraint_fns, post_constraint_args,
+            max_iter=constraint_refine_iters, fixed_joint_mask=fmask,
         )
 
-    return winner
+    return differentiable_ik_solution(
+        winner, robot, target_link_indices, target_poses,
+        cfg_ref=previous_cfg,
+        # Same buffers the solve kernel enforced; canonicalisation preserves
+        # pose but not clearance, so it must see the identical geometry.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, self_sph_local, self_link_start,
+                           self_link_joint, self_pair_i, self_pair_j),
+        # The caller's requested standoff, not a hardcoded one: canonicalisation
+        # walked to 1 mm clearance under a requested 0.02 m margin, respecting
+        # its own guard while silently breaking the solver's contract.
+        canonical_margin=collision_margin,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +994,7 @@ def mppi_ik_solve_cuda(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _mppi_ik_solve_cuda_batch_jit(
@@ -968,14 +1015,14 @@ def _mppi_ik_solve_cuda_batch_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: Array,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
     world_halfspaces:     Float[Array, "n_wh 6"],
+    # Self-collision tables. Traced, not read from module state: a stash read at
+    # trace time bakes into the first trace and is silently reused, so enabling
+    # self-collision would change nothing. As arguments their shapes are part of
+    # the jit signature, so empty and populated tables compile separately.
     enable_collision:     bool,
     collision_weight:     float,
     collision_margin:     float,
@@ -983,8 +1030,8 @@ def _mppi_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target=None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels.ik._mppi_ik_cuda import mppi_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits
@@ -1004,9 +1051,7 @@ def _mppi_ik_solve_cuda_batch_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_problems, n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_problems, n_random, n_act), lower, upper, previous_cfgs[:, None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], random_seeds
     )
@@ -1014,42 +1059,25 @@ def _mppi_ik_solve_cuda_batch_jit(
 
     rng_seed_arr = jax.random.bits(key_seed, dtype=jnp.uint32).astype(jnp.int32)
 
-    cfgs, errors = mppi_ik_cuda(
-        seeds          = seeds,
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_T_batch,
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        rng_seed       = rng_seed_arr,
-        n_particles      = n_particles,
-        n_mppi_iters     = n_mppi_iters,
-        n_lbfgs_iters    = n_lbfgs_iters,
-        m_lbfgs          = m_lbfgs,
-        sigma            = sigma,
-        mppi_temperature = mppi_temperature,
-        pos_weight       = pos_weight,
-        ori_weight       = ori_weight,
-        eps_pos          = eps_pos,
-        eps_ori          = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
+    cfgs, errors = run_grim(
+        ffi_target, seeds, target_T_batch,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        rng_seed=rng_seed_arr,
+        n_particles=n_particles,
+        n_mppi_iters=n_mppi_iters,
+        n_lbfgs_iters=n_lbfgs_iters,
+        m_lbfgs=m_lbfgs,
+        sigma=sigma,
+        mppi_temperature=mppi_temperature,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
 
     if len(constraint_fns) > 0:
@@ -1107,6 +1135,7 @@ def mppi_ik_solve_cuda_batch(
     collision_world:     Any | None = None,
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
+    traced:              bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA MPPI+L-BFGS IK: solve n_problems targets in one kernel launch.
 
@@ -1135,6 +1164,9 @@ def mppi_ik_solve_cuda_batch(
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Detached for the kernel; the live `robot` reaches the implicit rule,
+    # which is what carries dq*/dtheta. See detached_robot.
+    _robot_k = detached_robot(robot)
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
 
@@ -1160,18 +1192,6 @@ def mppi_ik_solve_cuda_batch(
         collision_free=collision_free,
     )
 
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    parent_idx_np           = np.array(robot.joints.parent_indices)
-    n_joints                = robot.joints.num_joints
-    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
-    ancestor_mask_np        = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1181,38 +1201,64 @@ def mppi_ik_solve_cuda_batch(
         world_halfspaces,
         collision_enabled,
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
+    # Self-collision comes along with the checker: a spherized model carries its
+    # own SRDF-filtered pair table, so no separate opt-in is needed. Empty tables
+    # (any other checker, or none) leave the kernel's self-collision path off.
+    (self_sph_local, self_link_start, self_link_joint,
+     self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = grim_targets(
+        ("mppi",), robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx,
+        (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
-    return _mppi_ik_solve_cuda_batch_jit(
-        robot=robot,
-        target_poses_batch=target_poses,
+    winners = sharded_batch_call(
+        _mppi_ik_solve_cuda_batch_jit,
+        targets=target_poses,
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
-        num_seeds=num_seeds,
-        n_particles=n_particles,
-        n_mppi_iters=n_mppi_iters,
-        n_lbfgs_iters=n_lbfgs_iters,
-        m_lbfgs=m_lbfgs,
-        pos_weight=pos_weight,
-        ori_weight=ori_weight,
-        sigma=sigma,
-        mppi_temperature=mppi_temperature,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        continuity_weight=continuity_weight,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        enable_collision=bool(collision_free and collision_enabled),
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
+        broadcast=dict(
+            robot=_robot_k,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        ),
+        static=dict(
+            num_seeds=num_seeds,
+            n_particles=n_particles,
+            n_mppi_iters=n_mppi_iters,
+            n_lbfgs_iters=n_lbfgs_iters,
+            m_lbfgs=m_lbfgs,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            sigma=sigma,
+            mppi_temperature=mppi_temperature,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            enable_collision=bool(collision_free and collision_enabled),
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            ffi_target=ffi_target,
+        ),
+        env_var='PYROFFI_MPPI_IK_PMAP_MIN',
+    )
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs,
+        # The SAME buffers the solve kernel enforced -- canonicalisation walks
+        # the task null space, which preserves pose but NOT clearance.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, self_sph_local, self_link_start,
+                           self_link_joint, self_pair_i, self_pair_j),
+        # The caller's requested standoff, not a hardcoded one: canonicalisation
+        # walked to 1 mm clearance under a requested 0.02 m margin, respecting
+        # its own guard while silently breaking the solver's contract.
+        canonical_margin=collision_margin,
     )

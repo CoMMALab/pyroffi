@@ -34,9 +34,23 @@ import numpy as np
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
-from ._ik_primitives import _ik_residual, _LS_ALPHAS, split_cuda_and_post_constraints
-from ._implicit_diff import differentiable_ik_solution
+from ._nullspace import project_single
+from ._ik_primitives import (
+    _ik_residual,
+    _LS_ALPHAS,
+    self_collision_table_arrays,
+    split_cuda_and_post_constraints,
+    grim_targets,
+    run_grim,
+)
+from ._batching import dispatch_vmap_to_batched, sharded_batch_call
+from ._implicit_diff import (
+    detached_robot,
+    differentiable_ik_solution,
+    differentiable_ik_solution_batch,
+)
 from ..collision._cuda_collision import _extract_world_arrays
 
 
@@ -205,6 +219,24 @@ def _prepare_ls_collision_buffers_uncached(
 # Single-seed LM solve
 # ---------------------------------------------------------------------------
 
+def _clip_joints(robot: Robot, cfg: Array, lower: Array, upper: Array) -> Array:
+    """Clip the joint part of ``cfg`` to its limits (a floating base is unbounded)."""
+    if not robot.floating_base:
+        return jnp.clip(cfg, lower, upper)
+    return jnp.concatenate([cfg[..., :7], jnp.clip(cfg[..., 7:], lower, upper)], axis=-1)
+
+
+def _floating_seeds(robot: Robot, previous_cfg, joint_seeds, key, sigma):
+    """Prepend a base to joint-only seeds: the previous base, perturbed by body-frame twists
+    of scale ``sigma`` (a uniformly random base pose would not be a meaningful seed)."""
+    from .._floating_base import integrate
+
+    twists = jax.random.normal(key, (joint_seeds.shape[0], 6)) * sigma
+    base = jax.vmap(lambda t: integrate(robot, previous_cfg, jnp.concatenate(
+        [t, jnp.zeros(robot.joints.num_actuated_joints)]))[:7])(twists)
+    return jnp.concatenate([base, joint_seeds], axis=-1)
+
+
 @functools.partial(
     jax.jit,
     static_argnames=("target_link_indices", "max_iter", "constraint_fns"),
@@ -256,8 +288,13 @@ def _ls_ik_single(
         in parallel via vmap; the one producing the lowest weighted residual
         is accepted.
     """
-    n     = cfg.shape[0]
+    from .._floating_base import integrate
+
+    # Steps live in the tangent space (nv): for a floating base the base moves by an SE(3)
+    # twist and only the joints are clipped; for a fixed base this is exactly q + delta.
+    n     = robot.nv
     n_c   = len(constraint_fns)
+    clip  = lambda x: _clip_joints(robot, x, lower, upper)
     n_ee  = len(target_link_indices)
     W     = jnp.concatenate([
         jnp.full(3, pos_weight, dtype=cfg.dtype),
@@ -290,7 +327,10 @@ def _ls_ik_single(
         c, lam, best_c, best_err = carry
 
         # ── Jacobian + weighted residual (single FK forward pass) ────────
-        f_all, vjp_fn = jax.vjp(fused_scaled, c)
+        # d/d(delta) of the residual at c (+) delta, delta = 0: the plain Jacobian for a
+        # fixed base, the tangent-space one for a floating base.
+        f_all, vjp_fn = jax.vjp(
+            lambda d: fused_scaled(integrate(robot, c, d)), jnp.zeros(n, c.dtype))
         J_all = jax.vmap(lambda g: vjp_fn(g)[0])(
             jnp.eye(n_out, dtype=f_all.dtype)
         )  # (n_out, n)
@@ -332,14 +372,14 @@ def _ls_ik_single(
 
         # ── Vectorised line search (single FK call per alpha) ────────────
         def eval_alpha(alpha):
-            nc  = jnp.clip(c + alpha * delta, lower, upper)
+            nc  = clip(integrate(robot, c, alpha * delta))
             nf  = fused_scaled(nc)
             return jnp.dot(nf, nf)
 
         alpha_errs  = jax.vmap(eval_alpha)(_LS_ALPHAS)   # (5,)
         best_ls_idx = jnp.argmin(alpha_errs)
         new_err     = alpha_errs[best_ls_idx]
-        new_c       = jnp.clip(c + _LS_ALPHAS[best_ls_idx] * delta, lower, upper).astype(c.dtype)
+        new_c       = clip(integrate(robot, c, _LS_ALPHAS[best_ls_idx] * delta)).astype(c.dtype)
 
         # ── Accept / reject ──────────────────────────────────────────────
         improved = new_err < curr_err * (1.0 - 1e-4)
@@ -471,6 +511,12 @@ def ls_ik_solve(
 
     if fixed_joint_mask is None:
         fixed_joint_mask = jnp.zeros(n_act, dtype=jnp.bool_)
+    # Seeds are built on the joints (previous_cfg's joint part); a floating base is prepended
+    # after, and the solver's tangent-space mask gains six free base entries.
+    prev_full = previous_cfg
+    if robot.floating_base:
+        previous_cfg = previous_cfg[7:]
+        key_base, rng_key = jax.random.split(rng_key)
 
     # ── Seed generation ────────────────────────────────────────────────────
     n_warm   = max(1, num_seeds // 2)
@@ -502,21 +548,24 @@ def ls_ik_solve(
         )
     warm_seeds = jnp.where(fixed_joint_mask[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask[None, :], previous_cfg[None, :], random_seeds
     )
 
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
+    solver_mask = fixed_joint_mask
+    if robot.floating_base:
+        seeds = _floating_seeds(robot, prev_full, seeds, key_base, 0.05)
+        solver_mask = jnp.concatenate([jnp.zeros(6, dtype=jnp.bool_), fixed_joint_mask])
+        previous_cfg = prev_full
 
     # ── Multi-seed LM (parallel over seeds) ───────────────────────────────
     all_cfgs = jax.vmap(
         lambda cfg: _ls_ik_single(
             cfg, robot, target_link_indices, target_poses,
             max_iter, lambda_init, pos_weight, ori_weight,
-            lower, upper, fixed_joint_mask,
+            lower, upper, solver_mask,
             constraint_fns=constraint_fns,
             constraint_args=constraint_args,
             constraint_weights=constraint_weights,
@@ -562,10 +611,17 @@ def ls_ik_solve(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _ls_ik_solve_cuda_jit(
     robot:                Robot,
+    # Self-collision tables as TRACED arguments, deliberately not read from
+    # module state. A stash read at trace time gets baked into the first trace
+    # and silently reused: the first call (empty tables) was cached and every
+    # later call replayed it, so enabling self-collision changed nothing. As
+    # arguments their shapes are part of the jit signature, so an empty table
+    # and a populated one compile separately.
     target_poses:         tuple,
     rng_key:              Array,
     previous_cfg:         Float[Array, "n_act"],
@@ -578,10 +634,6 @@ def _ls_ik_solve_cuda_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: jnp.ndarray,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
@@ -593,8 +645,8 @@ def _ls_ik_solve_cuda_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target=None,
 ) -> Float[Array, "n_act"]:
-    from ..cuda_kernels.ik._ls_ik_cuda import ls_ik_cuda
 
     n_act  = robot.joints.num_actuated_joints
     lower  = robot.joints.lower_limits
@@ -615,9 +667,7 @@ def _ls_ik_solve_cuda_jit(
     )
     warm_seeds = jnp.where(fixed_joint_mask_int[None, :], previous_cfg[None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_random, n_act), minval=lower, maxval=upper
-    )
+    random_seeds = sample_in_limits(key_random, (n_random, n_act), lower, upper, previous_cfg[None, :])
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, :], previous_cfg[None, :], random_seeds
     )
@@ -625,37 +675,20 @@ def _ls_ik_solve_cuda_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=0)   # (num_seeds, n_act)
 
     # ── CUDA LM (all EEs simultaneously) ─────────────────────────────────
-    cfgs, errors = ls_ik_cuda(
-        seeds          = seeds[None],           # (1, n_seeds, n_act)
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_Ts[None],       # (1, n_ee, 7)
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        max_iter       = max_iter,
-        pos_weight     = pos_weight,
-        ori_weight     = ori_weight,
-        lambda_init    = lambda_init,
-        eps_pos        = eps_pos,
-        eps_ori        = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
+    cfgs, errors = run_grim(
+        ffi_target, seeds[None], target_Ts[None],
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        max_iter=max_iter,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
     )
     cfgs   = cfgs[0]    # (n_seeds, n_act)
     errors = errors[0]  # (n_seeds,) — all EE weighted errors from CUDA
@@ -689,6 +722,7 @@ def _ls_ik_solve_cuda_jit(
     return cfgs[best_idx], jnp.zeros(())
 
 
+
 def ls_ik_solve_cuda(
     robot:               Robot,
     target_link_indices: int | tuple[int, ...],
@@ -714,17 +748,13 @@ def ls_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
-    ancestor_masks:      Array | None = None,
-    target_jnts:         Array | None = None,
+    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`ls_ik_solve`.
 
     Offloads the multi-seed LM loop to a single CUDA kernel via JAX FFI.
-    The kernel (``_ls_ik_cuda_kernel.cu``) is structurally equivalent to
-    the JAX solver but with no Python overhead per step.
-
-    Requires ``_ls_ik_cuda_lib.so`` compiled from ``_ls_ik_cuda_kernel.cu``:
-        bash build_kernels/build_ls_ik_cuda.sh
+    The kernel (GRiM's ``kernels/ik/ls_ik.cu``, compiled for the robot on first use) is
+    structurally equivalent to the JAX solver but with no Python overhead per step.
 
     Multi-EE support
         Pass multiple end-effectors via ``target_link_indices`` (tuple) and
@@ -770,6 +800,9 @@ def ls_ik_solve_cuda(
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
     """
+    # Detached for the kernel; the live `robot` still reaches the implicit
+    # rule below, which is what carries dq*/dtheta.
+    _robot_k = detached_robot(robot)
     # Normalise scalar → 1-tuple API.
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
@@ -804,29 +837,6 @@ def ls_ik_solve_cuda(
         collision_free=collision_free,
     )
 
-    # ── Pre-compute per-EE ancestor masks (Python level) ───────────────────
-    # Skipped when the caller supplies them (e.g. Robot.inverse_kinematics
-    # precomputes from the robot's concrete kinematic structure so this solver
-    # can run inside a jax.jit trace).
-    if ancestor_masks is None or target_jnts is None:
-        parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-        parent_idx_np           = np.array(robot.joints.parent_indices)
-        n_joints                = robot.joints.num_joints
-        n_ee_count              = len(target_link_indices)
-
-        target_joints_np    = np.zeros(n_ee_count, dtype=np.int32)
-        ancestor_masks_np   = np.zeros((n_ee_count, n_joints), dtype=np.int32)
-        for _i, _link_idx in enumerate(target_link_indices):
-            _tgt_jnt = int(parent_joint_indices_np[_link_idx])
-            target_joints_np[_i] = _tgt_jnt
-            _j = _tgt_jnt
-            while _j >= 0:
-                ancestor_masks_np[_i, _j] = 1
-                _j = int(parent_idx_np[_j])
-
-        target_jnts    = jnp.array(target_joints_np)
-        ancestor_masks = jnp.array(ancestor_masks_np)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -838,11 +848,21 @@ def ls_ik_solve_cuda(
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
-    winner, winner_coll_cost = _ls_ik_solve_cuda_jit(
-        robot=robot,
-        target_poses=target_poses_t,
-        rng_key=rng_key,
-        previous_cfg=previous_cfg,
+    _sc = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = grim_targets(
+        ("ls",), robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx, _sc,
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
+
+    # vmap over this solver folds the mapped axis into the kernel's PROBLEM axis
+    # and makes one launch, instead of serialising a kernel that already batches.
+    # See _batching.dispatch_vmap_to_batched.
+    def _single(target_wxyz_xyz, prev_cfg):
+        return _ls_ik_solve_cuda_jit(
+            robot=_robot_k,
+            target_poses=tuple(jaxlie.SE3(w) for w in target_wxyz_xyz),
+            rng_key=rng_key,
+            previous_cfg=prev_cfg,
         num_seeds=num_seeds,
         max_iter=max_iter,
         pos_weight=pos_weight,
@@ -852,10 +872,6 @@ def ls_ik_solve_cuda(
         eps_ori=eps_ori,
         continuity_weight=continuity_weight,
         fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
         world_spheres=world_spheres,
         world_capsules=world_capsules,
         world_boxes=world_boxes,
@@ -867,7 +883,51 @@ def ls_ik_solve_cuda(
         constraint_fns=cuda_constraint_fns,
         constraint_args=cuda_constraint_args,
         constraint_weights=cuda_constraint_weights,
+        ffi_target=ffi_target,
     )
+
+    def _batched(target_wxyz_xyz, prev_cfgs):
+        # The batched kernel handles ONE end-effector, so the multi-EE form of
+        # this solver cannot be folded into it. Falling back to a mapped single
+        # solve here would silently reintroduce the serialisation this exists to
+        # avoid, so it is refused loudly instead.
+        if len(target_link_indices) != 1:
+            raise NotImplementedError(
+                "vmap over ls_ik_solve_cuda is only supported for a single "
+                f"end-effector; got {len(target_link_indices)}. Call "
+                "ls_ik_solve_cuda_batch directly with a batched target instead.")
+        winners = _ls_ik_solve_cuda_batch_jit(
+            robot=_robot_k,
+            target_poses_batch=jaxlie.SE3(target_wxyz_xyz[:, 0]),
+            rng_key=rng_key,
+            previous_cfgs=prev_cfgs,
+        num_seeds=num_seeds,
+        max_iter=max_iter,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        continuity_weight=continuity_weight,
+        fixed_joint_mask_int=fixed_joint_mask_int,
+        world_spheres=world_spheres,
+        world_capsules=world_capsules,
+        world_boxes=world_boxes,
+        world_halfspaces=world_halfspaces,
+        enable_collision=kernel_collision_enabled,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        target_link_indices=target_link_indices,
+        constraint_fns=cuda_constraint_fns,
+        constraint_args=cuda_constraint_args,
+        constraint_weights=cuda_constraint_weights,
+        ffi_target=ffi_target,
+    )
+        return winners, jnp.zeros((winners.shape[0],))
+
+    _stacked_targets = jnp.stack([t.wxyz_xyz for t in target_poses_t])
+    winner, winner_coll_cost = dispatch_vmap_to_batched(_single, _batched)(
+        _stacked_targets, previous_cfg)
 
     # ── Post-CUDA JAX refinement with constraints only ────────────────────
     # Multi-EE is now handled in CUDA; only constraints require JAX refinement.
@@ -878,18 +938,25 @@ def ls_ik_solve_cuda(
             if fixed_joint_mask is not None
             else jnp.zeros(n_act, dtype=jnp.bool_)
         )
-        winner = _ls_ik_single(
+        winner = project_single(
             winner, robot, target_link_indices, target_poses_t,
-            constraint_refine_iters, lambda_init, pos_weight, ori_weight,
-            robot.joints.lower_limits, robot.joints.upper_limits,
-            fmask,
-            constraint_fns=post_constraint_fns,
-            constraint_args=post_constraint_args,
-            constraint_weights=post_constraint_weights,
+            post_constraint_fns, post_constraint_args,
+            max_iter=constraint_refine_iters, fixed_joint_mask=fmask,
         )
 
     return differentiable_ik_solution(
-        winner, robot, target_link_indices, target_poses
+        winner, robot, target_link_indices, target_poses,
+        cfg_ref=previous_cfg,
+        # Same buffers the solve kernel enforced; canonicalisation preserves
+        # pose but not clearance, so it must see the identical geometry.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, _sc[0], _sc[1],
+                           _sc[2], _sc[3], _sc[4]),
+        # The caller's requested standoff, not a hardcoded one: canonicalisation
+        # walked to 1 mm clearance under a requested 0.02 m margin, respecting
+        # its own guard while silently breaking the solver's contract.
+        canonical_margin=collision_margin,
     )
 
 
@@ -912,10 +979,13 @@ def ls_ik_solve_cuda(
         "collision_margin",
         "constraint_fns",
         "target_link_indices",
+        "ffi_target",
     ),
 )
 def _ls_ik_solve_cuda_batch_jit(
     robot:                Robot,
+    # Traced, for the same reason as the single-problem path above: read from
+    # module state they would bake into the first trace.
     target_poses_batch:   jaxlie.SE3,
     rng_key:              Array,
     previous_cfgs:        Float[Array, "n_problems n_act"],
@@ -928,10 +998,6 @@ def _ls_ik_solve_cuda_batch_jit(
     eps_ori:              float,
     continuity_weight:    float,
     fixed_joint_mask_int: Float[Array, "n_act"],
-    ancestor_masks:       Array,
-    target_jnts:          Array,
-    robot_spheres_local:  Float[Array, "n_rs 4"],
-    robot_sphere_joint_idx: jnp.ndarray,
     world_spheres:        Float[Array, "n_ws 4"],
     world_capsules:       Float[Array, "n_wc 7"],
     world_boxes:          Float[Array, "n_wb 15"],
@@ -943,8 +1009,8 @@ def _ls_ik_solve_cuda_batch_jit(
     constraint_fns:       tuple = (),
     constraint_args:      tuple = (),
     constraint_weights:   Float[Array, "n_constraints"] | None = None,
+    ffi_target=None,
 ) -> Float[Array, "n_problems n_act"]:
-    from ..cuda_kernels.ik._ls_ik_cuda import ls_ik_cuda
 
     n_act      = robot.joints.num_actuated_joints
     lower      = robot.joints.lower_limits
@@ -966,9 +1032,7 @@ def _ls_ik_solve_cuda_batch_jit(
     )  # (n_problems, n_warm, n_act)
     warm_seeds = jnp.where(fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], warm_seeds)
 
-    random_seeds = jax.random.uniform(
-        key_random, (n_problems, n_random, n_act), minval=lower, maxval=upper
-    )  # (n_problems, n_random, n_act)
+    random_seeds = sample_in_limits(key_random, (n_problems, n_random, n_act), lower, upper, previous_cfgs[:, None, :])  # (n_problems, n_random, n_act)
     random_seeds = jnp.where(
         fixed_joint_mask_int[None, None, :], previous_cfgs[:, None, :], random_seeds
     )
@@ -976,38 +1040,21 @@ def _ls_ik_solve_cuda_batch_jit(
     seeds = jnp.concatenate([warm_seeds, random_seeds], axis=1)  # (n_problems, n_seeds, n_act)
 
     # CUDA batched LM — all EEs (n_ee=1 for batch path)
-    cfgs, errors = ls_ik_cuda(
-        seeds          = seeds,
-        twists         = robot.joints.twists,
-        parent_tf      = robot.joints.parent_transforms,
-        parent_idx     = robot.joints.parent_indices,
-        act_idx        = robot.joints.actuated_indices,
-        mimic_mul      = robot.joints.mimic_multiplier,
-        mimic_off      = robot.joints.mimic_offset,
-        mimic_act_idx  = robot.joints.mimic_act_indices,
-        topo_inv       = robot.joints._topo_sort_inv,
-        target_jnts    = target_jnts,
-        ancestor_masks = ancestor_masks,
-        target_T       = target_T_batch,
-        robot_spheres_local = robot_spheres_local,
-        robot_sphere_joint_idx = robot_sphere_joint_idx,
-        world_spheres = world_spheres,
-        world_capsules = world_capsules,
-        world_boxes = world_boxes,
-        world_halfspaces = world_halfspaces,
-        lower          = lower,
-        upper          = upper,
-        fixed_mask     = fixed_joint_mask_int,
-        max_iter       = max_iter,
-        pos_weight     = pos_weight,
-        ori_weight     = ori_weight,
-        lambda_init    = lambda_init,
-        eps_pos        = eps_pos,
-        eps_ori        = eps_ori,
-        enable_collision = enable_collision,
-        collision_weight = collision_weight,
-        collision_margin = collision_margin,
-    )  # cfgs: (n_problems, n_seeds, n_act), errors: (n_problems, n_seeds)
+    cfgs, errors = run_grim(
+        ffi_target, seeds, target_T_batch,
+        (world_spheres, world_capsules, world_boxes, world_halfspaces),
+        lower, upper, fixed_joint_mask_int,
+        max_iter=max_iter,
+        pos_weight=pos_weight,
+        ori_weight=ori_weight,
+        lambda_init=lambda_init,
+        eps_pos=eps_pos,
+        eps_ori=eps_ori,
+        enable_collision=enable_collision,
+        collision_weight=collision_weight,
+        collision_margin=collision_margin,
+        robot=robot,
+    )
 
     # ── Winner selection per problem: task (all EEs) + constraint penalties + continuity
     if len(constraint_fns) > 0:
@@ -1062,6 +1109,7 @@ def ls_ik_solve_cuda_batch(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
+    traced:              bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA LS-IK: solve n_problems targets in a single kernel launch.
 
@@ -1099,6 +1147,9 @@ def ls_ik_solve_cuda_batch(
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
     """
+    # Detached for the kernel; the live `robot` still reaches the implicit
+    # rule below, which is what carries dq*/dtheta.
+    _robot_k = detached_robot(robot)
     # Normalise scalar → 1-tuple API.
     if isinstance(target_link_indices, int):
         target_link_indices = (target_link_indices,)
@@ -1125,20 +1176,6 @@ def ls_ik_solve_cuda_batch(
         collision_free=collision_free,
     )
 
-    # Ancestor mask using first EE only (batch path is single-EE; wrap in n_ee=1 format).
-    parent_joint_indices_np = np.array(robot.links.parent_joint_indices)
-    target_joint_idx        = int(parent_joint_indices_np[target_link_indices[0]])
-    parent_idx_np    = np.array(robot.joints.parent_indices)
-    n_joints         = robot.joints.num_joints
-    ancestor_mask_np = np.zeros(n_joints, dtype=np.int32)
-    j = target_joint_idx
-    while j >= 0:
-        ancestor_mask_np[j] = 1
-        j = int(parent_idx_np[j])
-    # Wrap in (1, n_joints) for n_ee=1.
-    ancestor_masks = jnp.array(ancestor_mask_np[None, :])
-    target_jnts    = jnp.array([target_joint_idx], dtype=jnp.int32)
-
     (
         robot_spheres_local,
         robot_sphere_joint_idx,
@@ -1150,35 +1187,44 @@ def ls_ik_solve_cuda_batch(
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
     kernel_collision_enabled = bool(collision_free and kernel_collision_enabled)
 
-    winners = _ls_ik_solve_cuda_batch_jit(
-        robot=robot,
-        target_poses_batch=target_poses,
+    _sc_b = self_collision_table_arrays(robot, collision_checker)
+    (ffi_target,) = grim_targets(
+        ("ls",), robot, target_link_indices, traced,
+        robot_spheres_local, robot_sphere_joint_idx, _sc_b,
+        world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
+
+    winners = sharded_batch_call(
+        _ls_ik_solve_cuda_batch_jit,
+        targets=target_poses,
         rng_key=rng_key,
         previous_cfgs=previous_cfgs,
-        num_seeds=num_seeds,
-        max_iter=max_iter,
-        pos_weight=pos_weight,
-        ori_weight=ori_weight,
-        lambda_init=lambda_init,
-        eps_pos=eps_pos,
-        eps_ori=eps_ori,
-        continuity_weight=continuity_weight,
-        fixed_joint_mask_int=fixed_joint_mask_int,
-        ancestor_masks=ancestor_masks,
-        target_jnts=target_jnts,
-        robot_spheres_local=robot_spheres_local,
-        robot_sphere_joint_idx=robot_sphere_joint_idx,
-        world_spheres=world_spheres,
-        world_capsules=world_capsules,
-        world_boxes=world_boxes,
-        world_halfspaces=world_halfspaces,
-        enable_collision=kernel_collision_enabled,
-        collision_weight=collision_weight,
-        collision_margin=collision_margin,
-        target_link_indices=target_link_indices,
-        constraint_fns=cuda_constraint_fns,
-        constraint_args=cuda_constraint_args,
-        constraint_weights=cuda_constraint_weights,
+        broadcast=dict(
+            robot=_robot_k,
+            continuity_weight=continuity_weight,
+            fixed_joint_mask_int=fixed_joint_mask_int,
+            world_spheres=world_spheres,
+            world_capsules=world_capsules,
+            world_boxes=world_boxes,
+            world_halfspaces=world_halfspaces,
+            constraint_args=cuda_constraint_args,
+            constraint_weights=cuda_constraint_weights,
+        ),
+        static=dict(
+            num_seeds=num_seeds,
+            max_iter=max_iter,
+            pos_weight=pos_weight,
+            ori_weight=ori_weight,
+            lambda_init=lambda_init,
+            eps_pos=eps_pos,
+            eps_ori=eps_ori,
+            enable_collision=kernel_collision_enabled,
+            collision_weight=collision_weight,
+            collision_margin=collision_margin,
+            target_link_indices=target_link_indices,
+            constraint_fns=cuda_constraint_fns,
+            ffi_target=ffi_target,
+        ),
+        env_var='PYROFFI_LS_IK_PMAP_MIN',
     )
 
     # ── Post-CUDA JAX refinement with all EEs + constraints (vmapped over batch)
@@ -1196,15 +1242,23 @@ def ls_ik_solve_cuda_batch(
         # or multi-EE call.  Note: only single-EE is supported for the batch
         # path's post-CUDA refinement (multi-EE batch is handled by winner selection).
         winners = jax.vmap(
-            lambda cfg, wxyz_xyz: _ls_ik_single(
+            lambda cfg, wxyz_xyz: project_single(
                 cfg, robot, target_link_indices,
                 (jaxlie.SE3(wxyz_xyz.astype(cfg.dtype)),),
-                constraint_refine_iters, lambda_init, pos_weight, ori_weight,
-                lower, upper, fmask,
-                constraint_fns=post_constraint_fns,
-                constraint_args=post_constraint_args,
-                constraint_weights=post_constraint_weights,
+                post_constraint_fns, post_constraint_args,
+                max_iter=constraint_refine_iters,
+                lower=lower, upper=upper, fixed_joint_mask=fmask,
             )
         )(winners, target_poses.wxyz_xyz)
 
-    return winners
+    return differentiable_ik_solution_batch(
+        winners, robot, target_link_indices, target_poses, cfg_ref=previous_cfgs,
+        # The SAME buffers the solve kernel enforced. Canonicalisation walks the
+        # task null space, which preserves pose but NOT clearance, so it has to
+        # see the identical geometry or it would slide out of the feasible set
+        # the solver just worked to reach.
+        collision_buffers=(robot_spheres_local, robot_sphere_joint_idx,
+                           world_spheres, world_capsules, world_boxes,
+                           world_halfspaces, *_sc_b),
+        canonical_margin=collision_margin,
+    )

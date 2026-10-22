@@ -20,8 +20,8 @@ adapted for sphere-based robot models:
 
   - Public API deliberately mirrors both :class:`CUDABinaryCollisionChecker`
     (same constructor argument, same ``check_collision_free`` /
-    ``check_edges_collision_free`` signatures) and :class:`VAMPCPUCollisionChecker`
-    (same ``set_world`` keyword args for the CAPT-style point-cloud parameters).
+    ``check_edges_collision_free`` signatures), with CAPT-style point-cloud keyword args
+    on ``set_world``.
 
 Prerequisites:
   bash build_kernels/build_robogpu_collision.sh
@@ -33,6 +33,7 @@ is used exclusively for the point cloud.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Optional
 
@@ -66,6 +67,43 @@ def _r_robot_max(f_local: Array) -> float:
 # RoboGPUCollisionChecker
 # ---------------------------------------------------------------------------
 
+def _baked_robogpu_target(robot, link_parent_joint, f_local, f_pair_i, f_pair_j, world) -> str:
+    """FFI target of the stage-1 kernel built with this robot's sphere/pair tables and the
+    scene's obstacle counts as compile-time constants (built once; cached on disk)."""
+    import hashlib
+
+    from ..cuda_kernels._build import (_KERNELS_DIR, build_shared_library, constant_table,
+                                       optix_sdk, register_cuda_targets)
+
+    lpj, fl, pi, pj = (np.asarray(a) for a in (link_parent_joint, f_local, f_pair_i, f_pair_j))
+    j = robot.joints
+    src = (
+        "namespace pyroffi::baked {\n"
+        f"constexpr int n_q = {len(j.actuated_names)};\nconstexpr int n_frames = {len(j.names)};\n"
+        + "".join(f"constexpr int n_world_{kind} = {w.shape[0]};\n"
+                  for kind, w in zip(("spheres", "capsules", "boxes", "halfspaces"), world))
+        + f"constexpr int rg_NL = {lpj.size};\nconstexpr int rg_K = {len(fl)};\n"
+        f"constexpr int rg_Pf = {pi.size};\n"
+        + constant_table("int", "kRgLinkParentJoint", lpj)
+        + constant_table("float", "kRgFLocal", fl)
+        + constant_table("int", "kRgPairI", pi)
+        + constant_table("int", "kRgPairJ", pj)
+        + "}  // namespace pyroffi::baked\n")
+    source = _KERNELS_DIR / "collision" / "_robogpu_collision_host.cu"
+    ptx = _KERNELS_DIR / "collision" / "_robogpu_optix_programs.ptx"
+    flags = ["-O3", "-std=c++17", os.environ.get("PYROFFI_TRACED_GPU_ARCH", "-arch=native"),
+             "-DPYROFFI_BAKED_TABLES", "--shared", "--compiler-options", "-fPIC",
+             f"-I{optix_sdk() / 'include'}", "-ldl"]
+    # The host library locates its OptiX programs next to itself (dladdr).
+    so = build_shared_library(
+        "robogpu", source, {"_robogpu_tables_gen.cuh": src}, flags, include_dirs=(_KERNELS_DIR,),
+        key_files=(source, ptx, *sorted(_KERNELS_DIR.glob("*.cuh"))), copy_files=(ptx,),
+        so_name="robogpu_baked.so")
+    (target,) = register_cuda_targets(so, ("RoboGPUCollisionFfi",),
+                                      "baked_" + hashlib.sha1(src.encode()).hexdigest()[:16])
+    return target
+
+
 class RoboGPUCollisionChecker:
     """OptiX-accelerated sphere-octree collision checker for point-cloud worlds.
 
@@ -87,6 +125,7 @@ class RoboGPUCollisionChecker:
         inner: RobotCollisionSpherized,
         *,
         edge_granularity: int = 16,
+        traced: bool = False,
     ) -> None:
         from ..cuda_kernels.collision._robogpu_collision_ffi import _load_and_register
         _load_and_register()
@@ -98,6 +137,10 @@ class RoboGPUCollisionChecker:
             )
 
         self._inner = inner
+        # traced=True: stage 1 compiled with this robot's sphere/pair tables and the scene's
+        # obstacle counts baked in (one build per robot and scene structure, cached on disk).
+        # The name is historical: FK stays the tree walk, nothing is cricket-traced.
+        self._traced = traced
         self._edge_granularity = int(edge_granularity)
 
         # Robot sphere geometry (row-local, static across configs). Attachment
@@ -237,6 +280,10 @@ class RoboGPUCollisionChecker:
             _pc = self._wp
             _re = self._r_env
 
+        target = (_baked_robogpu_target(_robot, _link_parent_joint, _f_local, _f_pair_i,
+                                         _f_pair_j, (_ws, _wc, _wb, _wh))
+                  if self._traced else "robogpu_collision")
+
         def _call(cfg_flat, pc):
             j = _robot.joints
             return robogpu_collision(
@@ -261,6 +308,7 @@ class RoboGPUCollisionChecker:
                 r_env=_re,
                 r_robot_max=_r_robot,
                 dynamic=dynamic,
+                ffi_target=target,
             )
 
         if dynamic:
@@ -295,6 +343,10 @@ class RoboGPUCollisionChecker:
                 (``[Mp, 3]`` float32).  Pass ``None`` to use the cached cloud.
             r_env: Override the env sphere radius for this call.
         """
+        if robot.floating_base:  # run on the evaluation chart (pyroffi._floating_base)
+            from .._floating_base import eval_chart, to_eval_chart
+
+            cfg, robot = to_eval_chart(robot, jnp.asarray(cfg)), eval_chart(robot)
         cfg = jnp.asarray(cfg, dtype=jnp.float32)
         batch_axes = cfg.shape[:-1]
         n_act = cfg.shape[-1]
@@ -320,14 +372,18 @@ class RoboGPUCollisionChecker:
         pre-discretised waypoints along each edge (``edge_granularity``).  The
         result is 1 only when ALL G points are collision-free.
 
-        Unlike :class:`VAMPCPUCollisionChecker`, this checker does NOT
-        discretise internally; the caller is responsible for interpolation::
+        This checker does NOT discretise internally; the caller is responsible for
+        interpolation::
 
             G = 16
             ts = jnp.linspace(0, 1, G)
             edges = a[:, None, :] * (1 - ts)[None, :, None] + b[:, None, :] * ts[None, :, None]
             free = checker.check_edges_collision_free(robot, edges, world)
         """
+        if robot.floating_base:  # run on the evaluation chart (pyroffi._floating_base)
+            from .._floating_base import eval_chart, to_eval_chart
+
+            edge_cfgs, robot = to_eval_chart(robot, jnp.asarray(edge_cfgs)), eval_chart(robot)
         cfg = jnp.asarray(edge_cfgs, dtype=jnp.float32)
         *edge_axes, G, n_act = cfg.shape
         E = int(np.prod(edge_axes)) if edge_axes else 1

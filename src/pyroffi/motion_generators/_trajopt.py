@@ -1,4 +1,4 @@
-"""TrajoptMotionGenerator: configurable seeding + SCO trajopt.
+"""TrajoptMotionGenerator: configurable seeding + trajectory optimization.
 
 Seeding modes:
   - ``"cartesian_ik"``: Cartesian spline interpolation between control SE(3)
@@ -9,7 +9,10 @@ Seeding modes:
 Full pipeline:
   1. Seed trajectories via the chosen ``seed_mode``.
   2. Tile to [B, T, DOF] and add Gaussian noise.
-  3. Run SCO (or other) trajectory optimization on the batch.
+  3. Optimize the batch with the engine picked by ``trajopt_cfg``'s type:
+     ``DynamicsAwareTrajOptConfig`` (default; collision-free and torque-feasible),
+     or ``ScoTrajOptConfig`` / ``ChompTrajOptConfig`` / ``StompTrajOptConfig``
+     for kinematics-only trajopt.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import jax.numpy as jnp
 import jaxlie
 from jax import Array
 from jaxtyping import Float
+from loguru import logger
 
 from .._robot import Robot
 
@@ -35,7 +39,34 @@ from .._splines import (
 )
 from ..collision import RobotCollision
 from ..optimization_engines._mppi_ik import mppi_ik_solve_cuda_batch
+from ..optimization_engines._chomp_optimization import ChompTrajOptConfig, chomp_trajopt
+from ..optimization_engines._dynamics_trajopt import (
+    DynamicsAwareTrajOptConfig,
+    dynamics_aware_trajopt,
+)
 from ..optimization_engines._sco_optimization import ScoTrajOptConfig, sco_trajopt
+from ..optimization_engines._stomp_optimization import StompTrajOptConfig, stomp_trajopt
+
+TrajOptConfig = (
+    DynamicsAwareTrajOptConfig | ScoTrajOptConfig | ChompTrajOptConfig | StompTrajOptConfig
+)
+
+
+def generate_on_chart(gen, start_pose, goal_pose, key, waypoint_poses, prev_cfgs):
+    """``gen.generate`` for a floating-base robot: plan on the fixed-base chart centred on the
+    warm start's base (see :mod:`pyroffi._floating_base`), and return floating trajectories."""
+    import dataclasses
+
+    from .._floating_base import chart_robot, from_chart, to_chart
+
+    robot = gen.robot
+    if prev_cfgs is None:
+        prev_cfgs = jnp.broadcast_to(robot.default_cfg, (gen.n_timesteps, robot.nq))
+    ref = prev_cfgs[0, :7]
+    best, costs, trajs, trajopt_time, ik_time = type(gen).generate(
+        dataclasses.replace(gen, robot=chart_robot(robot, ref)), start_pose, goal_pose, key,
+        waypoint_poses, to_chart(robot, prev_cfgs, ref))
+    return from_chart(robot, best, ref), costs, from_chart(robot, trajs, ref), trajopt_time, ik_time
 
 
 @dataclass(frozen=True)
@@ -59,7 +90,7 @@ class IKSeedConfig:
 @dataclass
 class TrajoptMotionGenerator:
     """Motion generator that plans in Cartesian space, seeds via IK, and
-    refines with SCO trajectory optimization.
+    refines with trajectory optimization (dynamically feasible by default).
 
     Pipeline:
       1. Build Cartesian control poses: ``[start_pose, *waypoint_poses, goal_pose]``.
@@ -68,7 +99,7 @@ class TrajoptMotionGenerator:
          parameter selects the interpolation method (linear, cubic, bspline).
       3. Batched MPPI CUDA IK to solve all T IK problems in one kernel launch.
       4. Tile the base trajectory to ``[B, T, DOF]`` and add noise.
-      5. Run ``sco_trajopt`` on the batch.
+      5. Optimize the batch with the engine selected by ``trajopt_cfg``'s type.
 
     Args:
         robot:       Robot kinematics pytree.
@@ -79,9 +110,17 @@ class TrajoptMotionGenerator:
         n_batch:     Number of candidate trajectories in the batch.
         noise_scale: Std of per-seed Gaussian perturbation.
         cartesian_spline_mode: Spline mode for Cartesian interpolation.
-        trajopt_cfg: SCO trajectory optimization configuration.
+        trajopt_cfg: Engine configuration; its type picks the engine.
+                     ``DynamicsAwareTrajOptConfig`` enforces collision clearance
+                     and URDF joint, velocity and torque limits.
+                     ``ScoTrajOptConfig``, ``ChompTrajOptConfig`` or
+                     ``StompTrajOptConfig`` run the kinematics-only kernels.
+                     ``None`` (default) picks ``DynamicsAwareTrajOptConfig()``,
+                     or ``ScoTrajOptConfig()`` with a warning for robots it
+                     does not support (floating base, no dynamics model).
         ik_cfg:      IK seeding configuration.
-        use_cuda:    Whether to use the CUDA backend for trajopt.
+        use_cuda:    Use the CUDA backend (GRiD dynamics for the default engine,
+                     the trajopt kernels for the others).
     """
 
     robot: Robot
@@ -95,9 +134,32 @@ class TrajoptMotionGenerator:
     cartesian_spline_mode: SplineMode = "linear"
     seed_mode: SeedMode = "cartesian_ik"
 
-    trajopt_cfg: ScoTrajOptConfig = field(default_factory=ScoTrajOptConfig)
+    trajopt_cfg: TrajOptConfig | None = None
     ik_cfg: IKSeedConfig = field(default_factory=IKSeedConfig)
     use_cuda: bool = False
+
+    def __post_init__(self):
+        # Checked on the robot as given: a floating-base robot is planned on a
+        # fixed-base chart robot (``generate_on_chart``) that has no dynamics.
+        if self.robot.floating_base:
+            unsupported = "floating-base robots are not supported yet"
+        elif self.robot.dynamics is None:
+            unsupported = ("the robot has no dynamics model (URDF without "
+                           "inertials or with an unsupported joint type)")
+        else:
+            unsupported = None
+        if self.trajopt_cfg is None:
+            if unsupported is None:
+                self.trajopt_cfg = DynamicsAwareTrajOptConfig()
+            else:
+                logger.warning(
+                    f"Dynamics-aware trajopt unavailable: {unsupported}. "
+                    "Using kinematics-only SCO (no velocity/torque limits).")
+                self.trajopt_cfg = ScoTrajOptConfig()
+        elif isinstance(self.trajopt_cfg, DynamicsAwareTrajOptConfig) and unsupported:
+            raise ValueError(
+                f"DynamicsAwareTrajOptConfig: {unsupported}. Pass a "
+                "ScoTrajOptConfig, ChompTrajOptConfig or StompTrajOptConfig.")
 
     @property
     def _ee_idx(self) -> int:
@@ -297,7 +359,7 @@ class TrajoptMotionGenerator:
         waypoint_poses: jaxlie.SE3 | None = None,
         prev_cfgs: Float[Array, "T DOF"] | None = None,
     ) -> tuple[Float[Array, "T DOF"], Float[Array, "B"], Float[Array, "B T DOF"], float, float]:
-        """Run the full pipeline: Cartesian spline → IK seeding → SCO trajopt.
+        """Run the full pipeline: Cartesian spline → IK seeding → trajopt.
 
         Args:
             start_pose:     Start end-effector SE(3) pose.
@@ -313,9 +375,11 @@ class TrajoptMotionGenerator:
             best_traj:      Best trajectory by nonlinear cost. Shape [T, DOF].
             costs:          Final cost per trajectory.          Shape [B].
             final_trajs:    All optimized trajectories.         Shape [B, T, DOF].
-            trajopt_time:   Wall-clock time for the SCO trajopt step (seconds).
+            trajopt_time:   Wall-clock time for the trajopt step (seconds).
             ik_time:        Wall-clock time for the IK seeding step (seconds).
         """
+        if self.robot.floating_base:
+            return generate_on_chart(self, start_pose, goal_pose, key, waypoint_poses, prev_cfgs)
         # Build control poses sequence: [start, *waypoints, goal]
         start_wxyz_xyz = start_pose.wxyz_xyz[None]  # [1, 7]
         goal_wxyz_xyz = goal_pose.wxyz_xyz[None]     # [1, 7]
@@ -340,16 +404,20 @@ class TrajoptMotionGenerator:
         )
         ik_time = time.perf_counter() - t0_ik
         t0 = time.perf_counter()
-        best_traj, costs, final_trajs = sco_trajopt(
-            init_trajs,
-            start_cfg,
-            goal_cfg,
-            self.robot,
-            self.robot_coll,
-            self.world_geoms,
-            self.trajopt_cfg,
-            use_cuda=self.use_cuda,
-        )
+        args = (init_trajs, start_cfg, goal_cfg, self.robot, self.robot_coll,
+                self.world_geoms, self.trajopt_cfg)
+        cfg = self.trajopt_cfg
+        if isinstance(cfg, DynamicsAwareTrajOptConfig):
+            out = dynamics_aware_trajopt(*args, use_cuda=self.use_cuda)
+        elif isinstance(cfg, ScoTrajOptConfig):
+            out = sco_trajopt(*args, use_cuda=self.use_cuda)
+        elif isinstance(cfg, ChompTrajOptConfig):
+            out = chomp_trajopt(*args, use_cuda=self.use_cuda)
+        elif isinstance(cfg, StompTrajOptConfig):
+            out = stomp_trajopt(*args, key=key, use_cuda=self.use_cuda)
+        else:
+            raise TypeError(f"Unsupported trajopt_cfg type: {type(cfg).__name__}")
+        best_traj, costs, final_trajs = out
         best_traj.block_until_ready()
         trajopt_time = time.perf_counter() - t0
         return best_traj, costs, final_trajs, trajopt_time, ik_time

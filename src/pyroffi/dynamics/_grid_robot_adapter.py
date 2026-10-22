@@ -30,6 +30,7 @@ import numpy as onp
 import yourdfpy
 from scipy.spatial.transform import Rotation
 
+from .._robot_urdf_parser import _mimic_locked_origin
 from ._grid_urdf import (
     Joint as GRiDJoint,
     Link as GRiDLink,
@@ -51,6 +52,10 @@ class GridRobotModel:
     axis_signs: onp.ndarray
     """(n,) float: +/-1 per GRiD joint id, from negated-axis normalization."""
     num_pos: int
+    num_vel: int = 0
+    floating_base: bool = False
+    """Free-flyer root (pinocchio convention): GRiD's ``q = [xyz, quat_xyzw | joints]`` and
+    tangent ``[v_lin, omega | joints]``, both in the base's body frame."""
 
 
 def _rpy_from_matrix(R: onp.ndarray) -> list[float]:
@@ -81,14 +86,11 @@ def _unit_axis(axis: onp.ndarray, joint_name: str) -> list[float]:
     return [float(v) for v in axis]
 
 
-def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
-    """Build a GRiD Robot from a yourdfpy URDF (see module docstring)."""
-    if any(j.mimic is not None for j in urdf.joint_map.values()):
-        raise NotImplementedError(
-            "GRiD dynamics does not support URDFs with mimic joints."
-        )
-
-    robot = GRiDRobot(urdf.robot.name if urdf.robot is not None else "robot")
+def build_grid_robot(urdf: yourdfpy.URDF, floating_base: bool = False) -> GridRobotModel:
+    """Build a GRiD Robot from a yourdfpy URDF (see module docstring). ``floating_base`` hangs
+    the URDF's root link off GRiD's free-flyer joint."""
+    robot = GRiDRobot(urdf.robot.name if urdf.robot is not None else "robot",
+                      floating_base=floating_base)
 
     # --- Links (inertial data, rotated into link axes). ---------------------
     for lid, (link_name, link) in enumerate(urdf.link_map.items()):
@@ -127,10 +129,13 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
     for jid, joint in enumerate(urdf.joint_map.values()):
         grid_joint = GRiDJoint(joint.name, jid, joint.parent, joint.child)
         T = joint.origin if joint.origin is not None else onp.eye(4)
+        jtype = joint.type
+        if joint.mimic is not None:
+            # Held rigid exactly as the JAX dynamics does, so both backends agree.
+            T, jtype = _mimic_locked_origin(urdf, joint), "fixed"
         grid_joint.set_origin_xyz([float(v) for v in T[:3, 3]])
         grid_joint.set_origin_rpy(_rpy_from_matrix(T[:3, :3]))
 
-        jtype = joint.type
         if jtype == "continuous":
             jtype = "revolute"
         if jtype in ("revolute", "prismatic"):
@@ -162,7 +167,8 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
 
     # --- Joint ordering map (GRiD DFS order -> pyroffi actuated order). -----
     act_names = [j.name for j in urdf.actuated_joints]
-    grid_names = [j.get_name() for j in robot.get_joints_ordered_by_id()]
+    grid_names = [j.get_name() for j in robot.get_joints_ordered_by_id()
+                  if j.get_name() != "floating_base_joint"]
     missing = set(grid_names) - set(act_names)
     if missing:
         raise NotImplementedError(
@@ -175,7 +181,8 @@ def build_grid_robot(urdf: yourdfpy.URDF) -> GridRobotModel:
     axis_signs = onp.ones(len(grid_names))
 
     n = robot.get_num_pos()
-    assert n == len(act_names), (n, act_names)
+    assert n == len(act_names) + (7 if floating_base else 0), (n, act_names)
     return GridRobotModel(
-        robot=robot, joint_perm=joint_perm, axis_signs=axis_signs, num_pos=n
+        robot=robot, joint_perm=joint_perm, axis_signs=axis_signs, num_pos=n,
+        num_vel=robot.get_num_vel(), floating_base=floating_base,
     )

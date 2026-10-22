@@ -37,22 +37,30 @@ def forward_kinematics(
         cfg: The configuration of the actuated joints, in the format `(*batch actuated_count)`.
         unroll_fk: If True, unroll the JAX fori_loop over joints (ignored when use_cuda=True).
         use_cuda: If True, dispatch to an external CUDA kernel via the JAX FFI instead of
-            the default JAX implementation.  Requires ``_fk_cuda.so`` to be compiled first
-            (see ``build_kernels/build_fk_cuda.sh``).
+            the default JAX implementation: GRiM's kinematics kernel, compiled for this
+            robot's URDF on first use. It reads the URDF's kinematics, not the ``Robot``
+            arrays, so a Robot whose joint parameters were modified needs the JAX path.
 
     Returns:
         The SE(3) transforms of the links, ordered by `robot.links.names`,
         in the format `(*batch, link_count, wxyz_xyz)`.
     """
+    from .._floating_base import split_cfg
+
     batch_axes = cfg.shape[:-1]
-    assert cfg.shape == (*batch_axes, robot.joints.num_actuated_joints)
+    assert cfg.shape == (*batch_axes, robot.nq)
+    base, cfg = split_cfg(robot, cfg)
 
     if use_cuda:
         Ts_world_joint = _fk_cuda_differentiable(cfg, robot, unroll_fk)
     else:
         Ts_world_joint = forward_kinematics_joints_jax(robot, cfg, unroll_fk)
 
-    return link_poses_from_joint_poses(robot, Ts_world_joint)
+    Ts = link_poses_from_joint_poses(robot, Ts_world_joint)
+    if base is None:
+        return Ts
+    # Floating base: every pose above is relative to the root link, which sits at `base`.
+    return (jaxlie.SE3(base[..., None, :]) @ jaxlie.SE3(Ts)).wxyz_xyz
 
 
 def link_poses_from_joint_poses(
@@ -130,6 +138,10 @@ def forward_kinematics_joints_jax(
     unroll_fk: jdc.Static[bool] = False,
 ) -> Float[Array, "*batch joint_count 7"]:
     (*batch_axes, _) = cfg.shape
+    if robot.floating_base and cfg.shape[-1] == robot.nq:
+        # A floating configuration: world joint poses, the base composed on the left.
+        T = forward_kinematics_joints_jax(robot, cfg[..., 7:], unroll_fk)
+        return (jaxlie.SE3(cfg[..., None, :7]) @ jaxlie.SE3(T)).wxyz_xyz
     assert cfg.shape == (*batch_axes, robot.joints.num_actuated_joints)
 
     # Calculate full configuration using the dedicated method
@@ -141,7 +153,9 @@ def forward_kinematics_joints_jax(
     # loop below is pure matmul.
     delta_mats = _joint_delta_matrices(robot.joints.twists, q_full)
     parent_mats = jaxlie.SE3(robot.joints.parent_transforms).as_matrix()  # (n_joints,4,4)
-    Ts_parent_child = parent_mats @ delta_mats  # (*batch, n_joints, 4, 4)
+    # HIGHEST: on Ampere+ GPUs float32 matmuls default to TF32 (~10 mantissa bits), which
+    # put FK off by ~1e-3 (measured: 9e-4 on G1 vs float64; 3e-7 with HIGHEST).
+    Ts_parent_child = jnp.matmul(parent_mats, delta_mats, precision=jax.lax.Precision.HIGHEST)
     assert Ts_parent_child.shape == (*batch_axes, robot.joints.num_joints, 4, 4)
 
     # Topological sort helpers
@@ -168,7 +182,8 @@ def forward_kinematics_joints_jax(
             Ts_world_link_sorted[..., parent_sorted_idx, :, :],
         )
         return Ts_world_link_sorted.at[..., i, :, :].set(
-            T_world_parent_link @ Ts_parent_child_sorted[..., i, :, :]
+            jnp.matmul(T_world_parent_link, Ts_parent_child_sorted[..., i, :, :],
+                       precision=jax.lax.Precision.HIGHEST)
         )
 
     Ts_world_link_init_sorted = jnp.zeros(
@@ -213,21 +228,18 @@ def _fk_cuda_differentiable(
     input.  Both ``jax.jvp`` and ``jax.grad`` work; differentiated calls evaluate
     the JAX FK (the FFI itself is not differentiable).
     """
-    from ..cuda_kernels.fk._fk_cuda import fk_cuda
+    from .. import _grim
 
-    return fk_cuda(
-        cfg=cfg,
-        twists=robot.joints.twists,
-        parent_tf=robot.joints.parent_transforms,
-        parent_idx=robot.joints.parent_indices,
-        act_idx=robot.joints.actuated_indices,
-        mimic_mul=robot.joints.mimic_multiplier,
-        mimic_off=robot.joints.mimic_offset,
-        mimic_act_idx=robot.joints.mimic_act_indices,
-        topo_inv=robot.joints._topo_sort_inv,
-        fk_level_starts=robot.joints.fk_level_starts,
-        fk_level_joints=robot.joints.fk_level_joints,
-    )
+    _grim.ensure_importable()
+    from grim.motion.kinematics import kinematics
+
+    from .._floating_base import chart_rotation
+
+    batch = cfg.shape[:-1]
+    rot_joint, rot = chart_rotation(robot)
+    T, _r, _J = kinematics(_grim.motion_robot(robot), cfg.reshape(-1, cfg.shape[-1]),
+                           runtime_rot_joint=rot_joint, rot=rot)
+    return T.reshape(*batch, *T.shape[1:])
 
 
 @_fk_cuda_differentiable.defjvp

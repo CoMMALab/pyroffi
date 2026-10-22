@@ -79,7 +79,9 @@ import jaxlie
 from jax import Array
 from jaxtyping import Float
 
+from .._floating_base import sample_in_limits
 from .._robot import Robot
+from ._nullspace import project_single
 from ._ik_primitives import _ik_residual
 from ._implicit_diff import differentiable_ik_solution
 from ._ls_ik import _ls_ik_single
@@ -366,7 +368,7 @@ def make_learned_ik_solve(
         flow_seeds = jnp.clip(mid + half * q_norms, lower, upper)
         flow_seeds = jnp.where(fixed_joint_mask[None], previous_cfg[None], flow_seeds)
 
-        rand_seeds = jax.random.uniform(key_r, (n_rand, n_act), minval=lower, maxval=upper)
+        rand_seeds = sample_in_limits(key_r, (n_rand, n_act), lower, upper, previous_cfg[None, :])
         rand_seeds = jnp.where(fixed_joint_mask[None], previous_cfg[None], rand_seeds)
 
         seeds = jnp.concatenate([flow_seeds, rand_seeds], axis=0)  # (num_seeds, n_act)

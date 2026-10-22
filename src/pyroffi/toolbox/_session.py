@@ -560,22 +560,27 @@ class Session:
     def available_backends(self) -> dict[str, bool]:
         """Which accelerated backends this build can actually reach.
 
-        Probed rather than assumed: the CUDA kernels and GRiD are built
+        Probed rather than assumed: the CUDA kernels and GRiM are built
         out-of-tree, so a wheel that imports fine may still have none of them.
         """
         import jax
 
         out = {"jax": True, "cuda_device": any(d.platform == "gpu" for d in jax.devices())}
         for name, module in (
-            ("cuda_collision", "pyroffi.cuda_kernels._collision_cuda_ffi"),
-            ("cuda_fk", "pyroffi.cuda_kernels._fk_cuda"),
-            ("vamp", "vamp"),
+            ("cuda_collision", "pyroffi.cuda_kernels.collision._collision_cuda_ffi"),
         ):
             try:
                 __import__(module)
                 out[name] = True
             except Exception:
                 out[name] = False
+        try:
+            from .. import _grim
+
+            _grim.motion()
+            out["grim"] = True
+        except Exception:
+            out["grim"] = False
         try:
             out["grid_dynamics"] = self.robot.dynamics is not None
         except Exception:

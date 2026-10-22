@@ -1,16 +1,12 @@
 """Sample Panda IK configurations across multiple cartesian box regions in one call.
 
 This example exercises ``direct_sample_box_region_cuda`` (sample target points
-uniformly inside each box, then solve IK to each one with the standard
-``ls_ik_cuda`` LM kernel) and demonstrates the batched-box API: two boxes are
-solved in a single call, with seeds round-robin'd across regions inside the
-shared GPU launch.
+uniformly inside each box, then solve IK to each one with GRiM's LS-IK kernel)
+and demonstrates the batched-box API: two boxes are solved in a single call, with
+seeds round-robin'd across regions inside the shared GPU launch.
 
-Includes optional collision avoidance against a draggable sphere obstacle plus
-self-collision pruning, both handled in-kernel by ``ls_ik_cuda``.
-
-Prerequisite:
-    bash build_kernels/build_ls_ik_cuda.sh
+Includes optional collision avoidance against a draggable sphere obstacle, handled
+in-kernel. The kernel compiles for the robot on first use.
 """
 
 from __future__ import annotations

@@ -407,9 +407,9 @@ def chomp_trajopt(
         final_trajs: All optimized trajectories.        [B, T, DOF].
     """
     if use_cuda:
-        from ..cuda_kernels.trajopt._chomp_trajopt_cuda import chomp_trajopt_cuda
-        return chomp_trajopt_cuda(
-            init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
+        from ._trajopt_cuda import trajopt_cuda
+        return trajopt_cuda(
+            "chomp", init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg
         )
     return _chomp_trajopt_jax(
         init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg

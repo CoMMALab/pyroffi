@@ -113,9 +113,14 @@ class CollGeom(abc.ABC):
 
     def transform(self, transform: jaxlie.SE3) -> Self:
         """Left-multiples geometry's pose with an SE(3) transformation."""
-        with jdc.copy_and_mutate(self) as out:
-            out.pose = transform @ self.pose
-        return out.broadcast_to(out.pose.get_batch_axes())
+        # Broadcast first: copy_and_mutate rejects a pose whose batch shape grows.
+        batch_axes = jnp.broadcast_shapes(
+            self.pose.get_batch_axes(), transform.get_batch_axes()
+        )
+        out = self.broadcast_to(batch_axes)
+        with jdc.copy_and_mutate(out) as out:
+            out.pose = transform @ out.pose
+        return out
 
     def transform_from_wxyz_position(
         self,
@@ -489,6 +494,36 @@ class Box(CollGeom):
     def extents(self) -> Float[Array, "*batch 3"]:
         """Full extents (width, depth, height) = 2 * half_lengths."""
         return 2.0 * self.half_lengths
+
+    # PyRoki-compatible names for the two properties above.
+    half_extent = half_lengths
+    extent = extents
+
+    @staticmethod
+    def from_extent(
+        extent: Float[ArrayLike, "*batch 3"],
+        position: Float[ArrayLike, "*batch 3"] | None = None,
+        wxyz: Float[ArrayLike, "*batch 4"] | None = None,
+    ) -> Box:
+        """PyRoki-compatible constructor from full extents and an optional pose."""
+        return Box.from_center_and_half_lengths(
+            center=jnp.zeros((3,)) if position is None else position,
+            half_lengths=jnp.asarray(extent) / 2.0,
+            wxyz=wxyz,
+        )
+
+    def get_corners_local(self) -> Float[Array, "*batch 8 3"]:
+        """The 8 box corners in the box frame."""
+        signs = jnp.array(
+            [[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)],
+            dtype=self.size.dtype,
+        )
+        return self.half_lengths[..., None, :] * signs
+
+    def get_corners_world(self) -> Float[Array, "*batch 8 3"]:
+        """The 8 box corners in the world frame."""
+        pose = jaxlie.SE3(self.pose.wxyz_xyz[..., None, :])
+        return pose.apply(self.get_corners_local())
 
     def sdf(self, points: Float[ArrayLike, "*points 3"]) -> Float[Array, "*points"]:
         """Signed distance to the (oriented) box surface (standard box SDF).

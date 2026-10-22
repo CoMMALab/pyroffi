@@ -2,8 +2,10 @@
 
 Written against a generic forward-dynamics callable ``fd(q, qd) -> qdd`` so
 the same steppers drive both the pure-JAX ABA and the GRiD CUDA kernels.
-All joints are 1-DOF revolute/prismatic (no floating base), so configuration
-integration is plain vector addition; everything is jit/vmap/scan friendly.
+Configurations advance through ``retract(q, v, dt)``: plain ``q + v * dt`` for
+1-DOF joints, and the SE(3) exponential for a floating base
+(:func:`pyroffi._floating_base.integrate`), so ``q`` may be longer than ``qd``.
+Everything is jit/vmap/scan friendly.
 """
 
 from __future__ import annotations
@@ -15,6 +17,11 @@ from jax import Array
 from jax import numpy as jnp
 
 StepMethod = Literal["semi_implicit", "euler", "rk4", "linearly_implicit"]
+Retract = Callable[[Array, Array, "float | Array"], Array]
+
+
+def _add(q: Array, v: Array, dt) -> Array:
+    return q + v * dt
 
 
 def _linearly_implicit_step(
@@ -22,6 +29,7 @@ def _linearly_implicit_step(
     q: Array,
     qd: Array,
     dt: float | Array,
+    retract: Retract = _add,
 ) -> tuple[Array, Array]:
     """One linearly-implicit (Rosenbrock--Euler) step on ``(q, qd)``.
 
@@ -51,20 +59,24 @@ def _linearly_implicit_step(
     at ``dt`` several times the explicit limit. For genuinely coarse ``dt`` on an
     undamped system, combine it with ``substeps`` to keep the effective step
     within the system's natural timescale (~0.02 s for the Panda).
+
+    The position part is solved in local coordinates ``eps`` around ``q``
+    (``q(eps) = retract(q, eps, 1)``), so a floating base's quaternion never
+    enters the linear solve: the state is ``[eps; qd]``, both ``nv`` long, and
+    the fixed-base case is unchanged (``eps`` is then ``q - q0``).
     """
-    n = q.shape[-1]
+    n = qd.shape[-1]
 
     def f_stacked(y: Array) -> Array:
-        q_, qd_ = y[:n], y[n:]
-        return jnp.concatenate([qd_, fd(q_, qd_)])
+        eps, qd_ = y[:n], y[n:]
+        return jnp.concatenate([qd_, fd(retract(q, eps, 1.0), qd_)])
 
-    y = jnp.concatenate([q, qd])
+    y = jnp.concatenate([jnp.zeros_like(qd), qd])
     f0 = f_stacked(y)
     A = jax.jacobian(f_stacked)(y)  # (2n, 2n)
     lhs = jnp.eye(2 * n, dtype=y.dtype) - dt * A
     dy = jnp.linalg.solve(lhs, dt * f0)
-    y_next = y + dy
-    return y_next[:n], y_next[n:]
+    return retract(q, dy[:n], 1.0), qd + dy[n:]
 
 
 def _step_once(
@@ -73,23 +85,26 @@ def _step_once(
     qd: Array,
     dt: float | Array,
     method: StepMethod,
+    retract: Retract = _add,
 ) -> tuple[Array, Array]:
     if method == "semi_implicit":
         qd_next = qd + dt * fd(q, qd)
-        return q + dt * qd_next, qd_next
+        return retract(q, qd_next, dt), qd_next
     if method == "linearly_implicit":
-        return _linearly_implicit_step(fd, q, qd, dt)
+        return _linearly_implicit_step(fd, q, qd, dt, retract)
     if method == "euler":
-        return q + dt * qd, qd + dt * fd(q, qd)
+        return retract(q, qd, dt), qd + dt * fd(q, qd)
     if method == "rk4":
+        # Stages in the tangent space, one retraction per stage point (exact for 1-DOF
+        # joints; the usual tangent-space RK4 for a floating base).
         k1_q, k1_qd = qd, fd(q, qd)
         k2_q = qd + 0.5 * dt * k1_qd
-        k2_qd = fd(q + 0.5 * dt * k1_q, k2_q)
+        k2_qd = fd(retract(q, k1_q, 0.5 * dt), k2_q)
         k3_q = qd + 0.5 * dt * k2_qd
-        k3_qd = fd(q + 0.5 * dt * k2_q, k3_q)
+        k3_qd = fd(retract(q, k2_q, 0.5 * dt), k3_q)
         k4_q = qd + dt * k3_qd
-        k4_qd = fd(q + dt * k3_q, k4_q)
-        q_next = q + (dt / 6.0) * (k1_q + 2 * k2_q + 2 * k3_q + k4_q)
+        k4_qd = fd(retract(q, k3_q, dt), k4_q)
+        q_next = retract(q, (k1_q + 2 * k2_q + 2 * k3_q + k4_q) / 6.0, dt)
         qd_next = qd + (dt / 6.0) * (k1_qd + 2 * k2_qd + 2 * k3_qd + k4_qd)
         return q_next, qd_next
     raise ValueError(f"Unknown integration method: {method!r}")
@@ -102,6 +117,7 @@ def step_with_fd(
     dt: float | Array,
     method: StepMethod = "semi_implicit",
     substeps: int = 1,
+    retract: Retract = _add,
 ) -> tuple[Array, Array]:
     """Advance ``(q, qd)`` by one step of size ``dt`` under ``qdd = fd(q, qd)``.
 
@@ -120,11 +136,11 @@ def step_with_fd(
     if substeps <= 0:
         raise ValueError(f"substeps must be a positive int, got {substeps!r}")
     if substeps == 1:
-        return _step_once(fd, q, qd, dt, method)
+        return _step_once(fd, q, qd, dt, method, retract)
     sub_dt = dt / substeps
     # lax.fori_loop (not a Python loop) so compile cost is O(1) in substeps -- a
     # Python loop would unroll the whole RNEA `substeps` times.
     q, qd = jax.lax.fori_loop(
-        0, substeps, lambda _, s: _step_once(fd, s[0], s[1], sub_dt, method), (q, qd)
+        0, substeps, lambda _, s: _step_once(fd, s[0], s[1], sub_dt, method, retract), (q, qd)
     )
     return q, qd

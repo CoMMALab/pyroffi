@@ -102,6 +102,44 @@ def _ik_residual(
     return (T_actual.inverse() @ target_pose).log()
 
 
+def _ik_residual_kernel_convention(
+    cfg: Float[Array, "n_act"],
+    robot: Robot,
+    target_link_index: int,
+    target_pose: jaxlie.SE3,
+) -> Float[Array, "6"]:
+    """The CUDA kernels' residual, in JAX. Layout: [pos(3), ori(3)].
+
+    World-frame position difference stacked with a world-frame rotation vector::
+
+        pos = p_ee - p_tgt
+        ori = log(R_ee @ R_tgt^-1)
+
+    This is NOT :func:`_ik_residual`, which is the SE(3) LOCAL log-map
+    ``(T_actual^-1 @ T_target).log()``. The two differ by an invertible 6x6 A
+    whose position block carries a rotation, so their Jacobians differ
+    elementwise.
+
+    Both are valid optimality conditions -- r = 0 at the same configurations --
+    and the implicit-diff tangent is invariant to the choice, because for
+    full-row-rank J_q::
+
+        pinv(A J_q) (A J_t) = J_q^+ J_t
+
+    But that invariance holds ONLY when J_q, J_t and J_theta all come from the
+    SAME residual. The CUDA task-Jacobian kernel returns J_q in THIS convention,
+    so the implicit rule uses this function for the remaining blocks. Pairing
+    the kernel's J_q with `_ik_residual`'s J_t would produce a confidently wrong
+    gradient with no error raised anywhere -- the reason the two live side by
+    side with this note rather than one being quietly swapped for the other.
+    """
+    Ts_world_link = robot.forward_kinematics(cfg)
+    T_actual = jaxlie.SE3(Ts_world_link[target_link_index])
+    pos = T_actual.translation() - target_pose.translation()
+    ori = (T_actual.rotation() @ target_pose.rotation().inverse()).log()
+    return jnp.concatenate([pos, ori])
+
+
 @jax.jit
 def _adaptive_weights(f: Float[Array, "6"]) -> Float[Array, "6"]:
     """Adaptive position / orientation balance weights.
@@ -114,3 +152,137 @@ def _adaptive_weights(f: Float[Array, "6"]) -> Float[Array, "6"]:
     ori_err = jnp.linalg.norm(f[3:]) + 1e-8
     ori_scale = jnp.clip(pos_err / ori_err, 0.05, 1.0)
     return jnp.concatenate([jnp.ones(3), jnp.full(3, ori_scale)])
+
+
+# ---------------------------------------------------------------------------
+# Self-collision tables for the CUDA IK kernels
+# ---------------------------------------------------------------------------
+
+# Empty tables: the kernels read n_self_pairs == 0 as "self-collision disabled",
+# so these are also the default for callers that pass no checker.
+_EMPTY_SELF_TABLES = (
+    jnp.zeros((0, 4), jnp.float32),   # sph_local
+    jnp.zeros((1,), jnp.int32),       # link_start
+    jnp.zeros((1,), jnp.int32),       # link_joint
+    jnp.zeros((0,), jnp.int32),       # pair_i
+    jnp.zeros((0,), jnp.int32),       # pair_j
+)
+
+
+def _host(a):
+    """Collision tables as numpy. Empty ones may be traced ``jnp.zeros`` made inside a
+    caller's jit, where only their static shape matters."""
+    import numpy as np
+
+    return np.zeros(a.shape, a.dtype) if a.size == 0 else np.asarray(a)
+
+
+def grim_targets(kernels: tuple[str, ...], robot: Robot, target_link_indices: tuple[int, ...],
+                 traced: bool, robot_spheres, robot_sphere_joint, self_tables,
+                 world=()) -> tuple:
+    """GRiM IK kernels (``grim.motion.ik.KERNELS`` names) compiled for this robot, its
+    end-effectors and collision setup: one hashable target per kernel, for :func:`run_grim`.
+
+    Runs outside jit (the build needs concrete tables); the first call on a robot compiles,
+    later ones hit GRiM's disk cache. ``world`` is the call's (spheres, capsules, boxes,
+    halfspaces) buffers, of which only the row counts are baked in. ``traced`` compiles
+    against cricket-traced kinematics instead of baked tables.
+    """
+    from .. import _grim
+
+    _grim.ensure_importable()
+    from grim.motion import ik
+    from grim.motion._build import SelfCollision
+
+    from .._floating_base import chart_rotation_joint
+
+    mrobot = _grim.motion_robot(robot)
+    parent_joint = robot._backends._parent_joint_indices
+    ee_joints = tuple(int(parent_joint[i]) for i in target_link_indices)
+    sc = SelfCollision(*(_host(t) for t in self_tables))
+    collision = ik.CollisionModel(_host(robot_spheres), _host(robot_sphere_joint), sc)
+    counts = tuple(int(w.shape[0]) for w in world) or (0, 0, 0, 0)
+    # A floating base's chart takes its reference rotation per call (see run_grim).
+    rot_joint = chart_rotation_joint(robot)
+    return tuple(ik.build(k, mrobot, ee_joints, collision=collision, world_counts=counts,
+                          traced=traced, runtime_rot_joint=rot_joint) for k in kernels)
+
+
+def run_grim(target, seeds, targets, world, lower, upper, fixed_mask, noise=None, rng_seed=0,
+             robot=None, **settings):
+    """Launch a :func:`grim_targets` target with zero autodiff derivative (see
+    ``_batching.constant_wrt_autodiff``). ``world`` is (spheres, capsules, boxes,
+    halfspaces); ``noise`` is hjcd_lm's stall kicks and ``rng_seed`` mppi's seed (either may
+    be traced); ``robot`` supplies a chart's reference rotation; ``settings`` (static) go to
+    ``grim.motion.ik.run``."""
+    from grim.motion import ik
+
+    from ._batching import constant_wrt_autodiff
+
+    # Arrays are operands of the wrapped call, not captures: jax.custom_jvp binds only what
+    # it is passed, and a captured tracer fails with "No constant handler".
+    from .._floating_base import chart_rotation
+
+    rot = chart_rotation(robot)[1] if target.runtime_rot else None
+
+    def _run(seeds, targets, lower, upper, fixed_mask, noise, rng_seed, rot, *world):
+        return ik.run(target, seeds, targets, world=ik.World(*world), lower=lower,
+                      upper=upper, fixed_mask=fixed_mask, noise=noise, rng_seed=rng_seed,
+                      rot=rot, **settings)
+
+    return constant_wrt_autodiff(_run)(seeds, targets, lower, upper, fixed_mask, noise,
+                                       rng_seed, rot, *world)
+
+
+def self_collision_table_arrays(robot, collision_checker):
+    """Self-collision buffers for the CUDA IK kernels, empties when unavailable.
+
+    TODO(task 6): activation is implicit in the checker's TYPE, so passing a
+    collision_checker changes IK behaviour for every existing caller with no
+    opt-in and no way to disable it short of dropping the checker. Add an
+    explicit parameter (defaulting to current behaviour) and surface the SRDF
+    requirement at the API level, not just in this docstring.
+
+    Deliberately *not* a new user-facing argument. A caller that already passes
+    ``collision_checker`` has expressed intent to avoid collisions, and a
+    spherized model carries its own SRDF-filtered active-pair table -- so the
+    self-collision check comes along automatically rather than needing to be
+    requested separately. Anything else (capsule models, custom checkers) gets
+    empties, which the kernels read as "disabled".
+
+    ``sph_local`` travels with the tables because ``link_start`` indexes THIS
+    buffer. It is not interchangeable with a solver's ``robot_spheres_local``,
+    which drops links with no parent joint and so has different offsets.
+
+    Note the SRDF requirement: a spherized model built WITHOUT one reports
+    adjacent links as permanently overlapping, and every configuration would be
+    rejected. That is a property of the model, not of this code path.
+    """
+    from ..collision._robot_collision import RobotCollisionSpherized
+    from ..collision._cuda_collision import static_arrays
+
+    if robot is None or not isinstance(collision_checker, RobotCollisionSpherized):
+        return _EMPTY_SELF_TABLES
+
+    # Deliberately unguarded: a checker that IS spherized but whose tables fail
+    # to build is a bug, and swallowing it here yields a silent no-op that looks
+    # exactly like "self-collision had no effect".
+    #
+    # static_arrays() does plain-numpy conversion (np.asarray) on the checker's
+    # geometry, which is only valid outside an active JAX trace. robot/
+    # collision_checker are always concrete Python objects here (never a scan
+    # carry or other dynamic value) -- but a caller of THIS function may itself
+    # be running inside a jax.jit/lax.scan trace (e.g. bench_ik.py's timing
+    # harness), where any jnp op -- even one applied to a closed-over constant
+    # -- returns a Tracer, and np.asarray() on a Tracer always raises
+    # TracerArrayConversionError. ensure_compile_time_eval forces this block to
+    # run eagerly regardless of the surrounding trace, which is exactly the
+    # constant-folding case it exists for.
+    with jax.ensure_compile_time_eval():
+        sph_local, link_start, link_joint, pair_i, pair_j = static_arrays(
+            robot, collision_checker)
+        return (jnp.asarray(sph_local, jnp.float32),
+                jnp.asarray(link_start, jnp.int32),
+                jnp.asarray(link_joint, jnp.int32),
+                jnp.asarray(pair_i, jnp.int32),
+                jnp.asarray(pair_j, jnp.int32))

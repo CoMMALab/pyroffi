@@ -17,6 +17,14 @@ from ._cuda_backends import CudaBackends
 from . import kinematics as _kinematics
 
 
+def _joint_var_cls(default_cfg):
+    from .costs._problem import Var
+
+    class JointVar(Var[Array], default_factory=lambda: default_cfg): ...
+
+    return JointVar
+
+
 @jdc.pytree_dataclass
 class Robot:
     """A differentiable robot kinematics tree."""
@@ -27,12 +35,13 @@ class Robot:
     links: LinkInfo
     """Link information for the robot."""
 
-    default_cfg: Float[Array, "actuated_count"]
-    """Default joint configuration (actuated joints), used to seed solvers."""
+    default_cfg: Float[Array, "nq"]
+    """Default configuration, used to seed solvers: the actuated joints, preceded by the base
+    pose (``wxyz_xyz``) for a floating-base robot."""
 
     dynamics: DynamicsInfo | None = None
     """Rigid body dynamics information (None when the URDF lacks inertials
-    or contains unsupported features such as mimic joints)."""
+    or contains unsupported joint types)."""
 
     _backends: jdc.Static[CudaBackends | None] = None
     """Lazy holder for URDF-dependent CUDA backends (collision, GRiD dynamics).
@@ -45,12 +54,30 @@ class Robot:
     given an ``mjcf_path``. Static pytree aux-data, identity-hashed. ``None``
     unless an MJCF file was supplied at construction."""
 
+    floating_base: jdc.Static[bool] = False
+    """True when the root link is free in SE(3): ``cfg = [base wxyz_xyz (7) | joints]`` and
+    velocity-like vectors are ``[base twist (6) | joints]`` (see :mod:`pyroffi._floating_base`)."""
+
+    joint_var_cls: jdc.Static[type | None] = None
+    """:class:`pyroffi.Var` subclass for this robot's configuration, defaulting to
+    ``default_cfg`` (PyRoKi's ``robot.joint_var_cls``)."""
+
     attached_names: jdc.Static[tuple[str, ...]] = ()
     """Names of the attachments already folded into ``dynamics.I_body``.
 
     Static aux data. Composition is additive and leaves no other trace, so
     without this a second :meth:`with_attachments` would silently double the
     carried load. See :func:`pyroffi.attachments.compose_dynamics`."""
+
+    @property
+    def nq(self) -> int:
+        """Configuration dimension: ``7 + n`` for a floating base, else ``n`` actuated joints."""
+        return self.joints.num_actuated_joints + (7 if self.floating_base else 0)
+
+    @property
+    def nv(self) -> int:
+        """Velocity (tangent) dimension: ``6 + n`` for a floating base, else ``n``."""
+        return self.joints.num_actuated_joints + (6 if self.floating_base else 0)
 
     @property
     def mjcf_model(self):
@@ -87,7 +114,9 @@ class Robot:
         """
         from .attachments import compose_dynamics
 
-        return compose_dynamics(self, aset)
+        from . import _registry
+
+        return _registry.register(compose_dynamics(self, aset))
 
     @property
     def urdf(self):
@@ -115,6 +144,7 @@ class Robot:
         urdf: yourdfpy.URDF,
         default_joint_cfg: Float[ArrayLike, "*batch actuated_count"] | None = None,
         mjcf_path: str | None = None,
+        floating_base: bool | None = None,
     ) -> Robot:
         """
         Loads a robot kinematic tree from a URDF.
@@ -133,7 +163,18 @@ class Robot:
                 mirroring how an SRDF is optionally supplied to
                 :meth:`pyroffi.collision.RobotCollision.from_urdf` — omit it
                 if you don't need MJCF-sourced dynamics data.
+            floating_base: Make the root link free in SE(3). ``None`` (default) detects it: a
+                URDF whose root is connected to its first body by a ``floating`` joint (the
+                ``world -> pelvis`` pattern) is floating, with that joint's origin as the default
+                base pose, and the joint and its parent link are removed from the kinematic tree.
+                ``True`` floats the URDF's root link as is (humanoid URDFs rooted at the pelvis).
+                ``default_joint_cfg``, when given, covers the actuated joints only.
         """
+        from . import _floating_base
+
+        urdf, base_origin = _strip_floating_root(urdf)
+        if floating_base is None:
+            floating_base = base_origin is not None
         joints, links = RobotURDFParser.parse(urdf)
 
         # Compute default joint configuration.
@@ -142,9 +183,13 @@ class Robot:
         else:
             default_joint_cfg = jnp.array(default_joint_cfg)
         assert default_joint_cfg.shape == (joints.num_actuated_joints,)
+        if floating_base:
+            base0 = (jaxlie.SE3.from_matrix(jnp.asarray(base_origin, jnp.float32)).wxyz_xyz
+                     if base_origin is not None else _floating_base.neutral_base())
+            default_joint_cfg = _floating_base.join_cfg(base0, default_joint_cfg)
 
         try:
-            dynamics = RobotURDFParser.parse_dynamics(urdf)
+            dynamics = RobotURDFParser.parse_dynamics(urdf, floating_base=floating_base)
         except NotImplementedError as e:
             logger.warning(f"Dynamics unavailable for this URDF: {e}")
             dynamics = None
@@ -165,11 +210,16 @@ class Robot:
                 parent_indices=joints.parent_indices,
                 parent_joint_indices=links.parent_joint_indices,
                 num_joints=joints.num_joints,
+                floating_base=bool(floating_base),
             ),
             _mjcf_model=mjcf_model,
+            floating_base=bool(floating_base),
+            joint_var_cls=_joint_var_cls(default_joint_cfg),
         )
 
-        return robot
+        from . import _registry
+
+        return _registry.register(robot)
 
     @jdc.jit
     def forward_kinematics(
@@ -186,12 +236,10 @@ class Robot:
         Args:
             cfg: The configuration of the actuated joints, in the format `(*batch actuated_count)`.
             unroll_fk: If True, unroll the JAX fori_loop over joints (ignored when use_cuda=True).
-            use_cuda: If True, dispatch to an external CUDA kernel via the JAX FFI instead of
-                the default JAX implementation.  Requires ``_fk_cuda.so`` to be compiled first
-                (see ``build_kernels/build_fk_cuda.sh``).  jit-compatible: the kernel derives
-                its buffers from ``robot.joints.*`` and calls the FFI, so it may be freely
-                wrapped in ``jax.jit`` (``jax.vmap`` is not supported by the FFI kernel — use a
-                leading batch dimension on ``cfg`` instead).
+            use_cuda: If True, dispatch to GRiM's kinematics kernel (compiled for this robot's
+                URDF on first use) instead of the default JAX implementation. It reads the
+                URDF's kinematics, not ``robot.joints.*``. jit-compatible (``jax.vmap`` is not
+                supported by the FFI kernel — use a leading batch dimension on ``cfg``).
 
         Returns:
             The SE(3) transforms of the links, ordered by `self.link.names`,
@@ -213,6 +261,7 @@ class Robot:
         constraint_args: Sequence = (),
         constraint_weights=None,
         use_cuda: bool = False,
+        base_region=None,
         **solver_kwargs,
     ) -> Float[Array, "n_actuated_joints"]:
         """Solve inverse kinematics, dispatching over solver and backend.
@@ -255,6 +304,10 @@ class Robot:
                                FFI kernels have no batching rule); batch instead
                                by adding leading dims to *previous_cfg*/targets
                                where the solver supports it.
+            base_region:       Floating base only: ``(lo, hi)`` world-frame xyz bounds the
+                               base position is sampled from and kept within. Without it
+                               the base is unbounded and seeds start at the warm start's base.
+                               ``fixed_joint_mask`` covers the joints, not the base.
             solver_kwargs:     Extra solver-specific options forwarded verbatim,
                                e.g. ``coarse_max_iter``/``lm_max_iter``/``epsilon``/
                                ``nu``/``lambda_init`` for ``hjcd``;
@@ -279,6 +332,7 @@ class Robot:
             constraint_args=constraint_args,
             constraint_weights=constraint_weights,
             use_cuda=use_cuda,
+            base_region=base_region,
             **solver_kwargs,
         )
 
@@ -501,3 +555,31 @@ class Robot:
         unroll_fk: jdc.Static[bool] = False,
     ) -> Float[Array, "*batch joint_count 7"]:
         return _kinematics.forward_kinematics_joints_jax(self, cfg, unroll_fk)
+
+
+def _strip_floating_root(urdf: yourdfpy.URDF) -> tuple[yourdfpy.URDF, "object | None"]:
+    """Remove a ``floating`` joint hanging the robot off its root link, and that root link.
+
+    Returns the URDF of the remaining tree (rooted at the joint's child) and the joint's origin
+    (4x4), or the URDF unchanged and ``None`` when there is no such joint. Floating joints
+    anywhere else are left for the parser to reject.
+    """
+    import copy
+
+    import numpy as onp
+
+    root = urdf.base_link
+    floating = [j for j in urdf.robot.joints if j.type == "floating" and j.parent == root]
+    if not floating:
+        return urdf, None
+    if len(floating) > 1 or len([j for j in urdf.robot.joints if j.parent == root]) > 1:
+        raise NotImplementedError(
+            f"Floating base: the root link {root!r} must carry exactly one (floating) joint.")
+    joint = floating[0]
+    robot = copy.deepcopy(urdf.robot)
+    robot.joints = [j for j in robot.joints if j.name != joint.name]
+    robot.links = [link for link in robot.links if link.name != root]
+    origin = onp.asarray(joint.origin) if joint.origin is not None else onp.eye(4)
+    stripped = yourdfpy.URDF(robot=robot, load_meshes=False, build_scene_graph=True,
+                             filename_handler=getattr(urdf, "_filename_handler", None))
+    return stripped, origin

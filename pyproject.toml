@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyroffi"
-version = "0.2.0"
-description = "Python Robot Kinematics Library with Accelerated Foreign Kinematics Kernels"
+version = "0.3.0"
+description = "GPU-accelerated robot kinematics, dynamics, and optimization: a PyRoKi superset with a CUDA backend"
 readme = "README.md"
 license = { text="MIT" }
 requires-python = ">=3.10"
@@ -39,8 +39,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # GRiD-based CUDA dynamics codegen (pyroffi.dynamics.GRiDDynamics); also
-# requires nvcc and the external/GRiD checkout (A2R-Lab/GRiD, which supplies
-# the `grid_codegen` package) on disk.  Its URDFParser object model is vendored
+# requires nvcc and the external/GRiM checkout (commalab/GRiM, a fork of A2R-Lab/GRiD
+# that supplies the `grim_codegen` package and every CUDA motion kernel) on disk.  Its URDFParser object model is vendored
 # into pyroffi.dynamics._grid_urdf, so that submodule is not needed. sympy powers the URDF->GRiD symbolic codegen. (scipy is a
 # core dependency, used by the URDF->GRiD adapter and collision geometry.)
 dynamics = [
@@ -57,22 +57,6 @@ cuda = [
     "jax-cuda13-plugin==0.10.2",
     "jax-cuda13-pjrt==0.10.2",
 ]
-# MCP server exposing the pyroffi.toolbox primitives over stdio
-# (pyroffi.mcp / the `pyroffi-mcp` script). The toolbox layer itself has no new
-# dependencies -- only the transport adapter needs `mcp`.
-mcp = [
-    "mcp>=1.2.0",
-]
-# Execution sandbox: a stepped MuJoCo world with a viser render layer, exposed
-# over MCP by `pyroffi-sandbox`. Deliberately a separate extra from `mcp`,
-# because it is a separate adapter: that server computes, this one acts.
-sandbox = [
-    "mcp>=1.2.0",
-    "mujoco>=3.2",
-    "robot_descriptions",
-    "viser",
-    "imageio",
-]
 dev = [
     "pyright>=1.1.308",
     "scikit-sparse",
@@ -81,13 +65,10 @@ dev = [
     "m2r2",
 ]
 
-[project.scripts]
-pyroffi-mcp = "pyroffi.mcp._server:main"
-pyroffi-sandbox = "pyroffi.sandbox._server:main"
-
 [tool.pytest.ini_options]
 markers = [
     "slow: tests that build an extra session or pay a large compile",
+    "gpu: requires a CUDA GPU with JAX GPU support",
 ]
 
 [tool.ruff.lint]

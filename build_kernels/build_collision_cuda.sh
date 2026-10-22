@@ -10,6 +10,10 @@
 #   - jaxlib >= 0.4.14 installed in the active Python environment
 #     (provides the xla/ffi/api/ffi.h headers)
 #
+# Note: if your default `nvcc` rejects the system g++ as "unsupported" (CUDA
+# 12.8's nvcc caps out below gcc 15), put a newer CUDA toolkit's bin/ (e.g.
+# CUDA 13.3, which accepts gcc 13) earlier on PATH before running this script.
+#
 # Optional env vars:
 #   GPU_ARCH   override the target architecture, e.g. GPU_ARCH=-arch=sm_80
 
