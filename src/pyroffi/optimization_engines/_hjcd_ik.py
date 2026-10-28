@@ -844,7 +844,6 @@ def hjcd_solve_cuda(
     collision_weight: float = 1e4,
     collision_margin: float = 0.02,
     constraint_refine_iters: int = 12,
-    traced: bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`hjcd_solve`.
 
@@ -976,7 +975,7 @@ def hjcd_solve_cuda(
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     ffi_targets = grim_targets(
         ("hjcd_coarse", "hjcd_lm"), robot, target_link_indices,
-        traced, robot_spheres_local, robot_sphere_joint_idx,
+        robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
@@ -1286,7 +1285,6 @@ def hjcd_solve_cuda_batch(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 30,
-    traced: bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA HJCD-IK: solve n_problems targets in a single kernel launch.
 
@@ -1373,7 +1371,7 @@ def hjcd_solve_cuda_batch(
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     ffi_targets = grim_targets(
         ("hjcd_coarse", "hjcd_lm"), robot, target_link_indices,
-        traced, robot_spheres_local, robot_sphere_joint_idx,
+        robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 

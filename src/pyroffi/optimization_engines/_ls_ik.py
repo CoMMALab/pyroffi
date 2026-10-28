@@ -748,7 +748,6 @@ def ls_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
-    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`ls_ik_solve`.
 
@@ -850,7 +849,7 @@ def ls_ik_solve_cuda(
 
     _sc = self_collision_table_arrays(robot, collision_checker)
     (ffi_target,) = grim_targets(
-        ("ls",), robot, target_link_indices, traced,
+        ("ls",), robot, target_link_indices,
         robot_spheres_local, robot_sphere_joint_idx, _sc,
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
@@ -1109,7 +1108,6 @@ def ls_ik_solve_cuda_batch(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
-    traced:              bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA LS-IK: solve n_problems targets in a single kernel launch.
 
@@ -1189,7 +1187,7 @@ def ls_ik_solve_cuda_batch(
 
     _sc_b = self_collision_table_arrays(robot, collision_checker)
     (ffi_target,) = grim_targets(
-        ("ls",), robot, target_link_indices, traced,
+        ("ls",), robot, target_link_indices,
         robot_spheres_local, robot_sphere_joint_idx, _sc_b,
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 

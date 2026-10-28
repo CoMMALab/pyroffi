@@ -81,10 +81,6 @@ def _solve_on_chart(robot, target_link_name, target_pose, rng_key, previous_cfg,
     if ref.ndim > 1:
         # ponytail: batched warm starts share the first problem's chart centre.
         ref = ref.reshape(-1, 7)[0]
-    if solver_kwargs.get("traced"):
-        # ponytail: traced kernels bake the chart's reference rotation as the identity, so
-        # the chart is world-aligned (singular where the base pitches 90 deg in the world).
-        ref = ref.at[:4].set(jnp.array([1.0, 0.0, 0.0, 0.0], ref.dtype))
     chart = chart_robot(robot, ref, base_region)
     if fixed_joint_mask is not None:
         fixed_joint_mask = jnp.concatenate(
