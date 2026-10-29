@@ -18,8 +18,8 @@ import pytest
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 import pyroffi as pk
-from pyroffi.costs import _compile as C
-from pyroffi.costs import _emit as E
+from cudals import _compile as C
+from cudals import _emit as E
 
 # The factories in PyRoKi's costs.py (upstream 388e43e).
 PYROKI_COSTS = [
@@ -435,6 +435,58 @@ def test_batch_of_problems(panda):
 
 
 @cuda
+def test_constrained_ik_warm_started_from_grim_is_kkt(panda):
+    """GRiM's unconstrained LS-IK seeds a PyRoKi-style constrained problem through
+    ``initial_vals``; the AL solve must land on a KKT point, checked in float64: nonnegative
+    multipliers on the active constraints make the objective gradient vanish."""
+    from scipy.optimize import nnls
+
+    from pyroffi.optimization_engines._ls_ik import ls_ik_solve_cuda_batch
+
+    robot, link = panda
+    elbow, h = robot.links.names.index("panda_link4"), 0.45
+    lo, hi = robot.joints.lower_limits, robot.joints.upper_limits
+    rest = (lo + hi) / 2
+    height = pk.Cost.factory(kind="constraint_geq_zero")(
+        lambda vals, r, jv: r.forward_kinematics(vals[jv])[elbow, 6:7] - h)
+    key = jax.random.PRNGKey(0)
+    qs = jax.random.uniform(key, (32, lo.shape[0]), minval=lo, maxval=hi)
+    targets = jax.vmap(robot.forward_kinematics)(qs)[:, link]
+    q0 = ls_ik_solve_cuda_batch(robot, link, jaxlie.SE3(targets), key,
+                                jnp.broadcast_to(rest, qs.shape))
+    violated = np.flatnonzero(np.asarray(jax.vmap(robot.forward_kinematics)(q0)[:, elbow, 6]) < h)
+    assert violated.size >= 4  # the height constraint must matter for the warm start
+
+    def residuals(q, target):
+        T = jaxlie.SE3(robot.forward_kinematics(q)[link])
+        r = (T.inverse() @ jaxlie.SE3(target)).log()
+        return jnp.concatenate([r[:3] * 50.0, r[3:] * 10.0, (q - rest) * 0.1])
+
+    for i in violated[:4]:
+        jv = robot.joint_var_cls(0)
+        costs = [pk.costs.pose_cost(robot, jv, jaxlie.SE3(targets[i]), link, 50.0, 10.0),
+                 pk.costs.rest_cost(jv, rest, 0.1),
+                 pk.costs.limit_constraint(robot, jv), height(robot, jv)]
+        sol, summary = pk.LeastSquaresProblem(costs, [jv]).analyze().solve(
+            initial_vals=pk.VarValues.make([jv.with_value(q0[i])]),
+            termination=pk.TerminationConfig(max_iterations=300),
+            augmented_lagrangian=pk.AugmentedLagrangianConfig(max_iterations=50),
+            return_summary=True)
+        assert float(summary.constraint_violation) <= 1e-4
+        with jax.enable_x64(True):
+            q, t = np.asarray(sol[jv], np.float64), np.asarray(targets[i], np.float64)
+            grad = np.asarray(jax.grad(lambda q: jnp.sum(residuals(q, t) ** 2))(q))
+            # Active constraints as g(q) >= 0: q - lo, hi - q, elbow height - h.
+            g = lambda q: jnp.concatenate([q - lo, hi - q, robot.forward_kinematics(q)[elbow, 6:7] - h])
+            gq, G = np.asarray(g(q)), np.asarray(jax.jacobian(g)(q))
+        active = gq <= 1e-3
+        assert active[-1]  # the solution sits on the height constraint
+        _, stationarity = nnls(G[active].T, grad)
+        # float32 solve: ~1% of |grad f| left; 1 AL iteration leaves ~100%.
+        assert stationarity <= 1e-2 * np.linalg.norm(grad) + 1e-3, (i, stationarity)
+
+
+@cuda
 @pytest.mark.parametrize("tier", ["thread", "warp", "block"])
 def test_equality_and_geq_constraints(tier):
     """min |x|^2 s.t. x0 + x1 == 1, x1 >= 0.8."""
@@ -480,7 +532,7 @@ def test_lie_layout_and_emitted_retract(var_type, group, monkeypatch):
                                                  E.symbolic(g, "t", (k.n_x,))])
     got = _eval_graph(g, xn, {"x": x, "t": dx})
     np.testing.assert_allclose(got, (group(x) @ group.exp(dx)).parameters(), atol=1e-5)
-    assert "#define GRIM_COST_MANIFOLD 1" in k.variant("thread").header
+    assert "#define CUDALS_COST_MANIFOLD 1" in k.variant("thread").header
     assert "void retract(" in k.variant("coop").header
 
 

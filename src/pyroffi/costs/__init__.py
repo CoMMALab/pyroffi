@@ -8,13 +8,20 @@ replacing ``import pyroki as pk`` with ``import pyroffi as pk`` and ``jaxls.X`` 
     problem = pk.LeastSquaresProblem(costs, [joint_var])
     sol = problem.analyze().solve()   # compiled to one CUDA kernel; sol[joint_var]
 
-``analyze()`` compiles to CUDA; there is no JAX solver behind it, and no fallback.
+``analyze()`` compiles to CUDA (the solver is the :mod:`cudals` package); there is no JAX
+solver behind it, and no fallback.
 """
 
+import cudals
+from cudals import Cost as Cost
+
+from .. import _registry
+from .._robot import Robot as _Robot
+from ..collision import RobotCollision as _RobotCollision
+from ..collision import RobotCollisionSpherized as _RobotCollisionSpherized
 from . import _residuals as _r
 from ._native import world_collision_native as world_collision_native  # pyroffi: device-code residual
 from ._path_simplify import simplify_paths_batched as simplify_paths_batched
-from ._problem import Cost as Cost
 from ._residuals import (
     five_point_acceleration_residual as five_point_acceleration_residual,
     five_point_jerk_residual as five_point_jerk_residual,
@@ -30,6 +37,12 @@ from ._residuals import (
     smoothness_residual as smoothness_residual,
     world_collision_residual as world_collision_residual,
 )
+
+
+# Robot and collision models are baked into a build; a traced one resolves to its original.
+for _cls in (_Robot, _RobotCollision, _RobotCollisionSpherized):
+    cudals.register_baked_type(_cls, _registry.resolve)
+del _cls
 
 
 # Pose costs

@@ -178,15 +178,14 @@ def _host(a):
 
 
 def grim_targets(kernels: tuple[str, ...], robot: Robot, target_link_indices: tuple[int, ...],
-                 traced: bool, robot_spheres, robot_sphere_joint, self_tables,
+                 robot_spheres, robot_sphere_joint, self_tables,
                  world=()) -> tuple:
     """GRiM IK kernels (``grim.motion.ik.KERNELS`` names) compiled for this robot, its
     end-effectors and collision setup: one hashable target per kernel, for :func:`run_grim`.
 
     Runs outside jit (the build needs concrete tables); the first call on a robot compiles,
     later ones hit GRiM's disk cache. ``world`` is the call's (spheres, capsules, boxes,
-    halfspaces) buffers, of which only the row counts are baked in. ``traced`` compiles
-    against cricket-traced kinematics instead of baked tables.
+    halfspaces) buffers, of which only the row counts are baked in.
     """
     from .. import _grim
 
@@ -205,7 +204,7 @@ def grim_targets(kernels: tuple[str, ...], robot: Robot, target_link_indices: tu
     # A floating base's chart takes its reference rotation per call (see run_grim).
     rot_joint = chart_rotation_joint(robot)
     return tuple(ik.build(k, mrobot, ee_joints, collision=collision, world_counts=counts,
-                          traced=traced, runtime_rot_joint=rot_joint) for k in kernels)
+                          runtime_rot_joint=rot_joint) for k in kernels)
 
 
 def run_grim(target, seeds, targets, world, lower, upper, fixed_mask, noise=None, rng_seed=0,

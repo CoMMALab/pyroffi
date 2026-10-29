@@ -1557,7 +1557,7 @@ def direct_sample_box_region_cuda(
     ) = _prepare_ls_collision_buffers(robot, collision_checker, collision_world)
     enable_collision = bool(collision_free and kernel_collision_enabled)
     (ls_target,) = grim_targets(
-        ("ls",), robot, (int(target_link_index),), False, robot_spheres_local,
+        ("ls",), robot, (int(target_link_index),), robot_spheres_local,
         robot_sphere_joint_idx, _EMPTY_SELF_TABLES,
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 

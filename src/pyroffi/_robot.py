@@ -18,7 +18,7 @@ from . import kinematics as _kinematics
 
 
 def _joint_var_cls(default_cfg):
-    from .costs._problem import Var
+    from cudals import Var
 
     class JointVar(Var[Array], default_factory=lambda: default_cfg): ...
 

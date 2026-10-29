@@ -579,7 +579,6 @@ def sqp_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
-    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA alternative to :func:`sqp_ik_solve`.
 
@@ -621,9 +620,6 @@ def sqp_ik_solve_cuda(
         constraints:             List of constraint callables.
         constraint_weights:      Scalar weight per constraint.
         constraint_refine_iters: Post-CUDA JAX SQP iterations on winner.
-        traced:                  Use the kernel compiled against cricket-traced
-                                 kinematics for this robot (single EE; built once
-                                 and cached on disk).
 
     Returns:
         Best joint configuration found, shape ``(n_act,)``.
@@ -679,7 +675,7 @@ def sqp_ik_solve_cuda(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     (ffi_target,) = grim_targets(
-        ("sqp",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+        ("sqp",), robot, target_link_indices, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
@@ -1098,7 +1094,6 @@ def _sqp_ik_solve_cuda_batch_impl(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
-    traced:              bool = False,
     *,
     _prep=None,
 ) -> Float[Array, "n_problems n_act"]:
@@ -1123,7 +1118,6 @@ def _sqp_ik_solve_cuda_batch_impl(
         constraints:             List of constraint callables.
         constraint_weights:      Scalar weight per constraint.
         constraint_refine_iters: Post-CUDA JAX iterations on each winner.
-        traced:                  Use the cricket-traced kernel (see :func:`sqp_ik_solve_cuda`).
 
     Returns:
         Best joint configurations, shape ``(n_problems, n_act)``.
@@ -1143,7 +1137,7 @@ def _sqp_ik_solve_cuda_batch_impl(
         self_pair_i, self_pair_j, enable_collision,
     ) = _prep
     (ffi_target,) = grim_targets(
-        ("sqp",), robot, target_link_indices, traced, robot_spheres_local, robot_sphere_joint_idx,
+        ("sqp",), robot, target_link_indices, robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 
@@ -1497,7 +1491,7 @@ def sqp_ik_solve_cuda_sequential(
     self_tables = self_collision_table_arrays(robot, collision_checker)
     enable_collision = bool(collision_free and collision_enabled)
     (ffi_target,) = grim_targets(
-        ("sqp",), robot, target_link_indices, False, robot_spheres_local,
+        ("sqp",), robot, target_link_indices, robot_spheres_local,
         robot_sphere_joint_idx, self_tables,
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
 

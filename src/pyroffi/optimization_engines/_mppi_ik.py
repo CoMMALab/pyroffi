@@ -756,7 +756,6 @@ def mppi_ik_solve_cuda(
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
     constraint_refine_iters: int = 12,
-    traced:              bool = False,
 ) -> Float[Array, "n_act"]:
     """CUDA MPPI+L-BFGS IK: coarse particle search then gradient refinement.
 
@@ -855,7 +854,7 @@ def mppi_ik_solve_cuda(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     (ffi_target,) = grim_targets(
-        ("mppi",), robot, target_link_indices, traced,
+        ("mppi",), robot, target_link_indices,
         robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))
@@ -1135,7 +1134,6 @@ def mppi_ik_solve_cuda_batch(
     collision_world:     Any | None = None,
     collision_weight:    float = 1e4,
     collision_margin:    float = 0.02,
-    traced:              bool = False,
 ) -> Float[Array, "n_problems n_act"]:
     """Batched CUDA MPPI+L-BFGS IK: solve n_problems targets in one kernel launch.
 
@@ -1207,7 +1205,7 @@ def mppi_ik_solve_cuda_batch(
     (self_sph_local, self_link_start, self_link_joint,
      self_pair_i, self_pair_j) = self_collision_table_arrays(robot, collision_checker)
     (ffi_target,) = grim_targets(
-        ("mppi",), robot, target_link_indices, traced,
+        ("mppi",), robot, target_link_indices,
         robot_spheres_local, robot_sphere_joint_idx,
         (self_sph_local, self_link_start, self_link_joint, self_pair_i, self_pair_j),
         world=(world_spheres, world_capsules, world_boxes, world_halfspaces))

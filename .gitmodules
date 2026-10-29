@@ -5,3 +5,6 @@
 [submodule "external/GLASS"]
 	path = external/GLASS
 	url = https://github.com/saiccoumar/GLASS.git
+[submodule "external/cudals"]
+	path = external/cudals
+	url = https://github.com/CoMMALab/cudals.git

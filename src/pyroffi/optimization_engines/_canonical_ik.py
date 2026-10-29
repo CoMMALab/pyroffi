@@ -141,7 +141,7 @@ def _canonicalize_grim(cfgs, cfg_refs, robot, link_idx, targets, collision, iter
     else:
         spheres, sphere_joint, *world = collision[:6]
         self_tables = collision[6:]
-    (target,) = grim_targets(("canonical",), robot, link_idx, False, spheres, sphere_joint,
+    (target,) = grim_targets(("canonical",), robot, link_idx, spheres, sphere_joint,
                              self_tables, world=tuple(world))
     from .._floating_base import chart_rotation
 

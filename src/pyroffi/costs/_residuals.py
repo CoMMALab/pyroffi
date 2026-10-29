@@ -17,7 +17,7 @@ from jax import Array
 from .._floating_base import split_cfg
 from .._robot import Robot
 from ..collision import CollGeom, colldist_from_sdf
-from ._problem import Var, VarValues
+from cudals import Var, VarValues
 
 
 # --- Pose Residuals ---
