@@ -56,9 +56,28 @@ obstacles) are runtime inputs, so re-solving with new targets reuses the build. 
 may be built and solved inside `jax.jit` with the robot as a traced argument, as PyRoki
 does. `analyze().solve_batch(params, x0)` solves many problems in one launch.
 
-Current limits: Euclidean variables only (no `pk.SE3Var` & co.) and at most 32 variable
-scalars (IK-sized problems; trajectories are not supported yet). The built-in solvers
-remain available too:
+Constraints (`kind="constraint_eq_zero" | "constraint_leq_zero" | "constraint_geq_zero"`)
+are solved by an augmented Lagrangian, as in jaxls, and land on a local constrained optimum
+(KKT point). To get the CUDA solvers' speed with arbitrary constraints, seed the
+constrained problem with an unconstrained CUDA solve through `initial_vals`, exactly as
+PyRoKi seeds its own problems:
+
+```python
+q0 = robot.inverse_kinematics("panda_hand", target, solver="ls", use_cuda=True)
+sol = pk.LeastSquaresProblem(costs + constraints, [joint_var]).analyze().solve(
+    initial_vals=pk.VarValues.make([joint_var.with_value(q0)]),
+    termination=pk.TerminationConfig(max_iterations=300),
+    augmented_lagrangian=pk.AugmentedLagrangianConfig(max_iterations=50))
+```
+
+For trajectories, seed `traj_vars.with_value(...)` with a `TrajoptMotionGenerator` result.
+`max_iterations` counts inner steps across all AL updates (as in jaxls), so the default of
+100 can stop before a constrained problem is feasible; check `SolveSummary.constraint_violation`.
+Batches go through `analyze().solve_batch(params, x0)`.
+
+Current limits: Euclidean and Lie-group variables, at most 32 tangent dimensions at the
+thread and warp tiers and 128 at the block tier; trajectories use the banded solver. The
+built-in solvers remain available too:
 
 | PyRoki pattern | PyRoFFI |
 | --- | --- |
@@ -93,5 +112,6 @@ For contact, call the tiers directly: `flat_contact_trajopt` (contact-aware) or
 ```
 git clone https://github.com/commalab/pyroffi.git
 cd pyroffi
+git submodule update --init --recursive  # external/GRiM and external/cudals
 pip install -e .
 ```

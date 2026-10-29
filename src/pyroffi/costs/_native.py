@@ -1,42 +1,15 @@
-"""Native residuals: costs whose rows and Jacobian come from hand-written device code.
+"""pyroffi's native residuals: a world-collision constraint as hand-written device code.
 
-The cost compiler traces a residual's jaxpr and emits it as straight-line CUDA, which is the
-right form for kinematic chains but explodes for residuals that are naturally loops: a
-collision residual is (spheres x obstacles) distances and their derivatives, and its fully
-unrolled body grows to megabytes that ptxas takes minutes on. A ``NativeResidual`` instead
-supplies one ``__device__`` function per cost instance; the traced residual only reserves its
-rows (zeros), so row kinds, weights and constraint handling are unchanged, and the generated
-header calls the function after the traced body to fill those rows of ``r`` and ``J`` (or
-``jt = J t`` in the column-parallel variant).
-
-Device function contract (one cost instance, one variable of ``dof`` coordinates)::
-
-    __device__ void <fn>(const float* q, float* r, float* J)   // J: (rows, dof) or nullptr
+The mechanism and the device-function contract are in :mod:`cudals._native`.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
 
 import numpy as np
 
-
-@dataclass(frozen=True)
-class NativeResidual:
-    fn: str          # device function name
-    source: str      # its CUDA definition (and the tables it reads)
-    rows: int        # residual rows per instance
-    dof: int         # coordinates of the instance's variable
-    # Runtime data the device code reads from mutable __device__ buffers, uploaded before every
-    # solve by the exported host function ``setter`` (so the data is not part of the source, and
-    # the compiled kernel is shared by every problem whose data differs only in value).
-    setter: str = ""
-    data: tuple = field(default=(), compare=False, hash=False)
-
-    @property
-    def digest(self) -> str:
-        return hashlib.sha1(self.source.encode()).hexdigest()[:16]
+from cudals._native import NativeResidual
 
 
 def _arr(name: str, a, ctype: str = "float") -> str:
@@ -220,7 +193,10 @@ extern "C" __attribute__((visibility("default"))) int {ns}_set_world(
 }}
 """
     data = tuple(np.ascontiguousarray(a, np.float32) for a in (ws, wc, wb, wh))
-    return NativeResidual(fn=fn, source=source, rows=1, dof=dof, setter=f"{ns}_set_world", data=data)
+    from .._grim import _root
+    kernels = str(_root() / "bindings" / "grim" / "motion" / "kernels")  # GRiM's collision.cuh
+    return NativeResidual(fn=fn, source=source, rows=1, dof=dof, setter=f"{ns}_set_world", data=data,
+                          include_dirs=(kernels,))
 
 
 def _bucket(n: int) -> int:
@@ -228,26 +204,12 @@ def _bucket(n: int) -> int:
     return 0 if n == 0 else 1 << (max(n, 8) - 1).bit_length()
 
 
-def upload(native: NativeResidual, lib) -> None:
-    """Write a native residual's runtime data into the library that runs it."""
-    import ctypes
-    if not native.setter:
-        return
-    ptr = lambda a: a.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    args = []
-    for a in native.data:
-        args += [ptr(a), ctypes.c_int(len(a))]
-    err = getattr(lib, native.setter)(*args)
-    if err != 0:
-        raise RuntimeError(f"{native.setter} failed ({err})")
-
-
 def world_collision_native(robot, robot_coll, joint_var, world_geoms, margin: float):
     """Collision constraint ``sum max(0, margin - d) <= 0`` per configuration, as a native
     residual: one row per batch instance of ``joint_var``, compact device code. The world is
     runtime data (uploaded per solve), so a new scene of the same size bucket does not compile."""
     import jax.numpy as jnp
-    from ._problem import Cost
+    from cudals import Cost
     if robot.floating_base:
         # ponytail: the device FK walks the joints from a fixed root; add the base pose to it
         # when a floating-base planner needs native collision.

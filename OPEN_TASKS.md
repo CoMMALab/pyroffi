@@ -17,6 +17,11 @@ re-checked against current code.
 - **Collision sentinel** _(verify)_: inf vs 1e9 "no collision" sentinel is inconsistent across
   backends. `panda_spherized` needs an SRDF.
 
+- **Manual GLASS checkout**: GRiM's crocket IK needs GLASS `9a24f37` (block trsv/potrs fix for
+  `__restrict__` callers), but upstream GRiD pins `9e57178` and we can't push to GRiD. Setup
+  checks GLASS out by hand (`AGENTS.md`, Environment). When GRiD bumps GLASS, bump GRiM, then
+  delete this entry and the notes in `AGENTS.md` and GRiM's `AGENTS.md` / `OPEN_TASKS.md`.
+
 ## Test debt
 
 - **float32 borderline tests** _(verify)_: ~18 grid/autodiff/flat tests fail under float32 and

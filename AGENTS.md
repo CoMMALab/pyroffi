@@ -13,11 +13,14 @@ adds raw CUDA kernels reached through the JAX FFI, for performance past what XLA
   `external/GRiM` (`grim.motion`) and compile per robot on first use. pyroffi's own kernels
   (world-side collision, ESDF, roboGPU, TOPP-RA) are in `src/pyroffi/cuda_kernels/` and are built
   by `build_kernels/build_all.sh`.
-- **The CUDA cost factory** (`src/pyroffi/costs/`). Users write costs in PyRoKi's jaxls-shaped API
-  (`pk.Var`, `pk.Cost.factory`, `pk.LeastSquaresProblem`). `analyze()` compiles the whole problem
-  (costs, kinematics, Jacobians) into one straight-line CUDA kernel, and `solve()` /
-  `solve_batch()` is one launch with no JAX in the loop. **There is no JAX fallback.** An
-  unsupported problem raises.
+- **The CUDA cost factory** (the `cudals` package, the `external/cudals` submodule; PyRoKi's cost factories are in
+  `src/pyroffi/costs/`). Users write costs in PyRoKi's jaxls-shaped API (`pk.Var`,
+  `pk.Cost.factory`, `pk.LeastSquaresProblem`, re-exported from `cudals`). `analyze()` compiles
+  the whole problem (costs, kinematics, Jacobians) into one straight-line CUDA kernel, and
+  `solve()` / `solve_batch()` is one launch with no JAX in the loop. **There is no JAX
+  fallback.** An unsupported problem raises. `cudals` is independent of pyroffi and GRiM (own
+  solver kernels, vendored GLASS); pyroffi registers its robot/collision types with
+  `cudals.register_baked_type` in `costs/__init__.py`. See `external/cudals/AGENTS.md`.
 - **Solver suites.** IK: HJCD, LS, SQP, MPPI, region IK, IKFlow. Trajopt: dynamics-aware (the
   default), SCO, CHOMP, STOMP, L-BFGS, LS, and contact-aware/contact-rich tiers. Also SRDF
   parsing, neural SDFs, floating base and attachments.
@@ -27,10 +30,11 @@ keep XLA's fusion around them.
 
 ## Layout
 
-- `src/pyroffi/`: `_robot.py` (`pk.Robot`), `kinematics/`, `collision/`, `costs/` (cost compiler),
+- `src/pyroffi/`: `_robot.py` (`pk.Robot`), `kinematics/`, `collision/`, `costs/` (PyRoKi cost factories),
   `optimization_engines/` (IK solvers), `motion_generators/` (trajopt), `dynamics/`, `topp/`,
   `toolbox/`, `attachments/`, `_grim.py` (GRiM bridge), `_cuda_backends.py`.
-- `external/`: vendored submodules (GRiM, which carries GRiD/GLASS/crocket). **Don't edit unless
+- `external/`: vendored submodules: GRiM (carries GRiD/GLASS/crocket) and cudals (the cost
+  compiler and its solver kernels). **Don't edit unless
   asked.** A change needed there goes to that repo first, then the submodule pointer gets
   bumped. Follow `external/GRiM/AGENTS.md` when you work inside GRiM.
 - `OPEN_TASKS.md`: known-but-unfixed issues. Add what you find and remove what you fix.
@@ -61,11 +65,17 @@ keep XLA's fusion around them.
 
 ```bash
 conda activate pyroffi            # never the base env
+git submodule update --init --recursive
+git -C external/GRiM/external/GRiD/external/GLASS checkout 9a24f37   # temporary, see below
 export XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
 CUDA_VISIBLE_DEVICES=<free idx> python -m pytest tests -q
 ruff format --check . && pyright   # CI: formatting.yml, pyright.yml, pytest.yml
 ```
+
+The manual GLASS checkout is temporary. GRiM's crocket IK block tier needs GLASS's
+restricted-caller fix, which upstream GRiD doesn't pin yet (`OPEN_TASKS.md`). Without it,
+block-tier IK silently diverges. Drop the line once GRiD bumps GLASS.
 
 GPUs are shared. Pick a free device. If all of them are busy, stop and say so, and never kill
 other processes. Large jobs (IOSP/E10-style) need ~50–60 GB of host RAM each, so run them
