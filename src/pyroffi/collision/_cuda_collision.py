@@ -1554,7 +1554,7 @@ class FusedCUDACollisionChecker:
 
         self._mrobot = _grim.motion_robot(robot)
         self._sc = SelfCollision(*static_arrays(robot, model))
-        # traced=True: kernels against cricket's straight-line FK instead of baked tables.
+        # traced=True: kernels against crocket's straight-line FK instead of baked tables.
         self._traced = traced
         self._self_fn = self._build_self_fn()
 

@@ -20,6 +20,7 @@ from .._robot import Robot as _Robot
 from ..collision import RobotCollision as _RobotCollision
 from ..collision import RobotCollisionSpherized as _RobotCollisionSpherized
 from . import _residuals as _r
+from ._native import self_collision_native as self_collision_native  # pyroffi: device-code residual
 from ._native import world_collision_native as world_collision_native  # pyroffi: device-code residual
 from ._path_simplify import simplify_paths_batched as simplify_paths_batched
 from ._residuals import (

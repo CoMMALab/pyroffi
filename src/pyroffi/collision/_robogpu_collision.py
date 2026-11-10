@@ -139,7 +139,7 @@ class RoboGPUCollisionChecker:
         self._inner = inner
         # traced=True: stage 1 compiled with this robot's sphere/pair tables and the scene's
         # obstacle counts baked in (one build per robot and scene structure, cached on disk).
-        # The name is historical: FK stays the tree walk, nothing is cricket-traced.
+        # The name is historical: FK stays the tree walk, nothing is crocket-traced.
         self._traced = traced
         self._edge_granularity = int(edge_granularity)
 

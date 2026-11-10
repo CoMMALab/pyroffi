@@ -10,6 +10,11 @@ Design goals:
   residual vector.
 - Optionally reuse existing LS-IK solvers (JAX or CUDA) as a post-step
   projection stage for a tracked end-effector path.
+
+``use_cuda=True`` solves the same residuals as one cudals problem per trajectory instead
+(:func:`_ls_trajopt_cudals`): banded LM over the knots with the endpoints fixed, and collision
+as native self- / world-collision constraints under cudals' augmented Lagrangian in place of
+the penalty schedule.
 """
 
 from __future__ import annotations
@@ -23,8 +28,11 @@ import jaxlie
 from jax import Array
 from jaxtyping import Float
 
+from cudals import Cost, LeastSquaresProblem
+
 from .._robot import Robot
 from ..collision import RobotCollision, colldist_from_sdf
+from ..costs import self_collision_native, world_collision_native
 from ._ik_primitives import _LS_ALPHAS
 from ._ls_ik import ls_ik_solve, ls_ik_solve_cuda_batch
 
@@ -108,9 +116,6 @@ class LsTrajOptConfig:
 
     ik_projection_continuity_weight: float = 0.1
     """Continuity tie-breaker in LS-IK projection."""
-
-    use_legacy_cuda_kernel: bool = False
-    """Opt into the legacy custom CUDA LS kernel (kept for comparison/debugging)."""
 
 
 def _collision_distances_all(
@@ -403,6 +408,47 @@ def _ls_trajopt_jax(
     return best_traj, costs, final_trajs
 
 
+def _ls_trajopt_cudals(
+    init_trajs: Float[Array, "B T DOF"],
+    start: Float[Array, "DOF"],
+    goal: Float[Array, "DOF"],
+    *,
+    robot: Robot,
+    robot_coll: RobotCollision,
+    world_geoms: tuple,
+    cfg: LsTrajOptConfig,
+) -> Float[Array, "B T DOF"]:
+    """The LS trajopt problem in cudals, all ``B`` trajectories in one launch: acceleration,
+    jerk and soft-limit residuals over the knots (the stencils :func:`_eval_cost` scores), the
+    endpoints fixed, and the interior knots constrained collision-free by native residuals.
+    ``n_outer_iters`` augmented-Lagrangian updates of ``n_ls_iters`` LM steps each."""
+    B, T, _ = init_trajs.shape
+    Q = robot.joint_var_cls
+    assert Q is not None   # set by every Robot constructor
+    k = jnp.arange(T)
+    lower, upper = robot.joints.lower_limits, robot.joints.upper_limits
+    acc = Cost.factory(lambda v, a, b, c, w: w * (v[a] - 2.0 * v[b] + v[c]))
+    jerk = Cost.factory(lambda v, a, b, c, d, w: w * (v[d] - 3.0 * v[c] + 3.0 * v[b] - v[a]))
+    limits = Cost.factory(
+        lambda v, q, lo, hi, w: w * (jnp.maximum(0.0, v[q] - hi) + jnp.maximum(0.0, lo - v[q])))
+    w = lambda x: jnp.sqrt(jnp.asarray(x, jnp.float32))[None]  # noqa: E731
+    costs = [
+        acc(Q(k[:-2]), Q(k[1:-1]), Q(k[2:]), w(cfg.w_smooth * cfg.w_acc)),
+        jerk(Q(k[:-3]), Q(k[1:-2]), Q(k[2:-1]), Q(k[3:]), w(cfg.w_smooth * cfg.w_jerk)),
+        limits(Q(k), lower[None], upper[None], w(cfg.w_limits)),
+        self_collision_native(robot, robot_coll, Q(k[1:-1]), cfg.collision_margin),
+    ]
+    if world_geoms:
+        costs.append(world_collision_native(robot, robot_coll, Q(k[1:-1]), world_geoms,
+                                            cfg.collision_margin))
+    analyzed = LeastSquaresProblem(costs, [Q(k)], fixed=[Q(0), Q(T - 1)]).analyze()
+    x0 = jnp.asarray(init_trajs).at[:, 0].set(start).at[:, -1].set(goal)
+    x, _, _ = analyzed.solve_batch(analyzed.params(), x0.reshape(B, -1),
+                                   max_iters=cfg.n_outer_iters * cfg.n_ls_iters,
+                                   al_iters=cfg.n_outer_iters)
+    return x.reshape(B, T, -1)
+
+
 def _link_pose_sequence(
     robot: Robot,
     traj: Float[Array, "T DOF"],
@@ -516,13 +562,12 @@ def ls_trajopt(
     if key is None:
         key = jax.random.PRNGKey(0)
 
-    if use_cuda and opt_cfg.use_legacy_cuda_kernel:
-        from ._trajopt_cuda import trajopt_cuda
-
-        best_traj, costs, final_trajs = trajopt_cuda(
-            "ls", init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg)
+    if use_cuda:
+        final_trajs = _ls_trajopt_cudals(
+            init_trajs, start, goal, robot=robot, robot_coll=robot_coll, world_geoms=world_geoms,
+            cfg=opt_cfg)
     else:
-        best_traj, costs, final_trajs = _ls_trajopt_jax(
+        _, _, final_trajs = _ls_trajopt_jax(
             init_trajs=init_trajs,
             start=start,
             goal=goal,

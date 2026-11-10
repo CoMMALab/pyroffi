@@ -1,4 +1,5 @@
-"""Trajectory optimization on the GPU: GRiM's SCO, STOMP, CHOMP and LS-trajopt kernels.
+"""Trajectory optimization on the GPU: GRiM's SCO, STOMP and CHOMP kernels (crocket-traced
+collision terms with analytic gradients).
 
 Each kernel is compiled per robot and per collision structure (sphere rows, self-collision
 pairs, obstacle counts) on first use and cached on disk by GRiM. This module adapts pyroffi's
@@ -25,7 +26,6 @@ class TrajoptPrepared(NamedTuple):
     mrobot: object
     collision: object        # grim.motion._build.TrajCollision
     world: object            # grim.motion.ik.World
-    traced: bool
     rot_joint: int = -1      # a floating base's chart: its reference rotation, per call
     rot: object = None
 
@@ -42,12 +42,12 @@ def _world_arrays(world_geoms):
     return tuple(np.concatenate(c) if c else None for c in chunks)
 
 
-def prepare(robot, robot_coll, world_geoms, traced: bool = False) -> TrajoptPrepared:
+def prepare(robot, robot_coll, world_geoms) -> TrajoptPrepared:
     """Flatten the robot's spheres and the world for the kernels. Call OUTSIDE ``jax.jit``.
 
     The kernels pose sphere row ``r`` with joint ``r``'s world frame, or the identity for
     ``r == n_joints`` (a root link fixed in the world); rows no link maps to are padding
-    (radius < 0). ``traced=True`` builds against cricket's straight-line FK.
+    (radius < 0).
     """
     from ..collision._cuda_collision import link_parent_joint_for
     from ..collision._robot_collision import RobotCollisionSpherized
@@ -73,7 +73,7 @@ def prepare(robot, robot_coll, world_geoms, traced: bool = False) -> TrajoptPrep
     from .._floating_base import chart_rotation
 
     return TrajoptPrepared(_grim.motion_robot(robot), collision,
-                           World(*_world_arrays(world_geoms)), traced, *chart_rotation(robot))
+                           World(*_world_arrays(world_geoms)), *chart_rotation(robot))
 
 
 def _check_endpoints(start, goal, B, n):
@@ -84,8 +84,8 @@ def _check_endpoints(start, goal, B, n):
 
 
 def run(kind: str, prep: TrajoptPrepared, init_trajs, start, goal, opt_cfg, *,
-        rng_seed: int = 0, fd_eps: float = 1e-4):
-    """One GRiM optimizer (``"sco"``, ``"stomp"``, ``"chomp"`` or ``"ls"``) -> ``(best_traj,
+        rng_seed: int = 0):
+    """One GRiM optimizer (``"sco"``, ``"stomp"`` or ``"chomp"``) -> ``(best_traj,
     costs, final_trajs)``. ``start``/``goal`` are ``[n_act]`` or per trajectory ``[B, n_act]``;
     with the latter ``best_traj`` compares different problems and is meaningless."""
     from grim.motion import trajopt
@@ -97,39 +97,32 @@ def run(kind: str, prep: TrajoptPrepared, init_trajs, start, goal, opt_cfg, *,
         fn, kw = trajopt.sco_trajopt, dict(
             n_outer_iters=c.n_outer_iters, n_inner_iters=c.n_inner_iters, m_lbfgs=c.m_lbfgs,
             w_trust=c.w_trust, penalty_scale=c.penalty_scale,
-            smooth_min_temperature=c.smooth_min_temperature, fd_eps=fd_eps)
+            smooth_min_temperature=c.smooth_min_temperature)
     elif kind == "stomp":
         fn, kw = trajopt.stomp_trajopt, dict(
             n_iters=c.n_iters, n_samples=c.n_samples, noise_scale=c.noise_scale,
             temperature=c.temperature, step_size=c.step_size,
             collision_penalty_scale=c.collision_penalty_scale, rng_seed=rng_seed)
-    elif kind == "chomp":
+    else:
         fn, kw = trajopt.chomp_trajopt, dict(
             n_iters=c.n_iters, step_size=c.step_size,
             collision_penalty_scale=c.collision_penalty_scale,
             use_covariant_update=c.use_covariant_update, smoothness_reg=c.smoothness_reg,
             grad_clip_norm=c.grad_clip_norm, max_delta_per_step=c.max_delta_per_step,
-            early_stop_patience=c.early_stop_patience, min_cost_improve=c.min_cost_improve,
-            fd_eps=fd_eps)
-    else:
-        fn, kw = trajopt.ls_trajopt, dict(
-            n_outer_iters=c.n_outer_iters, n_ls_iters=c.n_ls_iters, lambda_init=c.lambda_init,
-            w_trust=c.w_trust, w_endpoint=c.w_endpoint, penalty_scale=c.penalty_scale,
-            smooth_min_temperature=c.smooth_min_temperature,
-            max_delta_per_step=c.max_delta_per_step, fd_eps=fd_eps)
+            early_stop_patience=c.early_stop_patience, min_cost_improve=c.min_cost_improve)
     trajs, costs = fn(prep.mrobot, init_trajs, collision=prep.collision, world=prep.world,
                       start=start, goal=goal, w_smooth=c.w_smooth, w_acc=c.w_acc,
                       w_jerk=c.w_jerk, w_limits=c.w_limits, w_collision=c.w_collision,
                       w_collision_max=c.w_collision_max, collision_margin=c.collision_margin,
-                      traced=prep.traced, runtime_rot_joint=prep.rot_joint, rot=prep.rot,
+                      runtime_rot_joint=prep.rot_joint, rot=prep.rot,
                       **kw)
     return trajs[jnp.argmin(costs)], costs, trajs
 
 
 def trajopt_cuda(kind: str, init_trajs, start, goal, robot, robot_coll, world_geoms, opt_cfg,
-                 *, key=None, fd_eps: float = 1e-4, traced: bool = False):
+                 *, key=None):
     """:func:`prepare` then :func:`run`. STOMP draws its noise seed from ``key``."""
     key = jax.random.PRNGKey(0) if key is None else key
     rng_seed = int(jax.random.randint(key, (), 0, 2**31 - 1))
-    return run(kind, prepare(robot, robot_coll, world_geoms, traced), init_trajs, start, goal,
-               opt_cfg, rng_seed=rng_seed, fd_eps=fd_eps)
+    return run(kind, prepare(robot, robot_coll, world_geoms), init_trajs, start, goal,
+               opt_cfg, rng_seed=rng_seed)

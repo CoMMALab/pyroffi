@@ -48,7 +48,7 @@ def _urdf_xml(urdf: "yourdfpy.URDF") -> str:
     """The URDF as XML text, mimic tags included.
 
     yourdfpy's writer drops ``<mimic>`` (its ``_write_joint`` never calls ``_write_mimic``), and
-    cricket would then trace each mimic joint as an independent coordinate.
+    crocket would then trace each mimic joint as an independent coordinate.
     """
     xml = urdf.write_xml_string()
     mimics = {j.name: j.mimic for j in urdf.robot.joints if j.mimic is not None}

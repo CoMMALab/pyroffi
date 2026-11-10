@@ -546,11 +546,13 @@ def test_residuals_accept_floating_configurations(scene):
     assert float(jnp.abs(out["pose"]).max()) < 1e-4
 
 
-@covers("costs.world_collision_native")
-def test_native_world_collision_rejects_floating_base(scene):
+@covers("costs.world_collision_native", "costs.self_collision_native")
+def test_native_collision_rejects_floating_base(scene):
     robot, model, world = scene["robot"], scene["model"], scene["world"]
     with pytest.raises(NotImplementedError, match="fixed-base"):
         pyroffi.costs.world_collision_native(robot, model, None, world, 0.01)
+    with pytest.raises(NotImplementedError, match="fixed-base"):
+        pyroffi.costs.self_collision_native(robot, model, None, 0.01)
 
 
 # ---------------------------------------------------------------------------

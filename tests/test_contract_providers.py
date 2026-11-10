@@ -1,6 +1,6 @@
 """Every provider behind the traced-robot contract computes the same dynamics.
 
-cricket at thread and warp-split block tier, GRiD, and (for forward dynamics) the
+crocket at thread and warp-split block tier, GRiD, and (for forward dynamics) the
 mass-matrix + GLASS Cholesky route, all float32, against pinocchio float64 on the rewritten
 benchmark URDFs (see tests/bench_dynamics.py). The JAX dynamics is checked too.
 """
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import yourdfpy
 
-pytest.importorskip("cricket")
+pytest.importorskip("crocket")
 pin = pytest.importorskip("pinocchio")
 if shutil.which("nvcc") is None or jax.default_backend() != "gpu":
     pytest.skip("contract kernels need nvcc and a GPU", allow_module_level=True)

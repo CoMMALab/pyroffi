@@ -22,6 +22,12 @@ re-checked against current code.
   checks GLASS out by hand (`AGENTS.md`, Environment). When GRiD bumps GLASS, bump GRiM, then
   delete this entry and the notes in `AGENTS.md` and GRiM's `AGENTS.md` / `OPEN_TASKS.md`.
 
+- **Panda sphere pair that always collides**: with `panda.srdf`'s disabled pairs, one
+  `panda_link5`–`panda_link7` sphere pair is 0.0152 apart in every configuration (both centres
+  sit on the joint axes), inside the default 0.02 margin. Every self-collision hinge on panda
+  carries a constant 0.0048, so LS trajopt's cudals self-collision constraint can never reach 0.
+  Fix: disable that pair in the SRDF, or move the sphere.
+
 ## Test debt
 
 - **float32 borderline tests** _(verify)_: ~18 grid/autodiff/flat tests fail under float32 and
@@ -33,3 +39,11 @@ re-checked against current code.
 - **Hard torque-limit constraint on e3**: the AL adjoint is ill-conditioned (aug_stat stalls
   ~1e-1, 62% discard).
 - **Usability refactor**: 5-phase install/layout/configs/docs/API plan, not started.
+- **LS trajopt on cudals lags the JAX solver**: on the `tests/test_ls_trajopt.py` scene (panda,
+  T=32, one seed set) its mean cost is 3–4% above JAX's at B=64 and B=256, and the collision
+  constraint ends ≤0.065 violated at the default `n_outer_iters=8` AL updates. It is 1.6× faster
+  at B=256 and slower below B≈64. Tune the AL schedule (penalty growth, `al_iters` vs
+  `max_iters`) and rerun with ≥6 seeds.
+- **Native world collision uses finite differences**: `costs/_native.py` world mode takes each
+  sphere centre's distance gradient by central differences (self mode is analytic). Fix:
+  analytic per-primitive gradients from `collision.cuh`.

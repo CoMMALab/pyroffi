@@ -1,4 +1,4 @@
-"""pyroffi's native residuals: a world-collision constraint as hand-written device code.
+"""pyroffi's native residuals: world- and self-collision constraints as hand-written device code.
 
 The mechanism and the device-function contract are in :mod:`cudals._native`.
 """
@@ -20,10 +20,13 @@ def _arr(name: str, a, ctype: str = "float") -> str:
     return f"__device__ const {ctype} {name}[{a.size}] = {{{body}}};"
 
 
-def world_collision_source(robot, robot_coll, world_geoms, margin: float, tag: str) -> NativeResidual:
-    """Device code for ``r = sum_{sphere, obstacle} max(0, margin - d)`` of one config, and its
-    exact Jacobian through the kinematic chain (sphere-centre distance gradients by central
-    differences, which covers every primitive GRiM's distance functions support)."""
+def _collision_source(robot, robot_coll, world_geoms, margin: float, *, tag: str,
+                      mode: str) -> NativeResidual:
+    """Device code for one config's collision hinge sum and its exact Jacobian through the
+    kinematic chain. ``mode`` "world": ``r = sum_{sphere, obstacle} max(0, margin - d)``
+    (sphere-centre distance gradients by central differences, which covers every primitive
+    GRiM's distance functions support). ``mode`` "self": ``r = sum_{sphere pairs of active link
+    pairs} max(0, margin - d)``, gradients analytic."""
     from ..collision._cuda_collision import _extract_world_arrays, _spherized_local_geometry
     from ..collision._cuda_collision import link_parent_joint_for
 
@@ -45,30 +48,15 @@ def world_collision_source(robot, robot_coll, world_geoms, margin: float, tag: s
     N = len(lpj)
     keep = sph[:, 3] > 0
     k_idx = np.arange(len(sph))
-    sph_joint = lpj[k_idx % N][keep]
+    sph_link = (k_idx % N)[keep]
+    sph_joint = lpj[sph_link]
     sph = sph[keep]
 
-    items = world_geoms if isinstance(world_geoms, (list, tuple)) else (world_geoms,)
-    chunks = [[], [], [], []]
-    for w in items:
-        w = w.reshape((-1,))
-        for dst, a in zip(chunks, _extract_world_arrays(w)):
-            if a.shape[0]:
-                dst.append(np.asarray(a, np.float32))
-    ws, wc, wb, wh = (np.concatenate(c) if c else np.zeros((0, n), np.float32)
-                      for c, n in zip(chunks, (4, 7, 15, 6)))
-    # The world is RUNTIME data: buffers of a capacity bucket per primitive type (the source,
-    # hence the compile, depends only on the robot, the margin and the buckets), filled by
-    # <ns>_set_world before each solve.
-    cap = [_bucket(len(a)) for a in (ws, wc, wb, wh)]
-
     ns = f"pyroffi_native_{tag}"
-    fn = f"{ns}::world_collision"
-    source = f"""
+    prelude = f"""
 #include "collision.cuh"
 namespace {ns} {{
 constexpr int NJ = {NJ}, DOF = {dof}, NSPH = {len(sph)};
-__device__ int NWS, NWC, NWB, NWH;
 constexpr float MARGIN = {float(margin):.9e}f;
 {_arr("TW", twists)}
 {_arr("PTF", ptf)}
@@ -79,7 +67,6 @@ constexpr float MARGIN = {float(margin):.9e}f;
 {_arr("OFF", off)}
 {_arr("SPH", sph)}
 {_arr("SJ", sph_joint, "int")}
-__device__ float WS[{max(cap[0], 1) * 4}], WC[{max(cap[1], 1) * 7}], WB[{max(cap[2], 1) * 15}], WH[{max(cap[3], 1) * 6}];
 
 __device__ __forceinline__ void quat_to_mat(const float* q, float* R) {{
   float w = q[0], x = q[1], y = q[2], z = q[3];
@@ -88,24 +75,8 @@ __device__ __forceinline__ void quat_to_mat(const float* q, float* R) {{
   R[6] = 2*(x*z - w*y);     R[7] = 2*(y*z + w*x);     R[8] = 1 - 2*(x*x + y*y);
 }}
 
-// Signed distance of a sphere (centre c, radius rr) to every obstacle; hinge sum.
-__device__ __forceinline__ float hinge_sum(const float* c, float rr) {{
-  float acc = 0.f;
-  for (int o = 0; o < NWS; ++o) {{ const float* w = WS + 4*o;
-    acc += fmaxf(MARGIN - sphere_sphere_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3]), 0.f); }}
-  for (int o = 0; o < NWC; ++o) {{ const float* w = WC + 7*o;
-    acc += fmaxf(MARGIN - sphere_capsule_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3], w[4], w[5], w[6]), 0.f); }}
-  for (int o = 0; o < NWB; ++o) {{ const float* w = WB + 15*o;
-    acc += fmaxf(MARGIN - sphere_box_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3], w[4], w[5],
-                                          w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14]), 0.f); }}
-  for (int o = 0; o < NWH; ++o) {{ const float* w = WH + 6*o;
-    acc += fmaxf(MARGIN - sphere_halfspace_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3], w[4], w[5]), 0.f); }}
-  return acc;
-}}
-
-__device__ void world_collision(const float* q, float* r, float* J) {{
-  // FK: world pose of each joint (R, t), plus each joint's motion axis and origin.
-  float Rw[NJ * 9], tw[NJ * 3], ax[NJ * 3], og[NJ * 3];
+// FK: world pose of each joint (R, t), plus each joint's motion axis and origin.
+__device__ __forceinline__ void fk(const float* q, float* Rw, float* tw, float* ax, float* og) {{
   for (int i = 0; i < NJ; ++i) {{
     const int jj = ORD[i];
     const int pj = PAR[jj];
@@ -139,38 +110,127 @@ __device__ void world_collision(const float* q, float* r, float* J) {{
       og[jj*3 + a] = fo[a];
     }}
   }}
+}}
+
+// World centre of sphere k.
+__device__ __forceinline__ void centre(int k, const float* Rw, const float* tw, float* c) {{
+  const int pj = SJ[k];
+  const float* ls = SPH + 4*k;
+  for (int a = 0; a < 3; ++a)
+    c[a] = (pj < 0) ? ls[a] : Rw[pj*9 + a*3]*ls[0] + Rw[pj*9 + a*3+1]*ls[1] + Rw[pj*9 + a*3+2]*ls[2] + tw[pj*3 + a];
+}}
+
+// J += g . dc/dq for sphere k at centre c: dc/dq_j = ax x (c - og) (revolute) or ax
+// (prismatic), routed to the actuated / mimic source column.
+__device__ __forceinline__ void chain(int k, const float* c, const float* g, const float* ax,
+                                      const float* og, float* J) {{
+  for (int jj = SJ[k]; jj >= 0; jj = PAR[jj]) {{
+    const int s = SRC[jj];
+    if (s < 0) continue;
+    const float* u = ax + jj*3;
+    const float* w = TW + jj*6 + 3;
+    float dc[3];
+    if ((w[0]*w[0] + w[1]*w[1] + w[2]*w[2]) > 0.5f) {{
+      const float d0 = c[0] - og[jj*3], d1 = c[1] - og[jj*3+1], d2 = c[2] - og[jj*3+2];
+      dc[0] = u[1]*d2 - u[2]*d1; dc[1] = u[2]*d0 - u[0]*d2; dc[2] = u[0]*d1 - u[1]*d0;
+    }} else {{ dc[0] = u[0]; dc[1] = u[1]; dc[2] = u[2]; }}
+    J[s] += MUL[jj] * (g[0]*dc[0] + g[1]*dc[1] + g[2]*dc[2]);
+  }}
+}}
+"""
+    if mode == "self":
+        pair_links = set(zip(np.asarray(robot_coll.active_idx_i).tolist(),
+                             np.asarray(robot_coll.active_idx_j).tolist()))
+        pairs = np.array([(a, b) for a in range(len(sph)) for b in range(len(sph))
+                          if (int(sph_link[a]), int(sph_link[b])) in pair_links],
+                         np.int32).reshape(-1, 2)
+        fn = f"{ns}::self_collision"
+        source = prelude + f"""
+constexpr int NPAIR = {len(pairs)};
+{_arr("PA", pairs[:, 0], "int")}
+{_arr("PB", pairs[:, 1], "int")}
+
+__device__ void self_collision(const float* q, float* r, float* J) {{
+  float Rw[NJ * 9], tw[NJ * 3], ax[NJ * 3], og[NJ * 3];
+  fk(q, Rw, tw, ax, og);
+  float acc = 0.f;
+  if (J) for (int a = 0; a < DOF; ++a) J[a] = 0.f;
+  for (int p = 0; p < NPAIR; ++p) {{
+    const int ka = PA[p], kb = PB[p];
+    float ca[3], cb[3];
+    centre(ka, Rw, tw, ca);
+    centre(kb, Rw, tw, cb);
+    const float dx = ca[0] - cb[0], dy = ca[1] - cb[1], dz = ca[2] - cb[2];
+    const float n = sqrtf(dx*dx + dy*dy + dz*dz);
+    const float h = MARGIN - (n - SPH[4*ka + 3] - SPH[4*kb + 3]);
+    if (h <= 0.f) continue;
+    acc += h;
+    if (!J || n <= 0.f) continue;
+    // dh/dca = -(ca - cb) / |ca - cb|, dh/dcb = -dh/dca.
+    const float ga[3] = {{-dx / n, -dy / n, -dz / n}}, gb[3] = {{dx / n, dy / n, dz / n}};
+    chain(ka, ca, ga, ax, og, J);
+    chain(kb, cb, gb, ax, og, J);
+  }}
+  r[0] = acc;
+}}
+}}  // namespace {ns}
+"""
+        data, setter = (), ""
+    else:
+        items = world_geoms if isinstance(world_geoms, (list, tuple)) else (world_geoms,)
+        chunks = [[], [], [], []]
+        for w in items:
+            w = w.reshape((-1,))
+            for dst, a in zip(chunks, _extract_world_arrays(w)):
+                if a.shape[0]:
+                    dst.append(np.asarray(a, np.float32))
+        ws, wc, wb, wh = (np.concatenate(c) if c else np.zeros((0, n), np.float32)
+                          for c, n in zip(chunks, (4, 7, 15, 6)))
+        # The world is RUNTIME data: buffers of a capacity bucket per primitive type (the source,
+        # hence the compile, depends only on the robot, the margin and the buckets), filled by
+        # <ns>_set_world before each solve.
+        cap = [_bucket(len(a)) for a in (ws, wc, wb, wh)]
+        fn = f"{ns}::world_collision"
+        source = prelude + f"""
+__device__ int NWS, NWC, NWB, NWH;
+__device__ float WS[{max(cap[0], 1) * 4}], WC[{max(cap[1], 1) * 7}], WB[{max(cap[2], 1) * 15}], WH[{max(cap[3], 1) * 6}];
+
+// Signed distance of a sphere (centre c, radius rr) to every obstacle; hinge sum.
+__device__ __forceinline__ float hinge_sum(const float* c, float rr) {{
+  float acc = 0.f;
+  for (int o = 0; o < NWS; ++o) {{ const float* w = WS + 4*o;
+    acc += fmaxf(MARGIN - sphere_sphere_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3]), 0.f); }}
+  for (int o = 0; o < NWC; ++o) {{ const float* w = WC + 7*o;
+    acc += fmaxf(MARGIN - sphere_capsule_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3], w[4], w[5], w[6]), 0.f); }}
+  for (int o = 0; o < NWB; ++o) {{ const float* w = WB + 15*o;
+    acc += fmaxf(MARGIN - sphere_box_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3], w[4], w[5],
+                                          w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14]), 0.f); }}
+  for (int o = 0; o < NWH; ++o) {{ const float* w = WH + 6*o;
+    acc += fmaxf(MARGIN - sphere_halfspace_dist(c[0], c[1], c[2], rr, w[0], w[1], w[2], w[3], w[4], w[5]), 0.f); }}
+  return acc;
+}}
+
+__device__ void world_collision(const float* q, float* r, float* J) {{
+  float Rw[NJ * 9], tw[NJ * 3], ax[NJ * 3], og[NJ * 3];
+  fk(q, Rw, tw, ax, og);
   float acc = 0.f;
   if (J) for (int a = 0; a < DOF; ++a) J[a] = 0.f;
   for (int k = 0; k < NSPH; ++k) {{
-    const int pj = SJ[k];
-    const float* ls = SPH + 4*k;
     float c[3];
-    for (int a = 0; a < 3; ++a)
-      c[a] = (pj < 0) ? ls[a] : Rw[pj*9 + a*3]*ls[0] + Rw[pj*9 + a*3+1]*ls[1] + Rw[pj*9 + a*3+2]*ls[2] + tw[pj*3 + a];
-    const float h = hinge_sum(c, ls[3]);
+    centre(k, Rw, tw, c);
+    const float rr = SPH[4*k + 3];
+    const float h = hinge_sum(c, rr);
     if (h <= 0.f) continue;
     acc += h;
     if (!J) continue;
-    // d h / d c by central differences, then through the chain: dc/dq_j = ax x (c - og)
-    // (revolute) or ax (prismatic), routed to the actuated / mimic source column.
+    // d h / d c by central differences, then through the chain.
     float g[3];
     for (int a = 0; a < 3; ++a) {{
       const float e = 1e-4f; float cp[3] = {{c[0], c[1], c[2]}}, cm[3] = {{c[0], c[1], c[2]}};
       cp[a] += e; cm[a] -= e;
-      g[a] = (hinge_sum(cp, ls[3]) - hinge_sum(cm, ls[3])) / (2.f * e);
+      g[a] = (hinge_sum(cp, rr) - hinge_sum(cm, rr)) / (2.f * e);
     }}
-    for (int jj = pj; jj >= 0; jj = PAR[jj]) {{
-      const int s = SRC[jj];
-      if (s < 0) continue;
-      const float* u = ax + jj*3;
-      const float* w = TW + jj*6 + 3;
-      float dc[3];
-      if ((w[0]*w[0] + w[1]*w[1] + w[2]*w[2]) > 0.5f) {{
-        const float d0 = c[0] - og[jj*3], d1 = c[1] - og[jj*3+1], d2 = c[2] - og[jj*3+2];
-        dc[0] = u[1]*d2 - u[2]*d1; dc[1] = u[2]*d0 - u[0]*d2; dc[2] = u[0]*d1 - u[1]*d0;
-      }} else {{ dc[0] = u[0]; dc[1] = u[1]; dc[2] = u[2]; }}
-      J[s] += MUL[jj] * (g[0]*dc[0] + g[1]*dc[1] + g[2]*dc[2]);
-    }}
+    chain(k, c, g, ax, og, J);
   }}
   r[0] = acc;
 }}
@@ -192,10 +252,11 @@ extern "C" __attribute__((visibility("default"))) int {ns}_set_world(
   return (int)cudaGetLastError();
 }}
 """
-    data = tuple(np.ascontiguousarray(a, np.float32) for a in (ws, wc, wb, wh))
+        data = tuple(np.ascontiguousarray(a, np.float32) for a in (ws, wc, wb, wh))
+        setter = f"{ns}_set_world"
     from .._grim import _root
     kernels = str(_root() / "bindings" / "grim" / "motion" / "kernels")  # GRiM's collision.cuh
-    return NativeResidual(fn=fn, source=source, rows=1, dof=dof, setter=f"{ns}_set_world", data=data,
+    return NativeResidual(fn=fn, source=source, rows=1, dof=dof, setter=setter, data=data,
                           include_dirs=(kernels,))
 
 
@@ -204,22 +265,33 @@ def _bucket(n: int) -> int:
     return 0 if n == 0 else 1 << (max(n, 8) - 1).bit_length()
 
 
-def world_collision_native(robot, robot_coll, joint_var, world_geoms, margin: float):
-    """Collision constraint ``sum max(0, margin - d) <= 0`` per configuration, as a native
-    residual: one row per batch instance of ``joint_var``, compact device code. The world is
-    runtime data (uploaded per solve), so a new scene of the same size bucket does not compile."""
+def _native_cost(robot, robot_coll, joint_var, world_geoms, margin: float, *, mode: str):
     import jax.numpy as jnp
     from cudals import Cost
     if robot.floating_base:
         # ponytail: the device FK walks the joints from a fixed root; add the base pose to it
         # when a floating-base planner needs native collision.
-        raise NotImplementedError("world_collision_native: fixed-base robots only")
-    tag = hashlib.sha1(repr((float(margin),)).encode()).hexdigest()[:6]
-    nat = world_collision_source(robot, robot_coll, world_geoms, margin, tag)
+        raise NotImplementedError(f"{mode}_collision_native: fixed-base robots only")
+    tag = hashlib.sha1(repr((float(margin), mode)).encode()).hexdigest()[:6]
+    nat = _collision_source(robot, robot_coll, world_geoms, margin, tag=tag, mode=mode)
     tag = nat.digest[:10]
-    nat = world_collision_source(robot, robot_coll, world_geoms, margin, tag)
+    nat = _collision_source(robot, robot_coll, world_geoms, margin, tag=tag, mode=mode)
 
     def residual(vals, var):
         return jnp.zeros(nat.rows, jnp.float32) + 0.0 * jnp.sum(vals[var])
     return Cost(compute_residual=lambda vals, a, kw: residual(vals, *a), args=((joint_var,), {}),
-                kind="constraint_leq_zero", name=f"native_world_collision_{tag}", native=nat)
+                kind="constraint_leq_zero", name=f"native_{mode}_collision_{tag}", native=nat)
+
+
+def world_collision_native(robot, robot_coll, joint_var, world_geoms, margin: float):
+    """Collision constraint ``sum max(0, margin - d) <= 0`` per configuration, as a native
+    residual: one row per batch instance of ``joint_var``, compact device code. The world is
+    runtime data (uploaded per solve), so a new scene of the same size bucket does not compile."""
+    return _native_cost(robot, robot_coll, joint_var, world_geoms, margin, mode="world")
+
+
+def self_collision_native(robot, robot_coll, joint_var, margin: float):
+    """Self-collision constraint ``sum max(0, margin - d) <= 0`` over the sphere pairs of
+    ``robot_coll``'s active link pairs, per configuration, as a native residual (one row per
+    batch instance of ``joint_var``)."""
+    return _native_cost(robot, robot_coll, joint_var, (), margin, mode="self")

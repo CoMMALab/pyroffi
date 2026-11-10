@@ -1,7 +1,7 @@
-"""Tiered rigid-body dynamics: GRiM's cricket-traced kernels plus GRiD-style block kernels.
+"""Tiered rigid-body dynamics: GRiM's crocket-traced kernels plus GRiD-style block kernels.
 
 GRiM's :class:`grim.motion.dynamics.TracedDynamics` compiles these ops of one robot from
-cricket traces, each at two tiers:
+crocket traces, each at two tiers:
 
 ======== ======================================= ==========================================
 op       computes                                 inputs -> outputs (generator joint order)
@@ -13,8 +13,8 @@ fd_crba  forward dynamics as M qdd = tau - b      [q, qd, tau] -> qdd (GLASS Cho
 id_du    inverse-dynamics derivatives             [q, qd, qdd] -> [dtau/dq, dtau/dqd]
 ======== ======================================= ==========================================
 
-* ``thread``: cricket's straight-line trace, one configuration per thread.
-* ``block``: the same trace scheduled by ``cricket.tiered`` (warp-split): 32 configurations per
+* ``thread``: crocket's straight-line trace, one configuration per thread.
+* ``block``: the same trace scheduled by crocket's warp-split variant: 32 configurations per
   block, the block's warps splitting each dataflow level.
 
 ``grid`` (GRiD's block-cooperative kernels, one configuration per block) is a third provider for
@@ -60,7 +60,7 @@ class ContractDynamics:
 
     def __init__(self, urdf, gravity: float = -9.81, grid: bool = True,
                  ops: tuple[str, ...] | None = None):
-        """``ops`` defaults to every op cricket supports for the robot (on mimic robots,
+        """``ops`` defaults to every op crocket supports for the robot (on mimic robots,
         forward dynamics only through CRBA). The traced tiers use Pinocchio's -9.81 gravity;
         ``gravity`` applies to the GRiD provider."""
         from .. import _grim
