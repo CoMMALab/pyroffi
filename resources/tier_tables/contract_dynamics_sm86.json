@@ -3,11 +3,11 @@
   {
    "n": 7,
    "batch": 16,
-   "winner": "grid",
+   "winner": "thread",
    "ms": {
-    "thread": 0.0757,
-    "block": 0.0763,
-    "grid": 0.0568
+    "thread": 0.0487,
+    "warp": 0.1063,
+    "block": 0.1287
    },
    "robot": "panda"
   },
@@ -16,9 +16,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0492,
-    "block": 0.0483,
-    "grid": 0.0623
+    "thread": 0.0777,
+    "warp": 0.1067,
+    "block": 0.1297
    },
    "robot": "panda"
   },
@@ -27,9 +27,9 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0524,
-    "block": 0.0771,
-    "grid": 0.0794
+    "thread": 0.0546,
+    "warp": 0.1059,
+    "block": 0.132
    },
    "robot": "panda"
   },
@@ -38,9 +38,9 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.0519,
-    "block": 0.0816,
-    "grid": 0.1571
+    "thread": 0.0502,
+    "warp": 0.1403,
+    "block": 0.1648
    },
    "robot": "panda"
   },
@@ -49,9 +49,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.0659,
-    "block": 0.0777,
-    "grid": 0.483
+    "thread": 0.0515,
+    "warp": 0.4556,
+    "block": 0.6058
    },
    "robot": "panda"
   },
@@ -60,9 +60,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.085,
-    "block": 0.2834,
-    "grid": 6.8813
+    "thread": 0.0806,
+    "warp": 6.5611,
+    "block": 9.5434
    },
    "robot": "panda"
   },
@@ -71,9 +71,9 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.0571,
-    "block": 0.053,
-    "grid": 0.0642
+    "thread": 0.0472,
+    "warp": 0.0903,
+    "block": 0.1166
    },
    "robot": "fetch"
   },
@@ -82,9 +82,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.072,
-    "block": 0.076,
-    "grid": 0.0867
+    "thread": 0.0508,
+    "warp": 0.0884,
+    "block": 0.1177
    },
    "robot": "fetch"
   },
@@ -93,9 +93,9 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0576,
-    "block": 0.0783,
-    "grid": 0.0725
+    "thread": 0.0791,
+    "warp": 0.0909,
+    "block": 0.1197
    },
    "robot": "fetch"
   },
@@ -104,20 +104,20 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.078,
-    "block": 0.0811,
-    "grid": 0.1775
+    "thread": 0.0694,
+    "warp": 0.1214,
+    "block": 0.1476
    },
    "robot": "fetch"
   },
   {
    "n": 7,
    "batch": 4096,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.0766,
-    "block": 0.0555,
-    "grid": 0.5393
+    "thread": 0.0692,
+    "warp": 0.4031,
+    "block": 0.5349
    },
    "robot": "fetch"
   },
@@ -126,9 +126,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.0871,
-    "block": 0.2645,
-    "grid": 7.5529
+    "thread": 0.0792,
+    "warp": 5.8195,
+    "block": 8.5048
    },
    "robot": "fetch"
   },
@@ -137,9 +137,9 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.073,
-    "block": 0.0901,
-    "grid": 0.1185
+    "thread": 0.0842,
+    "warp": 0.4197,
+    "block": 0.4571
    },
    "robot": "g1"
   },
@@ -148,9 +148,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0755,
-    "block": 0.0967,
-    "grid": 0.1183
+    "thread": 0.0875,
+    "warp": 0.4095,
+    "block": 0.4615
    },
    "robot": "g1"
   },
@@ -159,9 +159,9 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0808,
-    "block": 0.0973,
-    "grid": 0.2226
+    "thread": 0.1046,
+    "warp": 0.4073,
+    "block": 0.47
    },
    "robot": "g1"
   },
@@ -170,9 +170,9 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.0838,
-    "block": 0.1135,
-    "grid": 0.7291
+    "thread": 0.1013,
+    "warp": 1.5936,
+    "block": 1.8196
    },
    "robot": "g1"
   },
@@ -181,9 +181,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.0849,
-    "block": 0.2097,
-    "grid": 2.5743
+    "thread": 0.1103,
+    "warp": 6.3291,
+    "block": 7.2125
    },
    "robot": "g1"
   },
@@ -192,9 +192,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.4704,
-    "block": 3.0347,
-    "grid": 39.2082
+    "thread": 0.6792,
+    "warp": 101.0109,
+    "block": 115.0362
    },
    "robot": "g1"
   }
@@ -203,11 +203,11 @@
   {
    "n": 7,
    "batch": 16,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.076,
-    "block": 0.0579,
-    "grid": 0.0805
+    "thread": 0.0786,
+    "warp": 0.083,
+    "block": 0.1006
    },
    "robot": "panda"
   },
@@ -216,9 +216,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0693,
-    "block": 0.0789,
-    "grid": 0.0771
+    "thread": 0.0466,
+    "warp": 0.0867,
+    "block": 0.0997
    },
    "robot": "panda"
   },
@@ -227,20 +227,20 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0483,
-    "block": 0.0463,
-    "grid": 0.0853
+    "thread": 0.0447,
+    "warp": 0.0828,
+    "block": 0.1034
    },
    "robot": "panda"
   },
   {
    "n": 7,
    "batch": 1024,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.059,
-    "block": 0.0472,
-    "grid": 0.1786
+    "thread": 0.0476,
+    "warp": 0.1154,
+    "block": 0.1346
    },
    "robot": "panda"
   },
@@ -249,9 +249,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.0441,
-    "block": 0.0526,
-    "grid": 0.5473
+    "thread": 0.0462,
+    "warp": 0.3419,
+    "block": 0.4666
    },
    "robot": "panda"
   },
@@ -260,9 +260,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.1793,
-    "block": 0.3576,
-    "grid": 7.9504
+    "thread": 0.1859,
+    "warp": 4.7597,
+    "block": 7.1889
    },
    "robot": "panda"
   },
@@ -271,9 +271,9 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.0469,
-    "block": 0.0492,
-    "grid": 0.052
+    "thread": 0.0506,
+    "warp": 0.0652,
+    "block": 0.0852
    },
    "robot": "fetch"
   },
@@ -282,9 +282,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0481,
-    "block": 0.0465,
-    "grid": 0.0564
+    "thread": 0.0752,
+    "warp": 0.0706,
+    "block": 0.0863
    },
    "robot": "fetch"
   },
@@ -293,9 +293,9 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0513,
-    "block": 0.0695,
-    "grid": 0.0881
+    "thread": 0.0772,
+    "warp": 0.0701,
+    "block": 0.0891
    },
    "robot": "fetch"
   },
@@ -304,9 +304,9 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.048,
-    "block": 0.0457,
-    "grid": 0.1954
+    "thread": 0.0598,
+    "warp": 0.0887,
+    "block": 0.1124
    },
    "robot": "fetch"
   },
@@ -315,9 +315,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.0522,
-    "block": 0.0527,
-    "grid": 0.5896
+    "thread": 0.0461,
+    "warp": 0.2777,
+    "block": 0.3805
    },
    "robot": "fetch"
   },
@@ -326,53 +326,53 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.1854,
-    "block": 0.3958,
-    "grid": 8.4592
+    "thread": 0.1684,
+    "warp": 3.7675,
+    "block": 5.9633
    },
    "robot": "fetch"
   },
   {
    "n": 29,
    "batch": 16,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.115,
-    "block": 0.0856,
-    "grid": 0.1034
+    "thread": 0.0879,
+    "warp": 0.3563,
+    "block": 0.3514
    },
    "robot": "g1"
   },
   {
    "n": 29,
    "batch": 64,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.1203,
-    "block": 0.0929,
-    "grid": 0.1076
+    "thread": 0.11,
+    "warp": 0.3542,
+    "block": 0.3636
    },
    "robot": "g1"
   },
   {
    "n": 29,
    "batch": 256,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.1712,
-    "block": 0.1107,
-    "grid": 0.2195
+    "thread": 0.1668,
+    "warp": 0.3907,
+    "block": 0.4165
    },
    "robot": "g1"
   },
   {
    "n": 29,
    "batch": 1024,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.228,
-    "block": 0.1876,
-    "grid": 0.7671
+    "thread": 0.2196,
+    "warp": 1.5217,
+    "block": 1.6051
    },
    "robot": "g1"
   },
@@ -381,9 +381,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.439,
-    "block": 0.5043,
-    "grid": 2.9591
+    "thread": 0.4401,
+    "warp": 5.9789,
+    "block": 6.2838
    },
    "robot": "g1"
   },
@@ -392,8 +392,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 21.3235,
-    "block": 23.3425
+    "thread": 21.5939,
+    "warp": 110.9627,
+    "block": 116.0798
    },
    "robot": "g1"
   }
@@ -404,11 +405,12 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.051,
-    "block": 0.0636,
-    "grid": 0.0799,
-    "thread_crba": 0.0491,
-    "block_crba": 0.0647
+    "thread": 0.0554,
+    "warp": 0.2986,
+    "block": 0.3582,
+    "thread_crba": 0.0484,
+    "warp_crba": 0.2209,
+    "block_crba": 0.2447
    },
    "robot": "panda"
   },
@@ -417,11 +419,12 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0523,
-    "block": 0.0685,
-    "grid": 0.0819,
-    "thread_crba": 0.0741,
-    "block_crba": 0.0658
+    "thread": 0.0647,
+    "warp": 0.2934,
+    "block": 0.3603,
+    "thread_crba": 0.0829,
+    "warp_crba": 0.212,
+    "block_crba": 0.2452
    },
    "robot": "panda"
   },
@@ -430,115 +433,124 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0556,
-    "block": 0.0609,
-    "grid": 0.091,
+    "thread": 0.0518,
+    "warp": 0.2918,
+    "block": 0.3675,
+    "thread_crba": 0.0707,
+    "warp_crba": 0.2091,
+    "block_crba": 0.2507
+   },
+   "robot": "panda"
+  },
+  {
+   "n": 7,
+   "batch": 1024,
+   "winner": "thread_crba",
+   "ms": {
+    "thread": 0.0724,
+    "warp": 0.3912,
+    "block": 0.4801,
+    "thread_crba": 0.0493,
+    "warp_crba": 0.276,
+    "block_crba": 0.3135
+   },
+   "robot": "panda"
+  },
+  {
+   "n": 7,
+   "batch": 4096,
+   "winner": "thread",
+   "ms": {
+    "thread": 0.0878,
+    "warp": 1.395,
+    "block": 1.9076,
+    "thread_crba": 0.077,
+    "warp_crba": 0.9669,
+    "block_crba": 1.1554
+   },
+   "robot": "panda"
+  },
+  {
+   "n": 7,
+   "batch": 65536,
+   "winner": "thread",
+   "ms": {
+    "thread": 0.1078,
+    "warp": 21.1659,
+    "block": 30.7987,
+    "thread_crba": 0.1189,
+    "warp_crba": 14.3306,
+    "block_crba": 18.716
+   },
+   "robot": "panda"
+  },
+  {
+   "n": 7,
+   "batch": 16,
+   "winner": "thread_crba",
+   "ms": {
+    "thread": 0.0765,
+    "warp": 0.2089,
+    "block": 0.2547,
+    "thread_crba": 0.0513,
+    "warp_crba": 0.1774,
+    "block_crba": 0.2081
+   },
+   "robot": "fetch"
+  },
+  {
+   "n": 7,
+   "batch": 64,
+   "winner": "thread",
+   "ms": {
+    "thread": 0.0597,
+    "warp": 0.2038,
+    "block": 0.255,
+    "thread_crba": 0.054,
+    "warp_crba": 0.1772,
+    "block_crba": 0.2092
+   },
+   "robot": "fetch"
+  },
+  {
+   "n": 7,
+   "batch": 256,
+   "winner": "thread",
+   "ms": {
+    "thread": 0.0534,
+    "warp": 0.2027,
+    "block": 0.2599,
+    "thread_crba": 0.0592,
+    "warp_crba": 0.175,
+    "block_crba": 0.2138
+   },
+   "robot": "fetch"
+  },
+  {
+   "n": 7,
+   "batch": 1024,
+   "winner": "thread_crba",
+   "ms": {
+    "thread": 0.0779,
+    "warp": 0.2588,
+    "block": 0.332,
+    "thread_crba": 0.0471,
+    "warp_crba": 0.2274,
+    "block_crba": 0.2713
+   },
+   "robot": "fetch"
+  },
+  {
+   "n": 7,
+   "batch": 4096,
+   "winner": "thread",
+   "ms": {
+    "thread": 0.0469,
+    "warp": 0.937,
+    "block": 1.2386,
     "thread_crba": 0.0503,
-    "block_crba": 0.0652
-   },
-   "robot": "panda"
-  },
-  {
-   "n": 7,
-   "batch": 1024,
-   "winner": "thread_crba",
-   "ms": {
-    "thread": 0.0749,
-    "block": 0.0668,
-    "grid": 0.2513,
-    "thread_crba": 0.0483,
-    "block_crba": 0.0645
-   },
-   "robot": "panda"
-  },
-  {
-   "n": 7,
-   "batch": 4096,
-   "winner": "thread_crba",
-   "ms": {
-    "thread": 0.0573,
-    "block": 0.0694,
-    "grid": 0.8681,
-    "thread_crba": 0.0474,
-    "block_crba": 0.0719
-   },
-   "robot": "panda"
-  },
-  {
-   "n": 7,
-   "batch": 65536,
-   "winner": "thread",
-   "ms": {
-    "thread": 0.1223,
-    "block": 0.7162,
-    "grid": 13.1134,
-    "thread_crba": 0.1206,
-    "block_crba": 0.8106
-   },
-   "robot": "panda"
-  },
-  {
-   "n": 7,
-   "batch": 16,
-   "winner": "thread",
-   "ms": {
-    "thread": 0.0532,
-    "block": 0.0558,
-    "grid": 0.0801,
-    "thread_crba": 0.0504,
-    "block_crba": 0.0671
-   },
-   "robot": "fetch"
-  },
-  {
-   "n": 7,
-   "batch": 64,
-   "winner": "thread",
-   "ms": {
-    "thread": 0.052,
-    "block": 0.0588,
-    "grid": 0.084,
-    "thread_crba": 0.0726,
-    "block_crba": 0.07
-   },
-   "robot": "fetch"
-  },
-  {
-   "n": 7,
-   "batch": 256,
-   "winner": "thread",
-   "ms": {
-    "thread": 0.0521,
-    "block": 0.0586,
-    "grid": 0.1428,
-    "thread_crba": 0.0496,
-    "block_crba": 0.0673
-   },
-   "robot": "fetch"
-  },
-  {
-   "n": 7,
-   "batch": 1024,
-   "winner": "thread",
-   "ms": {
-    "thread": 0.0545,
-    "block": 0.0617,
-    "grid": 0.3471,
-    "thread_crba": 0.0509,
-    "block_crba": 0.0672
-   },
-   "robot": "fetch"
-  },
-  {
-   "n": 7,
-   "batch": 4096,
-   "winner": "block",
-   "ms": {
-    "thread": 0.0756,
-    "block": 0.0641,
-    "grid": 1.1391,
-    "thread_crba": 0.0716,
-    "block_crba": 0.0745
+    "warp_crba": 0.8018,
+    "block_crba": 1.0395
    },
    "robot": "fetch"
   },
@@ -547,11 +559,12 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.1157,
-    "block": 0.6081,
-    "grid": 16.9787,
-    "thread_crba": 0.1411,
-    "block_crba": 0.8926
+    "thread": 0.0994,
+    "warp": 14.432,
+    "block": 20.1427,
+    "thread_crba": 0.1146,
+    "warp_crba": 11.958,
+    "block_crba": 17.1316
    },
    "robot": "fetch"
   },
@@ -560,11 +573,12 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.1319,
-    "block": 0.166,
-    "grid": 0.2029,
-    "thread_crba": 0.9629,
-    "block_crba": 1.1068
+    "thread": 0.1321,
+    "warp": 0.7764,
+    "block": 0.8298,
+    "thread_crba": 1.0532,
+    "warp_crba": 1.3133,
+    "block_crba": 1.3224
    },
    "robot": "g1"
   },
@@ -573,11 +587,12 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.1348,
-    "block": 0.1706,
-    "grid": 0.1999,
-    "thread_crba": 1.1548,
-    "block_crba": 1.1112
+    "thread": 0.1395,
+    "warp": 0.7556,
+    "block": 0.834,
+    "thread_crba": 1.176,
+    "warp_crba": 1.2901,
+    "block_crba": 1.3288
    },
    "robot": "g1"
   },
@@ -586,11 +601,12 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.1488,
-    "block": 0.1717,
-    "grid": 0.3977,
-    "thread_crba": 1.6543,
-    "block_crba": 1.1131
+    "thread": 0.1671,
+    "warp": 0.7567,
+    "block": 0.8576,
+    "thread_crba": 1.6489,
+    "warp_crba": 1.2911,
+    "block_crba": 1.3821
    },
    "robot": "g1"
   },
@@ -599,11 +615,12 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.1506,
-    "block": 0.1962,
-    "grid": 1.4481,
-    "thread_crba": 1.6453,
-    "block_crba": 1.1937
+    "thread": 0.161,
+    "warp": 2.9873,
+    "block": 3.3722,
+    "thread_crba": 1.669,
+    "warp_crba": 5.1036,
+    "block_crba": 5.4504
    },
    "robot": "g1"
   },
@@ -612,11 +629,12 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.175,
-    "block": 0.2546,
-    "grid": 5.6611,
-    "thread_crba": 1.8292,
-    "block_crba": 1.4072
+    "thread": 0.1858,
+    "warp": 11.9332,
+    "block": 13.4234,
+    "thread_crba": 1.8308,
+    "warp_crba": 20.34,
+    "block_crba": 21.729
    },
    "robot": "g1"
   },
@@ -625,10 +643,12 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.9325,
-    "block": 4.3078,
-    "thread_crba": 13.5208,
-    "block_crba": 27.7466
+    "thread": 1.2236,
+    "warp": 190.1229,
+    "block": 214.4303,
+    "thread_crba": 13.0422,
+    "warp_crba": 325.1981,
+    "block_crba": 346.947
    },
    "robot": "g1"
   }
@@ -639,9 +659,9 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.0665,
-    "block": 0.0767,
-    "grid": 0.0789
+    "thread": 0.0979,
+    "warp": 0.4833,
+    "block": 0.5056
    },
    "robot": "panda"
   },
@@ -650,9 +670,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0745,
-    "block": 0.0791,
-    "grid": 0.0764
+    "thread": 0.1014,
+    "warp": 0.477,
+    "block": 0.5047
    },
    "robot": "panda"
   },
@@ -661,9 +681,9 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0703,
-    "block": 0.0803,
-    "grid": 0.1264
+    "thread": 0.1171,
+    "warp": 0.475,
+    "block": 0.5279
    },
    "robot": "panda"
   },
@@ -672,9 +692,9 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.0746,
-    "block": 0.096,
-    "grid": 0.304
+    "thread": 0.1152,
+    "warp": 1.1115,
+    "block": 1.3461
    },
    "robot": "panda"
   },
@@ -683,9 +703,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.098,
-    "block": 0.1908,
-    "grid": 1.0309
+    "thread": 0.1465,
+    "warp": 4.0515,
+    "block": 5.1246
    },
    "robot": "panda"
   },
@@ -694,9 +714,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.8939,
-    "block": 2.8341,
-    "grid": 16.3966
+    "thread": 1.3051,
+    "warp": 66.0813,
+    "block": 79.8469
    },
    "robot": "panda"
   },
@@ -705,9 +725,9 @@
    "batch": 16,
    "winner": "thread",
    "ms": {
-    "thread": 0.068,
-    "block": 0.0813,
-    "grid": 0.0828
+    "thread": 0.0888,
+    "warp": 0.4394,
+    "block": 0.4557
    },
    "robot": "fetch"
   },
@@ -716,9 +736,9 @@
    "batch": 64,
    "winner": "thread",
    "ms": {
-    "thread": 0.0682,
-    "block": 0.0812,
-    "grid": 0.0831
+    "thread": 0.0938,
+    "warp": 0.4358,
+    "block": 0.4568
    },
    "robot": "fetch"
   },
@@ -727,9 +747,9 @@
    "batch": 256,
    "winner": "thread",
    "ms": {
-    "thread": 0.0715,
-    "block": 0.0817,
-    "grid": 0.1341
+    "thread": 0.1147,
+    "warp": 0.4329,
+    "block": 0.4806
    },
    "robot": "fetch"
   },
@@ -738,9 +758,9 @@
    "batch": 1024,
    "winner": "thread",
    "ms": {
-    "thread": 0.0763,
-    "block": 0.0985,
-    "grid": 0.3286
+    "thread": 0.116,
+    "warp": 1.021,
+    "block": 1.2136
    },
    "robot": "fetch"
   },
@@ -749,9 +769,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 0.0994,
-    "block": 0.2021,
-    "grid": 1.1091
+    "thread": 0.1392,
+    "warp": 3.669,
+    "block": 4.4559
    },
    "robot": "fetch"
   },
@@ -760,53 +780,53 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 0.9294,
-    "block": 3.0356,
-    "grid": 17.412
+    "thread": 1.2391,
+    "warp": 57.8595,
+    "block": 69.8329
    },
    "robot": "fetch"
   },
   {
    "n": 29,
    "batch": 16,
-   "winner": "grid",
+   "winner": "thread",
    "ms": {
-    "thread": 0.4251,
-    "block": 0.2685,
-    "grid": 0.19
+    "thread": 0.6315,
+    "warp": 1.4938,
+    "block": 1.1617
    },
    "robot": "g1"
   },
   {
    "n": 29,
    "batch": 64,
-   "winner": "grid",
+   "winner": "thread",
    "ms": {
-    "thread": 0.4827,
-    "block": 0.2882,
-    "grid": 0.1929
+    "thread": 0.7077,
+    "warp": 1.46,
+    "block": 1.2078
    },
    "robot": "g1"
   },
   {
    "n": 29,
    "batch": 256,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.6834,
-    "block": 0.3199,
-    "grid": 0.6291
+    "thread": 1.016,
+    "warp": 2.9787,
+    "block": 2.555
    },
    "robot": "g1"
   },
   {
    "n": 29,
    "batch": 1024,
-   "winner": "block",
+   "winner": "thread",
    "ms": {
-    "thread": 0.7934,
-    "block": 0.4976,
-    "grid": 2.3385
+    "thread": 1.136,
+    "warp": 9.1226,
+    "block": 8.0339
    },
    "robot": "g1"
   },
@@ -815,9 +835,9 @@
    "batch": 4096,
    "winner": "thread",
    "ms": {
-    "thread": 1.3285,
-    "block": 1.2764,
-    "grid": 9.2887
+    "thread": 1.6436,
+    "warp": 32.7452,
+    "block": 32.6639
    },
    "robot": "g1"
   },
@@ -826,8 +846,9 @@
    "batch": 65536,
    "winner": "thread",
    "ms": {
-    "thread": 48.7087,
-    "block": 52.2505
+    "thread": 50.1188,
+    "warp": 540.7403,
+    "block": 599.3751
    },
    "robot": "g1"
   }

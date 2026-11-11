@@ -1,29 +1,23 @@
-"""Tiered rigid-body dynamics: GRiM's crocket-traced kernels plus GRiD-style block kernels.
+"""Tiered rigid-body dynamics from GRiM's crocket-traced kernels.
 
-GRiM's :class:`grim.motion.dynamics.TracedDynamics` compiles these ops of one robot from
-crocket traces, each at two tiers:
+GRiM's :class:`grim.motion.dynamics.CrocketDynamics` compiles these ops of one robot from
+crocket traces at three tiers (one configuration per thread, warp or block):
 
 ======== ======================================= ==========================================
-op       computes                                 inputs -> outputs (generator joint order)
+op       computes                                 inputs -> outputs
 ======== ======================================= ==========================================
-id       inverse dynamics (RNEA)                  [q, qd, qdd] -> tau
-crba     mass matrix (CRBA)                       q -> M (column-major)
-fd       forward dynamics (ABA)                   [q, qd, tau] -> qdd
-fd_crba  forward dynamics as M qdd = tau - b      [q, qd, tau] -> qdd (GLASS Cholesky)
-id_du    inverse-dynamics derivatives             [q, qd, qdd] -> [dtau/dq, dtau/dqd]
+id       inverse dynamics (RNEA)                  q, qd, qdd -> tau
+crba     mass matrix (CRBA)                       q -> M
+fd       forward dynamics (ABA)                   q, qd, tau -> qdd
+fd_crba  forward dynamics as M qdd = tau - b      q, qd, tau -> qdd (Cholesky)
+id_du    inverse-dynamics derivatives             q, qd, qdd -> [dtau/dq | dtau/dqd]
 ======== ======================================= ==========================================
 
-* ``thread``: crocket's straight-line trace, one configuration per thread.
-* ``block``: the same trace scheduled by crocket's warp-split variant: 32 configurations per
-  block, the block's warps splitting each dataflow level.
-
-``grid`` (GRiD's block-cooperative kernels, one configuration per block) is a third provider for
-id/crba/fd/id_du, called through :class:`~pyroffi.dynamics.GRiDDynamics`.
-
-``tier="auto"`` picks the provider per call at trace time from the batch size, using this robot's
+``tier="auto"`` picks the tier per call at trace time from the batch size, using this robot's
 calibration (:meth:`ContractDynamics.calibrate`) when one exists, else the measured default
-table. Arguments and results are float32 in PyRoFFI's actuated joint order. Neither generator
-models joint damping, so the URDF should carry none.
+table. ``fd`` also offers ``<tier>_crba`` (the ``fd_crba`` route). Arguments and results are
+float32 in PyRoFFI's actuated joint order; gravity is Pinocchio's -9.81. crocket models no
+joint damping, so the URDF should carry none.
 """
 
 from __future__ import annotations
@@ -40,53 +34,50 @@ from jax import Array
 
 _REPO = Path(__file__).resolve().parents[3]
 _DEFAULT_TABLE = _REPO / "resources" / "tier_tables" / "contract_dynamics_sm86.json"
-# A provider replaces thread only when calibration measures it this much faster: below it the
+# A tier replaces thread only when calibration measures it this much faster: below it the
 # difference is launch/dispatch noise (~50 us per call through JAX) and flips run to run.
 _MARGIN = 0.85
+TIERS = ("thread", "warp", "block")
+OPS = ("id", "crba", "fd", "fd_crba", "id_du")
 CANDIDATES = {
-    "id": ("thread", "block", "grid"),
-    "crba": ("thread", "block", "grid"),
-    "fd": ("thread", "block", "grid", "thread_crba", "block_crba"),
-    "id_du": ("thread", "block", "grid"),
+    "id": TIERS,
+    "crba": TIERS,
+    "fd": TIERS + tuple(f"{t}_crba" for t in TIERS),
+    "id_du": TIERS,
 }
 
 
 class ContractDynamics:
-    """Dynamics of one robot at every tier its contract header and GRiD provide.
+    """Dynamics of one robot at every tier crocket provides.
 
     Methods take ``(B, n)`` float32 arrays and a ``tier``: ``"auto"``, or one of
     :data:`CANDIDATES` for that op.
     """
 
-    def __init__(self, urdf, gravity: float = -9.81, grid: bool = True,
-                 ops: tuple[str, ...] | None = None):
+    def __init__(self, urdf, ops: tuple[str, ...] | None = None):
         """``ops`` defaults to every op crocket supports for the robot (on mimic robots,
-        forward dynamics only through CRBA). The traced tiers use Pinocchio's -9.81 gravity;
-        ``gravity`` applies to the GRiD provider."""
+        forward dynamics only through CRBA)."""
         from .. import _grim
         from .._cuda_backends import _urdf_xml
         from .._robot import Robot
 
         _grim.ensure_importable()
         from grim.motion import MotionRobot
-        from grim.motion.dynamics import TracedDynamics
+        from grim.motion.dynamics import CK_MIMIC_OPS, CrocketDynamics
 
-        self.gravity = float(gravity)
         self.actuated = list(Robot.from_urdf(urdf).joints.actuated_names)
         self.n_q = len(self.actuated)
         mrobot = MotionRobot.from_urdf(_urdf_xml(urdf))
         if list(mrobot.actuated_names) != self.actuated:
             raise ValueError(f"GRiM's actuated joints {mrobot.actuated_names} differ from "
                              f"pyroffi's {self.actuated}")
-        self._traced = TracedDynamics(mrobot, ops)
-        self.ops = self._traced.ops
+        if ops is None:
+            mimic = bool((mrobot.mimic_act_idx != -1).any())
+            ops = tuple(o for o in OPS if not mimic or o in CK_MIMIC_OPS)
+        self._ck = CrocketDynamics(mrobot, "crocket-f32", ops)
+        self.ops = self._ck.ops
         # The build's content key (GRiM names targets grim_<symbol>_<key>): keys calibrations.
-        self.key = next(iter(self._traced._targets.values())).rsplit("_", 1)[-1]
-        self._grid = None
-        if grid:
-            from ._grid_dynamics import GRiDDynamics
-
-            self._grid = GRiDDynamics(urdf, gravity=gravity)
+        self.key = next(iter(self._ck._targets.values())).rsplit("_", 1)[-1]
         self._table = self._load_table()
 
     # ── public ops ───────────────────────────────────────────────────────────────────────────
@@ -100,20 +91,18 @@ class ContractDynamics:
         return self._run("fd", tier, q, qd, tau)
 
     def inverse_dynamics_gradient(self, q, qd, qdd, tier: str = "auto") -> Array:
-        """``[dtau/dq | dtau/dqd]``, shape ``(B, n, 2n)``, rows the output joint (GRiD's layout)."""
+        """``[dtau/dq | dtau/dqd]``, shape ``(B, n, 2n)``, rows the output joint."""
         return self._run("id_du", tier, q, qd, qdd)
 
     # ── tier selection ───────────────────────────────────────────────────────────────────────
     def available(self, op: str) -> tuple[str, ...]:
-        have = {t for (o, t) in self._traced._targets if o == op}
-        if op == "fd":
-            have |= {f"{t}_crba" for (o, t) in self._traced._targets if o == "fd_crba"}
-        if self._grid is not None:
-            have.add("grid")
+        have = set(TIERS) if op in self.ops else set()
+        if op == "fd" and "fd_crba" in self.ops:
+            have |= {f"{t}_crba" for t in TIERS}
         return tuple(t for t in CANDIDATES[op] if t in have)
 
     def select(self, op: str, batch: int) -> str:
-        """The provider ``tier="auto"`` uses for ``op`` at ``batch`` configurations.
+        """The tier ``tier="auto"`` uses for ``op`` at ``batch`` configurations.
 
         Precedence: ``$PYROFFI_TIER``, then the nearest calibrated (n, batch) point in log space
         (this robot's own calibration if it has one, else the default table), then ``thread``.
@@ -128,10 +117,10 @@ class ContractDynamics:
         return best["winner"] if best["winner"] in self.available(op) else "thread"
 
     def calibrate(self, batches=(16, 64, 256, 1024, 4096, 65536), repeats: int = 20) -> dict:
-        """Time every provider of every op at ``batches`` on this GPU; cache and use the winners.
+        """Time every tier of every op at ``batches`` on this GPU; cache and use the winners.
 
-        A provider that fails at a size (GRiD's workspace runs out at large batches) is skipped
-        there. The winner is the fastest provider if it beats ``thread`` by ``_MARGIN``, else
+        A tier that fails at a size (one whose shared memory does not fit) is skipped
+        there. The winner is the fastest tier if it beats ``thread`` by ``_MARGIN``, else
         ``thread``.
         """
         rows = {}
@@ -184,11 +173,6 @@ class ContractDynamics:
             tier = self.select(op, batch)
         if tier not in self.available(op):
             raise ValueError(f"{op}: tier {tier!r} not available ({self.available(op)})")
-        if tier == "grid":
-            g = self._grid
-            return {"id": g.inverse_dynamics, "crba": g.mass_matrix, "fd": g.forward_dynamics,
-                    "id_du": g.inverse_dynamics_gradient}[op](*args)
         if tier.endswith("_crba"):
-            return self._traced.forward_dynamics(*args, tier=tier.removesuffix("_crba"),
-                                                 via_crba=True)
-        return self._traced._run(op, tier, *args)
+            op, tier = "fd_crba", tier.removesuffix("_crba")
+        return self._ck(op, *args, tier=tier)

@@ -1,8 +1,8 @@
-"""Every provider behind the traced-robot contract computes the same dynamics.
+"""Every tier of the crocket dynamics computes the same dynamics.
 
-crocket at thread and warp-split block tier, GRiD, and (for forward dynamics) the
-mass-matrix + GLASS Cholesky route, all float32, against pinocchio float64 on the rewritten
-benchmark URDFs (see tests/bench_dynamics.py). The JAX dynamics is checked too.
+crocket at thread, warp and block tier, and (for forward dynamics) the mass-matrix + Cholesky
+route, all float32, against pinocchio float64 on the rewritten benchmark URDFs (see
+tests/bench_dynamics.py). The JAX dynamics is checked too.
 """
 
 import json
@@ -79,24 +79,23 @@ def test_providers_agree_with_pinocchio(robot, op):
     results = {tier: np.asarray(call(q, qd, u, tier=tier)) for tier in contract.available(op)}
     if op == "fd":
         results["jax"] = np.asarray(jax.vmap(pyroffi_robot.forward_dynamics)(q, qd, u))
-    assert {"thread", "block", "grid"} <= set(results)
+    assert {"thread", "warp", "block"} <= set(results)
     for tier, out in results.items():
         err = np.linalg.norm(out.reshape(len(q), -1) - ref, axis=1) / np.maximum(np.linalg.norm(ref, axis=1), 1.0)
         assert err.max() < BOUND.get(tier, 1e-4), (name, op, tier, float(np.median(err)), float(err.max()))
 
 
 def test_auto_tier_follows_table(monkeypatch):
-    """G1: GRiD wins the ID gradient at B=16 and thread wins every op from 4k (default table)."""
+    """G1: thread wins every op at every batch in the default table; $PYROFFI_TIER overrides."""
     contract = ContractDynamics(yourdfpy.URDF.load(URDFS["g1"], load_meshes=False))
     # The committed default table, not whatever this machine's per-robot calibration cached.
     monkeypatch.setattr(contract, "_table", json.loads(Path(
         "resources/tier_tables/contract_dynamics_sm86.json").read_text()))
-    assert contract.select("id_du", 16) == "grid"
-    assert contract.select("crba", 256) == "block"
-    assert all(contract.select(op, 65536) == "thread" for op in ("id", "crba", "fd", "id_du"))
+    assert all(contract.select(op, b) == "thread" for op in ("id", "crba", "fd", "id_du")
+               for b in (16, 256, 65536))
     monkeypatch.setenv("PYROFFI_TIER", "block")
     assert contract.select("id", 16) == "block"
-    monkeypatch.delenv("PYROFFI_TIER")
     q = np.random.default_rng(1).uniform(-1, 1, (16, contract.n_q)).astype(np.float32)
     np.testing.assert_allclose(np.asarray(contract.inverse_dynamics_gradient(q, q, q)),
-                               np.asarray(contract.inverse_dynamics_gradient(q, q, q, tier="grid")), rtol=1e-6)
+                               np.asarray(contract.inverse_dynamics_gradient(q, q, q, tier="thread")),
+                               rtol=1e-5, atol=1e-5)

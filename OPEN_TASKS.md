@@ -28,6 +28,18 @@ re-checked against current code.
   carries a constant 0.0048, so LS trajopt's cudals self-collision constraint can never reach 0.
   Fix: disable that pair in the SRDF, or move the sphere.
 
+- **GRiDDynamics still on GRiD's generated kernels**: `dynamics/_grid_dynamics.py` (and
+  everything built on it: `_contact.py`, dynamics-aware/contact trajopt, TOPP-RA's GRiD
+  backend) uses what crocket cannot trace yet: floating base (g1), runtime inertia (payload
+  ID, `_grid_runtime_inertia.py`), the second-order `idsva_so` tensors (`jax.hessian` /
+  JVP-of-gradient rules) and a `gravity` argument (crocket fixes -9.81). Fix in crocket first
+  (floating-base RNEA/CRBA/ABA, runtime inertia table, second-order RNEA derivatives), then
+  swap `GRiDDynamics` onto `CrocketDynamics` and drop GRiM's `generated_dynamics`.
+  `ContractDynamics` is already crocket-only.
+- **pyroffi's own CUDA kernels are hand-written**: `src/pyroffi/cuda_kernels/` (ESDF,
+  TOPP-RA, OptiX/roboGPU, world collision) stays outside crocket by decision; revisit if
+  crocket gains the primitives.
+
 ## Test debt
 
 - **float32 borderline tests** _(verify)_: ~18 grid/autodiff/flat tests fail under float32 and
