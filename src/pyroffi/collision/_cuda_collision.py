@@ -1554,11 +1554,11 @@ class FusedCUDACollisionChecker:
 
         self._mrobot = _grim.motion_robot(robot)
         self._sc = SelfCollision(*static_arrays(robot, model))
-        # traced=True: kernels against crocket's straight-line FK instead of baked tables.
+        # traced=True: kernels against mantis's straight-line FK instead of baked tables.
         self._traced = traced
         self._self_fn = self._build_self_fn()
 
-    def _checker(self, world_counts=(0, 0, 0, 0)):
+    def _checker(self, world_counts=(0, 0, 0, 0, 0)):
         """GRiM's kernels for this model and obstacle counts (built once; cached by GRiM)."""
         from grim.motion import collision
 

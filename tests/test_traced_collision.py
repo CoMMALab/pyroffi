@@ -1,4 +1,4 @@
-"""Traced collision checkers (compiled against crocket FK) must agree with the stock kernels."""
+"""Traced collision checkers (compiled against mantis FK) must agree with the stock kernels."""
 
 import shutil
 
@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import yourdfpy
 
-pytest.importorskip("crocket")
+pytest.importorskip("mantis")
 if shutil.which("nvcc") is None or jax.default_backend() != "gpu":
     pytest.skip("traced kernels need nvcc and a GPU", allow_module_level=True)
 

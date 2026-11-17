@@ -17,10 +17,20 @@ re-checked against current code.
 - **Collision sentinel** _(verify)_: inf vs 1e9 "no collision" sentinel is inconsistent across
   backends. `panda_spherized` needs an SRDF.
 
-- **Manual GLASS checkout**: GRiM's crocket IK needs GLASS `9a24f37` (block trsv/potrs fix for
+- **Manual GLASS checkout**: GRiM's mantis IK needs GLASS `9a24f37` (block trsv/potrs fix for
   `__restrict__` callers), but upstream GRiD pins `9e57178` and we can't push to GRiD. Setup
   checks GLASS out by hand (`AGENTS.md`, Environment). When GRiD bumps GLASS, bump GRiM, then
   delete this entry and the notes in `AGENTS.md` and GRiM's `AGENTS.md` / `OPEN_TASKS.md`.
+
+- **cudals dense-problem size limit**: jaxls example 3 (50 2D waypoints, 100 vars, 198 rows)
+  fails in `analyze()`'s default dense path with a bare `StopIteration` from `auto_tier`
+  (`external/cudals/src/cudals/_compile.py:588`). `structure="auto"` only checks the 128-var
+  cap, but per-problem state `4·(2n_q + 2n + n² + 5r + r·n)` is ~124 KB against the 48 KB
+  shared budget; the stored dense Jacobian (`r·n`) dominates. Fix in cudals first, then bump
+  the pointer: (1) accumulate JᵀJ / Jᵀr row by row instead of storing J (state ~n², plus
+  opt-in >48 KB shared, columns looped past 128 threads); (2) `auto` checks `available()` and
+  picks banded when the costs are chain-structured, else raises a clear error. Large sparse
+  problems (jaxls g2o graphs) need a separate sparse/CG solver.
 
 - **Panda sphere pair that always collides**: with `panda.srdf`'s disabled pairs, one
   `panda_link5`–`panda_link7` sphere pair is 0.0152 apart in every configuration (both centres
@@ -30,15 +40,15 @@ re-checked against current code.
 
 - **GRiDDynamics still on GRiD's generated kernels**: `dynamics/_grid_dynamics.py` (and
   everything built on it: `_contact.py`, dynamics-aware/contact trajopt, TOPP-RA's GRiD
-  backend) uses what crocket cannot trace yet: floating base (g1), runtime inertia (payload
+  backend) uses what mantis cannot trace yet: floating base (g1), runtime inertia (payload
   ID, `_grid_runtime_inertia.py`), the second-order `idsva_so` tensors (`jax.hessian` /
-  JVP-of-gradient rules) and a `gravity` argument (crocket fixes -9.81). Fix in crocket first
+  JVP-of-gradient rules) and a `gravity` argument (mantis fixes -9.81). Fix in mantis first
   (floating-base RNEA/CRBA/ABA, runtime inertia table, second-order RNEA derivatives), then
-  swap `GRiDDynamics` onto `CrocketDynamics` and drop GRiM's `generated_dynamics`.
-  `ContractDynamics` is already crocket-only.
+  swap `GRiDDynamics` onto `MantisDynamics` and drop GRiM's `generated_dynamics`.
+  `ContractDynamics` is already mantis-only.
 - **pyroffi's own CUDA kernels are hand-written**: `src/pyroffi/cuda_kernels/` (ESDF,
-  TOPP-RA, OptiX/roboGPU, world collision) stays outside crocket by decision; revisit if
-  crocket gains the primitives.
+  TOPP-RA, OptiX/roboGPU, world collision) stays outside mantis by decision; revisit if
+  mantis gains the primitives.
 
 ## Test debt
 

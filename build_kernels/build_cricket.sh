@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install crocket, the trace compiler GRiM uses for its traced builds (traced=True kinematics,
+# Install mantis, the trace compiler GRiM uses for its traced builds (traced=True kinematics,
 # and the traced dynamics tiers behind ContractDynamics); everything else in pyroffi runs
-# without it. crocket is pure Python and lives in GRiM at external/crocket.
+# without it. mantis is pure Python and lives in GRiM at external/mantis.
 #
 # Run it inside the target env, e.g.:
 #
@@ -11,12 +11,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GRIM_DIR="${REPO_ROOT}/external/GRiM"
-CROCKET_DIR="${GRIM_DIR}/external/crocket"
-if [[ ! -f "${CROCKET_DIR}/pyproject.toml" ]]; then
+MANTIS_DIR="${GRIM_DIR}/external/mantis"
+if [[ ! -f "${MANTIS_DIR}/pyproject.toml" ]]; then
   git -C "${REPO_ROOT}" submodule update --init --recursive external/GRiM
 fi
 
-pip install -e "${CROCKET_DIR}"
+pip install -e "${MANTIS_DIR}"
 
 echo
 echo "Done. Verify with:"

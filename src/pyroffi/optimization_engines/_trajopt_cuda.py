@@ -1,4 +1,4 @@
-"""Trajectory optimization on the GPU: GRiM's SCO, STOMP and CHOMP kernels (crocket-traced
+"""Trajectory optimization on the GPU: GRiM's SCO, STOMP and CHOMP kernels (mantis-traced
 collision terms with analytic gradients).
 
 Each kernel is compiled per robot and per collision structure (sphere rows, self-collision

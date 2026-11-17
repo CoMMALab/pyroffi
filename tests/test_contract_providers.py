@@ -1,6 +1,6 @@
-"""Every tier of the crocket dynamics computes the same dynamics.
+"""Every tier of the mantis dynamics computes the same dynamics.
 
-crocket at thread, warp and block tier, and (for forward dynamics) the mass-matrix + Cholesky
+mantis at thread, warp and block tier, and (for forward dynamics) the mass-matrix + Cholesky
 route, all float32, against pinocchio float64 on the rewritten benchmark URDFs (see
 tests/bench_dynamics.py). The JAX dynamics is checked too.
 """
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import yourdfpy
 
-pytest.importorskip("crocket")
+pytest.importorskip("mantis")
 pin = pytest.importorskip("pinocchio")
 if shutil.which("nvcc") is None or jax.default_backend() != "gpu":
     pytest.skip("contract kernels need nvcc and a GPU", allow_module_level=True)

@@ -184,8 +184,8 @@ def grim_targets(kernels: tuple[str, ...], robot: Robot, target_link_indices: tu
     end-effectors and collision setup: one hashable target per kernel, for :func:`run_grim`.
 
     Runs outside jit (the build needs concrete tables); the first call on a robot compiles,
-    later ones hit GRiM's disk cache. ``world`` is the call's (spheres, capsules, boxes,
-    halfspaces) buffers, of which only the row counts are baked in.
+    later ones hit GRiM's disk cache. ``world`` is unused: GRiM's IK takes the world at
+    runtime (any obstacle counts), so no world is baked in.
     """
     from .. import _grim
 
@@ -200,11 +200,10 @@ def grim_targets(kernels: tuple[str, ...], robot: Robot, target_link_indices: tu
     ee_joints = tuple(int(parent_joint[i]) for i in target_link_indices)
     sc = SelfCollision(*(_host(t) for t in self_tables))
     collision = ik.CollisionModel(_host(robot_spheres), _host(robot_sphere_joint), sc)
-    counts = tuple(int(w.shape[0]) for w in world) or (0, 0, 0, 0)
     # A floating base's chart takes its reference rotation per call (see run_grim).
     rot_joint = chart_rotation_joint(robot)
-    return tuple(ik.build(k, mrobot, ee_joints, collision=collision, world_counts=counts,
-                          runtime_rot_joint=rot_joint) for k in kernels)
+    return tuple(ik.build(k, mrobot, ee_joints, collision=collision, runtime_rot_joint=rot_joint)
+                 for k in kernels)
 
 
 def run_grim(target, seeds, targets, world, lower, upper, fixed_mask, noise=None, rng_seed=0,

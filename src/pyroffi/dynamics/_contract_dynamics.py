@@ -1,7 +1,7 @@
-"""Tiered rigid-body dynamics from GRiM's crocket-traced kernels.
+"""Tiered rigid-body dynamics from GRiM's mantis-traced kernels.
 
-GRiM's :class:`grim.motion.dynamics.CrocketDynamics` compiles these ops of one robot from
-crocket traces at three tiers (one configuration per thread, warp or block):
+GRiM's :class:`grim.motion.dynamics.MantisDynamics` compiles these ops of one robot from
+mantis traces at three tiers (one configuration per thread, warp or block):
 
 ======== ======================================= ==========================================
 op       computes                                 inputs -> outputs
@@ -16,7 +16,7 @@ id_du    inverse-dynamics derivatives             q, qd, qdd -> [dtau/dq | dtau/
 ``tier="auto"`` picks the tier per call at trace time from the batch size, using this robot's
 calibration (:meth:`ContractDynamics.calibrate`) when one exists, else the measured default
 table. ``fd`` also offers ``<tier>_crba`` (the ``fd_crba`` route). Arguments and results are
-float32 in PyRoFFI's actuated joint order; gravity is Pinocchio's -9.81. crocket models no
+float32 in PyRoFFI's actuated joint order; gravity is Pinocchio's -9.81. mantis models no
 joint damping, so the URDF should carry none.
 """
 
@@ -48,14 +48,14 @@ CANDIDATES = {
 
 
 class ContractDynamics:
-    """Dynamics of one robot at every tier crocket provides.
+    """Dynamics of one robot at every tier mantis provides.
 
     Methods take ``(B, n)`` float32 arrays and a ``tier``: ``"auto"``, or one of
     :data:`CANDIDATES` for that op.
     """
 
     def __init__(self, urdf, ops: tuple[str, ...] | None = None):
-        """``ops`` defaults to every op crocket supports for the robot (on mimic robots,
+        """``ops`` defaults to every op mantis supports for the robot (on mimic robots,
         forward dynamics only through CRBA)."""
         from .. import _grim
         from .._cuda_backends import _urdf_xml
@@ -63,7 +63,7 @@ class ContractDynamics:
 
         _grim.ensure_importable()
         from grim.motion import MotionRobot
-        from grim.motion.dynamics import CK_MIMIC_OPS, CrocketDynamics
+        from grim.motion.dynamics import CK_MIMIC_OPS, MantisDynamics
 
         self.actuated = list(Robot.from_urdf(urdf).joints.actuated_names)
         self.n_q = len(self.actuated)
@@ -74,7 +74,7 @@ class ContractDynamics:
         if ops is None:
             mimic = bool((mrobot.mimic_act_idx != -1).any())
             ops = tuple(o for o in OPS if not mimic or o in CK_MIMIC_OPS)
-        self._ck = CrocketDynamics(mrobot, "crocket-f32", ops)
+        self._ck = MantisDynamics(mrobot, "mantis-f32", ops)
         self.ops = self._ck.ops
         # The build's content key (GRiM names targets grim_<symbol>_<key>): keys calibrations.
         self.key = next(iter(self._ck._targets.values())).rsplit("_", 1)[-1]

@@ -33,7 +33,7 @@ keep XLA's fusion around them.
 - `src/pyroffi/`: `_robot.py` (`pk.Robot`), `kinematics/`, `collision/`, `costs/` (PyRoKi cost factories),
   `optimization_engines/` (IK solvers), `motion_generators/` (trajopt), `dynamics/`, `topp/`,
   `toolbox/`, `attachments/`, `_grim.py` (GRiM bridge), `_cuda_backends.py`.
-- `external/`: vendored submodules: GRiM (carries GRiD/GLASS/crocket) and cudals (the cost
+- `external/`: vendored submodules: GRiM (carries GRiD/GLASS/mantis) and cudals (the cost
   compiler and its solver kernels). **Don't edit unless
   asked.** A change needed there goes to that repo first, then the submodule pointer gets
   bumped. Follow `external/GRiM/AGENTS.md` when you work inside GRiM.
@@ -73,7 +73,7 @@ CUDA_VISIBLE_DEVICES=<free idx> python -m pytest tests -q
 ruff format --check . && pyright   # CI: formatting.yml, pyright.yml, pytest.yml
 ```
 
-The manual GLASS checkout is temporary. GRiM's crocket IK block tier needs GLASS's
+The manual GLASS checkout is temporary. GRiM's mantis IK block tier needs GLASS's
 restricted-caller fix, which upstream GRiD doesn't pin yet (`OPEN_TASKS.md`). Without it,
 block-tier IK silently diverges. Drop the line once GRiD bumps GLASS.
 

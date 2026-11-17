@@ -1,4 +1,4 @@
-"""CUDA trajopt (GRiM's crocket kernels): the kernels' collision geometry matches the JAX model,
+"""CUDA trajopt (GRiM's mantis kernels): the kernels' collision geometry matches the JAX model,
 and high-DOF robots run."""
 
 import shutil
