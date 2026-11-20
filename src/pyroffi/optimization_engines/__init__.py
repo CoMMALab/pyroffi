@@ -79,6 +79,8 @@ See ``tests/test_collision_constraints.py``, whose low-``collision_weight`` case
 is what distinguishes the hard row of this table from the soft ones.
 """
 
+from typing import TYPE_CHECKING
+
 from ._hjcd_ik import hjcd_solve as hjcd_solve
 from ._ls_ik import ls_ik_solve as ls_ik_solve
 from ._ls_ik import ls_ik_solve_cuda as ls_ik_solve_cuda
@@ -101,14 +103,6 @@ from ._region_ik import hit_and_run_sample_box_region_cuda as hit_and_run_sample
 from ._region_ik import direct_sample_box_region_cuda as direct_sample_box_region_cuda
 from ._region_ik_jax import direct_sample_box_region_jax as direct_sample_box_region_jax
 from ._region_ik_jax import svgd_sample_box_region_jax as svgd_sample_box_region_jax
-from ._learned_ik import (
-    IKFlowNet as IKFlowNet,
-    encode_pose as encode_pose,
-    make_learned_ik_solve as make_learned_ik_solve,
-    save_learned_ik as save_learned_ik,
-    load_learned_ik as load_learned_ik,
-    get_default_model_path as get_default_model_path,
-)
 from ._sco_optimization import ScoTrajOptConfig as ScoTrajOptConfig
 from ._sco_optimization import TrajOptConfig as TrajOptConfig
 from ._sco_optimization import sco_trajopt as sco_trajopt
@@ -143,3 +137,36 @@ from ..kinematics._analytic_ik import (
     analytic_ik_solve_batched as analytic_ik_solve_batched,
     build_geometry as build_analytic_ik_geometry,
 )
+
+if TYPE_CHECKING:
+    from ._learned_ik import (
+        IKFlowNet as IKFlowNet,
+        encode_pose as encode_pose,
+        make_learned_ik_solve as make_learned_ik_solve,
+        save_learned_ik as save_learned_ik,
+        load_learned_ik as load_learned_ik,
+        get_default_model_path as get_default_model_path,
+    )
+
+_LEARNED_IK_NAMES = (
+    "IKFlowNet",
+    "encode_pose",
+    "make_learned_ik_solve",
+    "save_learned_ik",
+    "load_learned_ik",
+    "get_default_model_path",
+)
+
+
+def __getattr__(name: str):
+    # The learned IK solver is built on Flax; import it lazily so `import pyroffi`
+    # works without Flax and only the learned solver requires it.
+    if name in _LEARNED_IK_NAMES:
+        from . import _learned_ik
+
+        return getattr(_learned_ik, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LEARNED_IK_NAMES))
