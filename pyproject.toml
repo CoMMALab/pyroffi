@@ -17,8 +17,12 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent"
 ]
+# Exact pins, except where a range has been tested at both ends: the lower bound is the
+# version pyroffi was developed against, and the upper bound admits the newest version the
+# test suite has been run on (numpy 2.5.3, scipy 1.18.1, viser 1.1.1, tyro 1.0.17,
+# typing_extensions 4.16.0). trimesh stays below 5 because viser requires that.
 dependencies = [
-    "tyro==1.0.15",
+    "tyro>=1.0.15,<1.1",
     "jax==0.10.2",
     "jaxlib==0.10.2",
     "jaxlie==1.5.0",
@@ -28,13 +32,11 @@ dependencies = [
     "robot_descriptions==3.0.0",
     "yourdfpy==0.0.60",
     "trimesh==4.12.2",
-    "viser==1.0.30",
-    "pyliblzfse==0.4.1", # Need for viser.extras import in viser==0.2.23
-    "flax==0.12.7",
-    "numpy==2.3.4",
-    "scipy==1.16.3",
+    "viser>=1.0.30,<1.2",
+    "numpy>=2.3.4,<2.6",
+    "scipy>=1.16.3,<1.19",
     "termcolor==3.2.0",
-    "typing_extensions==4.15.0",
+    "typing_extensions>=4.15.0,<5",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +52,12 @@ dynamics = [
 # loading) lazily import MuJoCo; only needed if you use those code paths.
 mesh = [
     "mujoco==3.10.0",
+]
+# The learned IK solver (pyroffi.optimization_engines: IKFlowNet, make_learned_ik_solve, ...)
+# is built on Flax and imported lazily, so `import pyroffi` does not need it.
+# train_learned_ik.py also uses optax, which Flax depends on.
+learned-ik = [
+    "flax==0.12.7",
 ]
 # CUDA 13 GPU backend for JAX (the accelerated FK/IK/collision kernels). The
 # base install is CPU-only; `pip install pyroffi[cuda]` pulls the pjrt/plugin.

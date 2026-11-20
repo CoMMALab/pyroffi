@@ -102,8 +102,8 @@ serially.
    with the same config, seeds and idle GPU for both sides. Use ≥6 seeds for contact solvers,
    since their residuals vary ~40% run to run. Write it down when a benchmark is the wrong
    comparison.
-8. **Ask before** adding dependencies (all pins in `pyproject.toml` are exact), restructuring
-   modules, editing `external/`, or changing a default solver/config.
+8. **Ask before** adding dependencies (pins in `pyproject.toml` are exact, or a range tested at
+   both ends), restructuring modules, editing `external/`, or changing a default solver/config.
 9. **Match the surrounding code.** Same naming, comment density and idioms. Run `ruff` and
    `pyright` clean. Update the README tables and examples when user-facing behaviour changes.
 10. **Git:** path-scoped `git add` (never `-A`/`.`). Commit submodules before bumping the parent

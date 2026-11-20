@@ -50,6 +50,16 @@ re-checked against current code.
   TOPP-RA, OptiX/roboGPU, world collision) stays outside mantis by decision; revisit if
   mantis gains the primitives.
 
+- **Undeclared `beautifulsoup4` for the CUDA paths**: in an environment holding only
+  `pyproject.toml`'s dependencies, mantis-traced kernels (seen for IK, collision and dynamics
+  tests) fail with `ModuleNotFoundError: No module named 'bs4'`, raised from GRiD's `URDFParser`
+  (`external/GRiM/external/mantis/python/mantis/robot.py`, `_import_parser`). GRiD declares
+  `beautifulsoup4>=4.9.3`, but pyroffi puts GRiM on `sys.path` instead of installing it, so
+  nothing pulls it in. Add it to pyroffi's dependencies (or to an extra the CUDA paths document).
+- **`external/cudals` still pins `numpy==2.3.4`**: harmless while cudals is imported from the
+  submodule path, but `pip install external/cudals` would downgrade numpy now that pyroffi
+  accepts `numpy>=2.3.4,<2.6`. Widen it in cudals, then bump the pointer.
+
 ## Test debt
 
 - **float32 borderline tests** _(verify)_: ~18 grid/autodiff/flat tests fail under float32 and

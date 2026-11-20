@@ -115,3 +115,5 @@ cd pyroffi
 git submodule update --init --recursive  # external/GRiM and external/cudals
 pip install -e .
 ```
+The learned IK solver (`IKFlowNet`, `make_learned_ik_solve`, `train_learned_ik.py`) needs Flax,
+which is an optional extra: `pip install -e ".[learned-ik]"`.
