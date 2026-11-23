@@ -1,0 +1,8 @@
+# Editable install of pyroffi and its submodules. From the repo root, after
+# `git submodule update --init --recursive`:
+#   pip install -r requirements.txt
+-e external/GRiM/external/GRiD
+-e external/GRiM/external/mantis
+-e external/GRiM
+-e external/cudals
+-e .[cuda]

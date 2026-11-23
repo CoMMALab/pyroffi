@@ -89,7 +89,7 @@ else
   echo "ERROR: NVIDIA OptiX SDK 7.x not found."
   echo "Install it and set OPTIX_SDK=/path/to/optix or pass it to PATH."
   echo "Download: https://developer.nvidia.com/designworks/optix/download"
-  exit 1
+  exit 3  # build_all.sh skips roboGPU on this code; any other failure still aborts
 fi
 
 OPTIX_INC="${OPTIX_ROOT}/include"

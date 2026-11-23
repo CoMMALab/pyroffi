@@ -12,6 +12,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+        with:
+          submodules: recursive  # setup.py refuses to install without GRiM and cudals
       - name: Set up Python 3.12
         uses: actions/setup-python@v1
         with:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build pyroffi's own CUDA kernels: the world-side collision checkers, the ESDF builder and
-# roboGPU. The motion kernels (IK, trajopt, robot-side collision, dynamics, least squares)
+# roboGPU (skipped without the OptiX SDK). The motion kernels (IK, trajopt, robot-side collision, dynamics, least squares)
 # live in external/GRiM and compile per robot on first use.
 #
 # Usage (from repo root):
@@ -23,7 +23,14 @@ echo "Building pyroffi's world-side collision kernels (motion kernels build per 
 bash "${SCRIPT_DIR}/build_collision_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_collision_binary_cuda.sh" "${BUILD_ARGS[@]}"
 bash "${SCRIPT_DIR}/build_pba_cuda.sh" "${BUILD_ARGS[@]}"
-bash "${SCRIPT_DIR}/build_robogpu_collision.sh" "${BUILD_ARGS[@]}"
-bash "${SCRIPT_DIR}/build_cricket.sh"
+# roboGPU is optional and needs the NVIDIA OptiX SDK (a manual download). Without it, skip it
+# here; roboGPU then raises when used. mantis needs no step: `import grim` finds it in GRiM.
+rc=0
+bash "${SCRIPT_DIR}/build_robogpu_collision.sh" "${BUILD_ARGS[@]}" || rc=$?
+if [[ ${rc} -eq 3 ]]; then
+  echo "SKIPPED roboGPU (no OptiX SDK). Set OPTIX_SDK and rerun build_robogpu_collision.sh to add it."
+elif [[ ${rc} -ne 0 ]]; then
+  exit "${rc}"
+fi
 
 echo "All CUDA kernels built successfully."

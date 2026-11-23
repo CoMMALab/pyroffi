@@ -112,6 +112,12 @@ For contact, call the tiers directly: `flat_contact_trajopt` (contact-aware) or
 ```
 git clone https://github.com/commalab/pyroffi.git
 cd pyroffi
-git submodule update --init --recursive  # external/GRiM and external/cudals
-pip install -e .
+git submodule update --init --recursive  # required: GRiM (with GRiD, mantis) and cudals
+pip install -r requirements.txt          # pyroffi[cuda] + GRiM, GRiD, mantis, cudals, all editable
+bash build_kernels/build_all.sh          # pyroffi's world-side CUDA kernels; needs nvcc
 ```
+Installing pyroffi without the submodules checked out fails with the command to run. Drop
+`[cuda]` in `requirements.txt` for a CPU-only (PyRoKi-equivalent) install. GRiM's motion
+kernels compile per robot on first use. roboGPU collision also needs the
+[NVIDIA OptiX SDK](https://developer.nvidia.com/designworks/optix/download) (`OPTIX_SDK=...`);
+`build_all.sh` skips it if the SDK isn't found.

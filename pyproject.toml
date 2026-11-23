@@ -54,7 +54,7 @@ mesh = [
 # CUDA 13 GPU backend for JAX (the accelerated FK/IK/collision kernels). The
 # base install is CPU-only; `pip install pyroffi[cuda]` pulls the pjrt/plugin.
 cuda = [
-    "jax-cuda13-plugin==0.10.2",
+    "jax-cuda13-plugin[with-cuda]==0.10.2",  # with-cuda pulls the CUDA runtime wheels
     "jax-cuda13-pjrt==0.10.2",
 ]
 dev = [

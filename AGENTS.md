@@ -67,11 +67,17 @@ keep XLA's fusion around them.
 conda activate pyroffi            # never the base env
 git submodule update --init --recursive
 git -C external/GRiM/external/GRiD/external/GLASS checkout 9a24f37   # temporary, see below
+pip install -r requirements.txt   # pyroffi[cuda] + GRiM, GRiD, mantis, cudals, all editable
+bash build_kernels/build_all.sh   # world-side kernels; roboGPU skipped without OPTIX_SDK
 export XLA_PYTHON_CLIENT_PREALLOCATE=false MUJOCO_GL=egl
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv
 CUDA_VISIBLE_DEVICES=<free idx> python -m pytest tests -q
 ruff format --check . && pyright   # CI: formatting.yml, pyright.yml, pytest.yml
 ```
+
+`pip install -e .` alone installs only pyroffi (and refuses to without the submodules): pip
+can't install dependencies editable, and GRiM/mantis/GRiD find GLASS and GRiD by repo-relative
+paths, so non-editable copies break. Keep them in `requirements.txt`.
 
 The manual GLASS checkout is temporary. GRiM's mantis IK block tier needs GLASS's
 restricted-caller fix, which upstream GRiD doesn't pin yet (`OPEN_TASKS.md`). Without it,

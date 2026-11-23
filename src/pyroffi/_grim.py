@@ -2,8 +2,9 @@
 
 GRiM (``commalab/GRiM``) holds every CUDA kernel pyroffi launches for dynamics, IK, trajectory
 optimization and robot-side collision; it builds on GRiD (A2R-Lab/GRiD, GRiM's ``external/GRiD``
-submodule), which generates the dynamics. GRiM lives in ``external/GRiM`` as a source checkout,
-not a pip install: the ``grim`` package is under ``bindings/``, and importing it puts GRiD's
+submodule), which generates the dynamics. GRiM lives in ``external/GRiM``;
+``pip install -r requirements.txt`` installs it (with GRiD and mantis) editable from there. Without
+that install, the ``grim`` package is still found under ``bindings/``, and importing it puts GRiD's
 ``grid_codegen`` and peer packages on ``sys.path``. ``PYROFFI_GRIM_PATH`` overrides the
 checkout location.
 
